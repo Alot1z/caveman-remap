@@ -6,6 +6,8 @@ Usage:
     python scripts/compress.py <filepath>
 """
 
+import contextlib
+import hashlib
 import os
 import re
 import shutil
@@ -13,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import List
 
@@ -68,28 +71,110 @@ SENSITIVE_NAME_TOKENS = (
 )
 
 
+def _state_base_dir(kind: str) -> Path:
+    """Resolve the platform-aware base dir for caveman-compress's own state
+    (backups, locks). Shared by every state kind so the platform-detection
+    logic (Windows vs XDG) lives in one place.
+      - Windows: %LOCALAPPDATA%\\caveman-compress\\<kind>
+      - else:    $XDG_DATA_HOME/caveman-compress/<kind> if set,
+                 else ~/.local/share/caveman-compress/<kind>
+    """
+    if os.name == "nt" or sys.platform == "win32":
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
+    else:
+        xdg = os.environ.get("XDG_DATA_HOME")
+        base = Path(xdg) if xdg else Path.home() / ".local" / "share"
+    return base / "caveman-compress" / kind
+
+
 def backup_dir_for(filepath: Path) -> Path:
     """Resolve the out-of-tree backup directory for a given source file.
 
     Backups must live OUTSIDE the source directory so skill auto-loaders
     (Claude Code rules/, opencode instructions/, etc.) stop re-ingesting the
-    `.original.md` copies as live files. Base dir is platform-aware:
-      - Windows: %LOCALAPPDATA%\\caveman-compress\\backups
-      - else:    $XDG_DATA_HOME/caveman-compress/backups if set,
-                 else ~/.local/share/caveman-compress/backups
-
-    The source file's parent-dir name is mirrored under the base to reduce
-    cross-project collisions (e.g. two `task.md` files in different repos).
+    `.original.md` copies as live files. The source file's parent-dir name is
+    mirrored under the base to reduce cross-project collisions (e.g. two
+    `task.md` files in different repos).
     """
-    if os.name == "nt" or sys.platform == "win32":
-        local_appdata = os.environ.get("LOCALAPPDATA")
-        base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
-        base = base / "caveman-compress" / "backups"
-    else:
-        xdg = os.environ.get("XDG_DATA_HOME")
-        base = Path(xdg) if xdg else Path.home() / ".local" / "share"
-        base = base / "caveman-compress" / "backups"
-    return base / filepath.parent.name
+    return _state_base_dir("backups") / filepath.parent.name
+
+
+LOCK_STALE_SECONDS = 10 * 60  # crashed/killed process: long enough to outlast a slow Claude call + one retry, short enough not to wedge a repo indefinitely
+LOCK_WAIT_SECONDS = 120  # how long to wait for another session's in-progress compress before giving up
+LOCK_POLL_INTERVAL = 1.0
+
+
+class LockTimeoutError(RuntimeError):
+    """Raised when another process holds the compress lock past LOCK_WAIT_SECONDS."""
+
+
+def lock_path_for(filepath: Path) -> Path:
+    """Resolve the cross-session lock file path for a given (resolved) source file.
+
+    Keyed by a hash of the full resolved path, not just the basename, so two
+    different files that happen to share a name (e.g. two `task.md` in
+    different repos) never contend for the same lock, while two concurrent
+    compress runs against the *same* file always do.
+    """
+    digest = hashlib.sha256(str(filepath).encode("utf-8")).hexdigest()[:16]
+    lock_dir = _state_base_dir("locks")
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    return lock_dir / f"{filepath.stem}-{digest}.lock"
+
+
+def _steal_stale_lock(lock_path: Path) -> bool:
+    """Remove lock_path if it's older than LOCK_STALE_SECONDS (abandoned by a
+    crashed or killed process). Returns True if the lock is now gone."""
+    try:
+        age = time.time() - lock_path.stat().st_mtime
+    except OSError:
+        return True  # already gone (e.g. the lock holder released it between our failed open and this stat)
+    if age > LOCK_STALE_SECONDS:
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+        return True
+    return False
+
+
+@contextlib.contextmanager
+def file_lock(filepath: Path):
+    """Cross-session, cross-platform exclusive lock keyed on ``filepath``.
+
+    Two Claude Code sessions calling compress_file on the same target
+    concurrently would otherwise interleave reads/writes of the same file —
+    one session's finished edit can get silently clobbered by the other's
+    compression pass, or the two writes can interleave into corrupt content.
+    ``os.O_CREAT | os.O_EXCL`` is an atomic "create only if absent" on both
+    POSIX and Windows, so it works as a lock with no extra dependency.
+    """
+    lock_path = lock_path_for(filepath)
+    deadline = time.monotonic() + LOCK_WAIT_SECONDS
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w") as f:
+                f.write(f"{os.getpid()} {time.time()}")
+            break
+        except FileExistsError:
+            if _steal_stale_lock(lock_path):
+                continue  # stale lock cleared, retry immediately
+            if time.monotonic() >= deadline:
+                raise LockTimeoutError(
+                    f"Another caveman-compress run appears to be compressing {filepath} "
+                    f"(lock: {lock_path}). Giving up after {LOCK_WAIT_SECONDS}s — retry once "
+                    "it finishes, or remove the lock file by hand if you know it's stale."
+                )
+            time.sleep(LOCK_POLL_INTERVAL)
+    try:
+        yield
+    finally:
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
 
 
 def is_sensitive_path(filepath: Path) -> bool:
@@ -275,8 +360,17 @@ Return ONLY the fixed compressed file. No explanation.
 
 
 def compress_file(filepath: Path) -> bool:
-    # Resolve and validate path
+    # Resolve first so the lock and every check below key off the same
+    # canonical path regardless of how the caller spelled it.
     filepath = filepath.resolve()
+    with file_lock(filepath):
+        return _compress_file_locked(filepath)
+
+
+def _compress_file_locked(filepath: Path) -> bool:
+    # Entire read-modify-write-validate-retry sequence below runs under
+    # compress_file's file_lock — nothing here executes without holding the
+    # lock for this exact resolved path.
     MAX_FILE_SIZE = 500_000  # 500KB
     if not filepath.exists():
         raise FileNotFoundError(f"File not found: {filepath}")

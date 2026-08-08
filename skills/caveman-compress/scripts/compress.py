@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import List
 
 _IS_WINDOWS = os.name == "nt" or sys.platform == "win32"
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # unix-only; refuses to open through a pre-placed symlink at the lock path
 
 if _IS_WINDOWS:
     import msvcrt
@@ -135,7 +136,7 @@ def file_lock(filepath: Path):
     """Cross-session exclusive lock on filepath's resolved path, backed by the OS's own file lock (fcntl.flock on POSIX, msvcrt.locking on Windows) — a crashed or killed holder releases it automatically, so unlike a hand-rolled marker file there's no staleness bookkeeping to get wrong."""
     lock_path = lock_path_for(filepath)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | _O_NOFOLLOW)
     try:
         if os.fstat(fd).st_size == 0:
             os.write(fd, b"\0")  # msvcrt.locking needs at least one byte in the file to lock

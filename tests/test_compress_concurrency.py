@@ -106,6 +106,22 @@ class FileLockTests(unittest.TestCase):
                 # The OS releases the lock the instant the holder's fd closes — must succeed near-instantly, not wait out the budget.
                 self.assertLess(time.monotonic() - start, 2)
 
+    @unittest.skipIf(compress_mod._IS_WINDOWS, "O_NOFOLLOW is POSIX-only")
+    def test_refuses_to_open_through_a_symlinked_lock_path(self):
+        with tempfile.TemporaryDirectory() as data_home, tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
+                target = Path("/tmp/whatever/CLAUDE.md")
+                lock_path = compress_mod.lock_path_for(target)
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+                decoy = Path(tmp) / "decoy"
+                decoy.write_text("do not touch")
+                lock_path.symlink_to(decoy)
+
+                with self.assertRaises(OSError):
+                    with compress_mod.file_lock(target):
+                        pass  # pragma: no cover - must never be reached
+                self.assertEqual(decoy.read_text(), "do not touch")
+
     def test_fresh_lock_not_stolen_and_times_out(self):
         with tempfile.TemporaryDirectory() as data_home:
             with mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):

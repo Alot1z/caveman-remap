@@ -13,6 +13,10 @@
 </p>
 
 <p align="center">
+  <a href="https://trendshift.io/repositories/25391?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-25391" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/25391" alt="JuliusBrussee%2Fcaveman | Trendshift" width="250" height="55"/></a>
+</p>
+
+<p align="center">
   <a href="https://github.com/JuliusBrussee/caveman/stargazers"><img src="https://img.shields.io/github/stars/JuliusBrussee/caveman?style=flat&color=yellow" alt="Stars"></a>
   <a href="./INSTALL.md"><img src="https://img.shields.io/badge/works_with-30%2B_agents-orange?style=flat" alt="30+ agents"></a>
   <a href="https://github.com/JuliusBrussee/caveman/commits/main"><img src="https://img.shields.io/github/last-commit/JuliusBrussee/caveman?style=flat" alt="Last commit"></a>
@@ -97,15 +101,7 @@ irm https://raw.githubusercontent.com/JuliusBrussee/caveman/main/install.ps1 | i
 
 ~30 seconds. Needs Node ≥18. Skips agents you no have. Safe to re-run.
 
-> [!TIP]
-> **Turn it on:** type `/caveman` or say *"talk like caveman"*. **Turn it off:** say *"normal mode"*. On Claude Code, Codex, and Gemini it's already on from message one. No command needed.
-
-<details>
-<summary><strong>Install for one agent, or any of 30+ others</strong></summary>
-
-<br>
-
-Every agent has its own path (plugin, extension, rule file, or `npx skills add`). The full per-agent matrix, all flags, dry-run, and uninstall live in **[INSTALL.md](./INSTALL.md)**. A few common ones:
+Prefer one agent at a time? Each has its own path:
 
 ```bash
 # Claude Code plugin
@@ -118,9 +114,12 @@ gemini extensions install https://github.com/JuliusBrussee/caveman --consent
 npx skills add JuliusBrussee/caveman -a cursor
 ```
 
-**Install broke?** Open your agent in this repo and say: *"Read CLAUDE.md and INSTALL.md, install caveman for me."* Agent read repo, agent fix own brain. Snake eat tail.
+The full per-agent matrix, all flags, dry-run, and uninstall live in **[INSTALL.md](./INSTALL.md)**.
 
-</details>
+> [!TIP]
+> **Turn it on:** type `/caveman` or say *"talk like caveman"*. **Turn it off:** say *"normal mode"*. On Claude Code, Codex, and Gemini it's already on from message one. No command needed.
+
+**Install broke?** Open your agent in this repo and say: *"Read CLAUDE.md and INSTALL.md, install caveman for me."* Agent read repo, agent fix own brain. Snake eat tail.
 
 ## Pick your grunt
 

@@ -1,11 +1,4 @@
-"""Tests for the cross-session compress lock (concurrency corruption bug).
-
-Two Claude Code sessions running caveman-compress against the same
-CLAUDE.md concurrently used to interleave reads/writes with no coordination:
-one session's finished edit could get silently clobbered by the other's
-in-flight compression pass. `file_lock` serializes access per resolved
-target path so only one compress run touches a given file at a time.
-"""
+"""Tests for the cross-session compress lock — without it, two concurrent caveman-compress runs on the same file interleave reads/writes and silently corrupt output; file_lock serializes access per resolved target path."""
 
 import os
 import sys
@@ -23,15 +16,23 @@ from scripts import compress as compress_mod  # noqa: E402
 
 
 class LockPathTests(unittest.TestCase):
-    def test_same_resolved_path_yields_same_lock_path(self):
-        with tempfile.TemporaryDirectory() as data_home:
+    def test_relative_and_resolved_spellings_of_same_file_yield_same_lock_path(self):
+        with tempfile.TemporaryDirectory() as data_home, tempfile.TemporaryDirectory() as tmp:
             with mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
-                p = Path("/tmp/some/dir/task.md")
-                self.assertEqual(compress_mod.lock_path_for(p), compress_mod.lock_path_for(p))
+                target_dir = Path(tmp) / "sub"
+                target_dir.mkdir()
+                (target_dir / "task.md").write_text("x")
+                resolved = (target_dir / "task.md").resolve()
+                relative_cwd = os.getcwd()
+                try:
+                    os.chdir(tmp)
+                    via_relative = compress_mod.lock_path_for(Path("sub/task.md"))
+                finally:
+                    os.chdir(relative_cwd)
+                self.assertEqual(via_relative, compress_mod.lock_path_for(resolved))
 
     def test_same_basename_different_dirs_yields_different_lock_paths(self):
-        # Two repos each with their own CLAUDE.md must never contend for the
-        # same lock — only two runs against the *same* file should.
+        # Two repos each with their own CLAUDE.md must never contend for the same lock — only same-file runs should.
         with tempfile.TemporaryDirectory() as data_home:
             with mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
                 a = compress_mod.lock_path_for(Path("/repo-a/CLAUDE.md"))
@@ -64,74 +65,89 @@ class FileLockTests(unittest.TestCase):
                 t2.start()
                 t1.join(timeout=5)
                 t2.join(timeout=5)
+                self.assertFalse(t1.is_alive())
+                self.assertFalse(t2.is_alive())
 
                 self.assertEqual(len(released_first_at), 1)
                 self.assertEqual(len(acquired_second_at), 1)
-                # The second lock must not be acquired before the first is released —
-                # this is the exact race that let two sessions interleave writes.
+                # The second lock must not be acquired before the first is released — this is the exact race that let two sessions interleave writes.
                 self.assertGreaterEqual(acquired_second_at[0], released_first_at[0])
 
-    def test_lock_file_removed_after_release(self):
+    def test_lock_file_persists_but_is_unlocked_after_release(self):
         with tempfile.TemporaryDirectory() as data_home:
             with mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
                 target = Path("/tmp/whatever/CLAUDE.md")
                 lock_path = compress_mod.lock_path_for(target)
                 with compress_mod.file_lock(target):
                     self.assertTrue(lock_path.exists())
-                self.assertFalse(lock_path.exists())
+                # OS-native locks are held on the open file description, not the file's existence — the marker file itself is never deleted.
+                self.assertTrue(lock_path.exists())
+                start = time.monotonic()
+                with compress_mod.file_lock(target):
+                    pass
+                self.assertLess(time.monotonic() - start, 1)
 
-    def test_stale_lock_reclaimed_without_waiting_full_timeout(self):
+    def test_crashed_holder_lock_released_by_os_on_close(self):
         with tempfile.TemporaryDirectory() as data_home:
             with mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
                 target = Path("/tmp/whatever/CLAUDE.md")
                 lock_path = compress_mod.lock_path_for(target)
-                lock_path.write_text("99999 0")
-                stale_mtime = time.time() - (compress_mod.LOCK_STALE_SECONDS + 5)
-                os.utime(lock_path, (stale_mtime, stale_mtime))
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+                os.write(fd, b"\0")
+                os.lseek(fd, 0, 0)
+                compress_mod._try_lock_nonblocking(fd)
+                os.close(fd)  # simulates the holder process crashing/being killed without a clean unlock
 
                 start = time.monotonic()
                 with mock.patch.object(compress_mod, "LOCK_WAIT_SECONDS", 30):
                     with compress_mod.file_lock(target):
                         pass
-                elapsed = time.monotonic() - start
-                # Should reclaim near-instantly, not wait anywhere close to the
-                # (mocked, still generous) 30s wait budget.
-                self.assertLess(elapsed, 2)
+                # The OS releases the lock the instant the holder's fd closes — must succeed near-instantly, not wait out the budget.
+                self.assertLess(time.monotonic() - start, 2)
 
     def test_fresh_lock_not_stolen_and_times_out(self):
         with tempfile.TemporaryDirectory() as data_home:
             with mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
                 target = Path("/tmp/whatever/CLAUDE.md")
-                lock_path = compress_mod.lock_path_for(target)
-                lock_path.write_text(f"{os.getpid()} {time.time()}")
+                held = threading.Event()
+                release = threading.Event()
 
-                with mock.patch.object(compress_mod, "LOCK_WAIT_SECONDS", 0.2), \
-                     mock.patch.object(compress_mod, "LOCK_POLL_INTERVAL", 0.02):
-                    with self.assertRaises(compress_mod.LockTimeoutError):
-                        with compress_mod.file_lock(target):
-                            pass  # pragma: no cover - must never be reached
+                def hold():
+                    with compress_mod.file_lock(target):
+                        held.set()
+                        release.wait(timeout=5)
+
+                holder = threading.Thread(target=hold)
+                holder.start()
+                held.wait(timeout=5)
+                try:
+                    with mock.patch.object(compress_mod, "LOCK_WAIT_SECONDS", 0.2), \
+                         mock.patch.object(compress_mod, "LOCK_POLL_INTERVAL", 0.02):
+                        with self.assertRaises(compress_mod.LockTimeoutError):
+                            with compress_mod.file_lock(target):
+                                pass  # pragma: no cover - must never be reached
+                finally:
+                    release.set()
+                    holder.join(timeout=5)
+                self.assertFalse(holder.is_alive())
 
     def test_lock_released_on_exception_inside_block(self):
         with tempfile.TemporaryDirectory() as data_home:
             with mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
                 target = Path("/tmp/whatever/CLAUDE.md")
-                lock_path = compress_mod.lock_path_for(target)
                 with self.assertRaises(ValueError):
                     with compress_mod.file_lock(target):
                         raise ValueError("boom")
-                self.assertFalse(lock_path.exists())
+                start = time.monotonic()
+                with compress_mod.file_lock(target):
+                    pass
+                self.assertLess(time.monotonic() - start, 1)
 
 
 class CompressFileLockIntegrationTests(unittest.TestCase):
     def test_concurrent_compress_calls_serialize_instead_of_interleaving(self):
-        # Two threads calling compress_file on the SAME file concurrently used
-        # to interleave reads/writes with no coordination. With the lock, the
-        # second call only starts once the first has fully finished (backup
-        # written, target written, lock released) — so it deterministically
-        # hits the existing "backup already exists" guard instead of racing
-        # the first call's in-flight write. Neither outcome is corruption;
-        # what matters is there's exactly one call_claude invocation (no
-        # overlap) and the target ends up with the first call's clean output.
+        # Two threads on the SAME file used to interleave; the lock instead serializes them so exactly one call_claude runs.
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as data_home:
             with mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
                 original = "# Heading\n\nProse to compress, long enough to pass the identity check here.\n"
@@ -162,15 +178,15 @@ class CompressFileLockIntegrationTests(unittest.TestCase):
                 t2.start()
                 t1.join(timeout=10)
                 t2.join(timeout=10)
+                self.assertFalse(t1.is_alive())
+                self.assertFalse(t2.is_alive())
 
-                # Exactly one compression ever ran — the lock prevented the
-                # second thread from ever reading/writing the file while the
-                # first was mid-flight. That's what closes the actual race.
+                # Exactly one compression ran — the lock stopped the second thread from touching the file while the first was mid-flight.
                 self.assertEqual(len(call_starts), 1)
                 self.assertEqual(len(results), 2)
                 self.assertEqual(sorted(results), [False, True])
                 self.assertEqual(path.read_text(encoding="utf-8"), compressed)
-                self.assertFalse(lock_path.exists())
+                self.assertTrue(lock_path.exists())
 
 
 if __name__ == "__main__":

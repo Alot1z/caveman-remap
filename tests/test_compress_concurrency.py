@@ -32,24 +32,31 @@ class LockPathTests(unittest.TestCase):
                 self.assertEqual(via_relative, compress_mod.lock_path_for(resolved))
 
     def test_same_basename_different_dirs_yields_different_lock_paths(self):
-        # Two repos each with their own CLAUDE.md must never contend for the same lock — only same-file runs should.
+        # repo-a and repo-b differ in parent-dir name, so their backup paths differ too — only files whose backup path would collide should share a lock.
         with tempfile.TemporaryDirectory() as data_home:
             with mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
                 a = compress_mod.lock_path_for(Path("/repo-a/CLAUDE.md"))
                 b = compress_mod.lock_path_for(Path("/repo-b/CLAUDE.md"))
                 self.assertNotEqual(a, b)
 
-    def test_same_parent_dir_name_and_stem_share_lock_path(self):
-        # backup_dir_for keys its own collision guard on parent-dir-name + stem only (not the full path); the lock must share that domain or both processes can pass the "backup already exists" guard before either has written.
+    def test_different_stems_in_same_parent_dir_yield_different_lock_paths(self):
+        # Negative case for the domain fix: same parent-dir name alone must not over-coarsen the key — two distinct files in the same directory still need separate locks.
         with tempfile.TemporaryDirectory() as data_home:
             with mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
                 a = compress_mod.lock_path_for(Path("/repo-a/docs/task.md"))
-                b = compress_mod.lock_path_for(Path("/repo-b/docs/task.md"))
+                b = compress_mod.lock_path_for(Path("/repo-a/docs/other.md"))
+                self.assertNotEqual(a, b)
+
+    def test_same_parent_dir_name_and_stem_share_lock_path(self):
+        # backup_dir_for keys its own collision guard on parent-dir-name + stem only (not the full path); the lock must share that domain or both processes can pass the "backup already exists" guard before either has written. task.md vs task.txt is the sharpest real case: same stem, same backup filename, different source extension.
+        with tempfile.TemporaryDirectory() as data_home:
+            with mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
+                a = compress_mod.lock_path_for(Path("/repo-a/docs/task.md"))
+                b = compress_mod.lock_path_for(Path("/repo-b/docs/task.txt"))
                 self.assertEqual(a, b)
-                self.assertEqual(
-                    compress_mod.backup_dir_for(Path("/repo-a/docs/task.md")),
-                    compress_mod.backup_dir_for(Path("/repo-b/docs/task.md")),
-                )
+                backup_a = compress_mod.backup_dir_for(Path("/repo-a/docs/task.md")) / "task.original.md"
+                backup_b = compress_mod.backup_dir_for(Path("/repo-b/docs/task.txt")) / "task.original.md"
+                self.assertEqual(backup_a, backup_b)
 
 
 class FileLockTests(unittest.TestCase):
@@ -71,12 +78,13 @@ class FileLockTests(unittest.TestCase):
                         with compress_mod.file_lock(target):
                             acquired_second_at.append(time.monotonic())
 
-                t1 = threading.Thread(target=hold_first)
-                t2 = threading.Thread(target=try_second)
-                t1.start()
-                t2.start()
-                t1.join(timeout=5)
-                t2.join(timeout=5)
+                t1 = threading.Thread(target=hold_first, daemon=True)
+                t2 = threading.Thread(target=try_second, daemon=True)
+                with mock.patch.object(compress_mod, "LOCK_WAIT_SECONDS", 2):  # a lock regression should fail this test in ~2s, not block the run for the real 900s default
+                    t1.start()
+                    t2.start()
+                    t1.join(timeout=5)
+                    t2.join(timeout=5)
                 self.assertFalse(t1.is_alive())
                 self.assertFalse(t2.is_alive())
 
@@ -215,13 +223,14 @@ class CompressFileLockIntegrationTests(unittest.TestCase):
                          mock.patch.object(compress_mod, "validate", return_value=valid):
                         results.append(compress_mod.compress_file(path))
 
-                t1 = threading.Thread(target=run)
-                t2 = threading.Thread(target=run)
-                t1.start()
-                time.sleep(0.05)  # ensure t1 acquires the lock first
-                t2.start()
-                t1.join(timeout=10)
-                t2.join(timeout=10)
+                t1 = threading.Thread(target=run, daemon=True)
+                t2 = threading.Thread(target=run, daemon=True)
+                with mock.patch.object(compress_mod, "LOCK_WAIT_SECONDS", 2):  # a lock regression should fail this test in ~2s, not block the run for the real 900s default
+                    t1.start()
+                    time.sleep(0.05)  # ensure t1 acquires the lock first
+                    t2.start()
+                    t1.join(timeout=10)
+                    t2.join(timeout=10)
                 self.assertFalse(t1.is_alive())
                 self.assertFalse(t2.is_alive())
 

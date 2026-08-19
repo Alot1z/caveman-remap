@@ -104,7 +104,7 @@ def backup_dir_for(filepath: Path) -> Path:
     return _state_base_dir("backups") / filepath.parent.name
 
 
-LOCK_WAIT_SECONDS = 900  # a single compress round-trips the LLM up to MAX_RETRIES+1 times; measured ~78s per call on a 26KB file, so 120s hard-failed a healthy run on anything near the 500KB cap
+LOCK_WAIT_SECONDS = 900  # measured ~78s for a single Claude call on a 26KB file; a run can make up to MAX_RETRIES+1 such calls, so 120s hard-failed healthy runs well before the 500KB size cap
 LOCK_POLL_INTERVAL = 1.0
 
 
@@ -113,10 +113,10 @@ class LockTimeoutError(RuntimeError):
 
 
 def lock_path_for(filepath: Path) -> Path:
-    """Cross-session lock path keyed on the same (parent-dir-name, stem) domain backup_dir_for uses for its own collision guard — two source files that would write the same backup path must also serialize on the same lock, not just same-full-path runs of the same file. The key is hashed rather than embedded as plaintext so a lock for a file later refused as sensitive (e.g. id_rsa) doesn't leak its name into a world-readable state directory."""
+    """Cross-session lock path keyed on the same (parent-dir-name, stem) identity backup_dir_for uses for its own collision guard, derived from backup_dir_for itself so the two can't drift apart — two source files that would write the same backup path must also serialize on the same lock. The key is hashed rather than embedded as plaintext so a lock for a file later refused as sensitive (e.g. id_rsa) doesn't leak its name into a world-readable state directory."""
     resolved = filepath.resolve()
-    key = f"{resolved.parent.name}/{resolved.stem}"
-    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    backup_path = backup_dir_for(resolved) / (resolved.stem + ".original.md")
+    digest = hashlib.sha256(str(backup_path).encode("utf-8")).hexdigest()[:16]
     return _state_base_dir("locks") / f"{digest}.lock"
 
 
@@ -149,7 +149,7 @@ def file_lock(filepath: Path):
     """Cross-session exclusive lock on filepath's resolved path, backed by the OS's own file lock (fcntl.flock on POSIX, msvcrt.locking on Windows) — a crashed or killed holder releases it automatically, so unlike a hand-rolled marker file there's no staleness bookkeeping to get wrong."""
     lock_path = lock_path_for(filepath)
     lock_dir = lock_path.parent
-    if lock_dir.is_symlink():  # mkdir(exist_ok=True) would silently follow a pre-staged symlink; _O_NOFOLLOW below only guards the final path component
+    if lock_dir.is_symlink():  # best-effort: catches a pre-staged symlink at this exact component; mkdir(exist_ok=True) would otherwise follow it, and _O_NOFOLLOW below only guards the final path component
         raise OSError(f"Refusing to use lock directory through a symlink: {lock_dir}")
     lock_dir.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | _O_NOFOLLOW, 0o600)
@@ -158,11 +158,15 @@ def file_lock(filepath: Path):
             os.write(fd, b"\0")  # msvcrt.locking needs at least one byte in the file to lock
         os.lseek(fd, 0, 0)
         deadline = time.monotonic() + LOCK_WAIT_SECONDS
+        printed_waiting = False
         while True:
             try:
                 _try_lock_nonblocking(fd)
                 break
             except BlockingIOError:
+                if not printed_waiting:  # 900s of silence reads as a hang; tell the user once why nothing's happening yet
+                    print(f"Waiting for another caveman-compress run to finish with {filepath}...")
+                    printed_waiting = True
                 if time.monotonic() >= deadline:
                     raise LockTimeoutError(
                         f"Another caveman-compress run appears to be compressing {filepath} "

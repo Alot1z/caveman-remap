@@ -170,7 +170,7 @@ class FileLockTests(unittest.TestCase):
                         held.set()
                         release.wait(timeout=5)
 
-                holder = threading.Thread(target=hold)
+                holder = threading.Thread(target=hold, daemon=True)
                 holder.start()
                 held.wait(timeout=5)
                 try:
@@ -225,7 +225,8 @@ class CompressFileLockIntegrationTests(unittest.TestCase):
 
                 t1 = threading.Thread(target=run, daemon=True)
                 t2 = threading.Thread(target=run, daemon=True)
-                with mock.patch.object(compress_mod, "LOCK_WAIT_SECONDS", 2):  # a lock regression should fail this test in ~2s, not block the run for the real 900s default
+                with mock.patch.object(compress_mod, "LOCK_WAIT_SECONDS", 2), \
+                     mock.patch.object(compress_mod, "LOCK_POLL_INTERVAL", 0.02):  # a lock regression should fail this test in ~2s, not block the run for the real 900s default; a 1s poll interval would leave only two attempts in that budget on a loaded CI box
                     t1.start()
                     time.sleep(0.05)  # ensure t1 acquires the lock first
                     t2.start()

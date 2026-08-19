@@ -164,15 +164,15 @@ def file_lock(filepath: Path):
                 _try_lock_nonblocking(fd)
                 break
             except BlockingIOError:
-                if not printed_waiting:  # 900s of silence reads as a hang; tell the user once why nothing's happening yet
-                    print(f"Waiting for another caveman-compress run to finish with {filepath}...")
-                    printed_waiting = True
                 if time.monotonic() >= deadline:
                     raise LockTimeoutError(
                         f"Another caveman-compress run appears to be compressing {filepath} "
                         f"(lock: {lock_path}). Giving up after {LOCK_WAIT_SECONDS}s — retry once "
                         "it finishes."
                     ) from None
+                if not printed_waiting:  # 900s of silence reads as a hang; tell the user once why nothing's happening yet. flush explicitly since stdout is a pipe when this script runs non-interactively
+                    print(f"Waiting for another caveman-compress run to finish with {filepath}...", flush=True)
+                    printed_waiting = True
                 time.sleep(LOCK_POLL_INTERVAL)
         try:
             yield

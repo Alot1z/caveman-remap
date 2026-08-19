@@ -7,6 +7,7 @@ Usage:
 """
 
 import contextlib
+import errno
 import hashlib
 import os
 import re
@@ -103,7 +104,7 @@ def backup_dir_for(filepath: Path) -> Path:
     return _state_base_dir("backups") / filepath.parent.name
 
 
-LOCK_WAIT_SECONDS = 120  # how long to wait for another session's in-progress compress before giving up
+LOCK_WAIT_SECONDS = 900  # a single compress round-trips the LLM up to MAX_RETRIES+1 times; measured ~78s per call on a 26KB file, so 120s hard-failed a healthy run on anything near the 500KB cap
 LOCK_POLL_INTERVAL = 1.0
 
 
@@ -112,9 +113,11 @@ class LockTimeoutError(RuntimeError):
 
 
 def lock_path_for(filepath: Path) -> Path:
-    """Cross-session lock path for filepath's resolved form, keyed by a hash of the full path (not basename) so same-named files in different repos never contend for the same lock."""
-    digest = hashlib.sha256(str(filepath.resolve()).encode("utf-8")).hexdigest()[:16]
-    return _state_base_dir("locks") / f"{filepath.stem}-{digest}.lock"
+    """Cross-session lock path keyed on the same (parent-dir-name, stem) domain backup_dir_for uses for its own collision guard — two source files that would write the same backup path must also serialize on the same lock, not just same-full-path runs of the same file. The key is hashed rather than embedded as plaintext so a lock for a file later refused as sensitive (e.g. id_rsa) doesn't leak its name into a world-readable state directory."""
+    resolved = filepath.resolve()
+    key = f"{resolved.parent.name}/{resolved.stem}"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    return _state_base_dir("locks") / f"{digest}.lock"
 
 
 def _try_lock_nonblocking(fd: int) -> None:
@@ -123,6 +126,8 @@ def _try_lock_nonblocking(fd: int) -> None:
         try:
             msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
         except OSError as e:
+            if e.errno != errno.EACCES:  # EACCES is LK_NBLCK's documented contention errno; anything else is a real failure (bad fd, permissions, AV lock) and must not be mistaken for another session holding the file
+                raise
             raise BlockingIOError(str(e)) from e
     else:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -143,8 +148,11 @@ def _unlock(fd: int) -> None:
 def file_lock(filepath: Path):
     """Cross-session exclusive lock on filepath's resolved path, backed by the OS's own file lock (fcntl.flock on POSIX, msvcrt.locking on Windows) — a crashed or killed holder releases it automatically, so unlike a hand-rolled marker file there's no staleness bookkeeping to get wrong."""
     lock_path = lock_path_for(filepath)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | _O_NOFOLLOW)
+    lock_dir = lock_path.parent
+    if lock_dir.is_symlink():  # mkdir(exist_ok=True) would silently follow a pre-staged symlink; _O_NOFOLLOW below only guards the final path component
+        raise OSError(f"Refusing to use lock directory through a symlink: {lock_dir}")
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | _O_NOFOLLOW, 0o600)
     try:
         if os.fstat(fd).st_size == 0:
             os.write(fd, b"\0")  # msvcrt.locking needs at least one byte in the file to lock

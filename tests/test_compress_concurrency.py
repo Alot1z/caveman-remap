@@ -1,4 +1,4 @@
-"""Tests for the cross-session compress lock — without it, two concurrent caveman-compress runs on the same file interleave reads/writes and silently corrupt output; file_lock serializes access per resolved target path."""
+"""Tests for the cross-session compress lock — without it, two concurrent caveman-compress runs on the same file interleave reads/writes and silently corrupt output; file_lock serializes access per (parent-dir-name, stem), matching backup_dir_for's own collision domain."""
 
 import os
 import sys
@@ -38,6 +38,18 @@ class LockPathTests(unittest.TestCase):
                 a = compress_mod.lock_path_for(Path("/repo-a/CLAUDE.md"))
                 b = compress_mod.lock_path_for(Path("/repo-b/CLAUDE.md"))
                 self.assertNotEqual(a, b)
+
+    def test_same_parent_dir_name_and_stem_share_lock_path(self):
+        # backup_dir_for keys its own collision guard on parent-dir-name + stem only (not the full path); the lock must share that domain or both processes can pass the "backup already exists" guard before either has written.
+        with tempfile.TemporaryDirectory() as data_home:
+            with mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
+                a = compress_mod.lock_path_for(Path("/repo-a/docs/task.md"))
+                b = compress_mod.lock_path_for(Path("/repo-b/docs/task.md"))
+                self.assertEqual(a, b)
+                self.assertEqual(
+                    compress_mod.backup_dir_for(Path("/repo-a/docs/task.md")),
+                    compress_mod.backup_dir_for(Path("/repo-b/docs/task.md")),
+                )
 
 
 class FileLockTests(unittest.TestCase):
@@ -121,6 +133,22 @@ class FileLockTests(unittest.TestCase):
                     with compress_mod.file_lock(target):
                         pass  # pragma: no cover - must never be reached
                 self.assertEqual(decoy.read_text(), "do not touch")
+
+    @unittest.skipIf(compress_mod._IS_WINDOWS, "creating dir symlinks needs elevated privilege on Windows")
+    def test_refuses_when_lock_dir_itself_is_a_symlink(self):
+        with tempfile.TemporaryDirectory() as data_home, tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
+                target = Path("/tmp/whatever/CLAUDE.md")
+                lock_dir = compress_mod.lock_path_for(target).parent
+                decoy_dir = Path(tmp) / "decoy_dir"
+                decoy_dir.mkdir()
+                lock_dir.parent.mkdir(parents=True, exist_ok=True)
+                lock_dir.symlink_to(decoy_dir)
+
+                with self.assertRaises(OSError):
+                    with compress_mod.file_lock(target):
+                        pass  # pragma: no cover - must never be reached
+                self.assertEqual(list(decoy_dir.iterdir()), [])
 
     def test_fresh_lock_not_stolen_and_times_out(self):
         with tempfile.TemporaryDirectory() as data_home:

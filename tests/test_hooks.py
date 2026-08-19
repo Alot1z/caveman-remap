@@ -2,12 +2,20 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+# The install.sh/uninstall.sh under test are the POSIX install path; Windows
+# installs go through install.ps1, so driving them via git-bash proves nothing.
+POSIX_SHELL_ONLY = unittest.skipIf(
+    sys.platform == "win32", "POSIX shell install path; Windows uses install.ps1"
+)
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+BASH = shutil.which("bash")
 
 
 class HookScriptTests(unittest.TestCase):
@@ -23,29 +31,36 @@ class HookScriptTests(unittest.TestCase):
             cwd=REPO_ROOT,
             env=env,
             text=True,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             check=True,
         )
 
+    @POSIX_SHELL_ONLY
     def test_install_upgrades_old_two_file_install(self):
+        if BASH is None:
+            self.skipTest("bash not found")
         with tempfile.TemporaryDirectory(prefix="caveman-hooks-upgrade-") as tmp:
             home = Path(tmp)
             hooks_dir = home / ".claude" / "hooks"
             hooks_dir.mkdir(parents=True)
-            (home / ".claude" / "settings.json").write_text("{}\n")
-            (hooks_dir / "caveman-activate.js").write_text("")
-            (hooks_dir / "caveman-mode-tracker.js").write_text("")
+            (home / ".claude" / "settings.json").write_text("{}\n", encoding="utf-8")
+            (hooks_dir / "caveman-activate.js").write_text("", encoding="utf-8")
+            (hooks_dir / "caveman-mode-tracker.js").write_text("", encoding="utf-8")
 
             self.run_cmd(["bash", "src/hooks/install.sh"], home)
 
             statusline = hooks_dir / "caveman-statusline.sh"
             self.assertTrue(statusline.exists(), "upgrade should install statusline script")
 
-            settings = json.loads((home / ".claude" / "settings.json").read_text())
+            settings = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
             self.assertIn("statusLine", settings)
             self.assertIn(str(statusline), settings["statusLine"]["command"])
 
+    @POSIX_SHELL_ONLY
     def test_install_reconfigures_missing_statusline(self):
+        if BASH is None:
+            self.skipTest("bash not found")
         with tempfile.TemporaryDirectory(prefix="caveman-hooks-statusline-") as tmp:
             home = Path(tmp)
             claude_dir = home / ".claude"
@@ -53,7 +68,7 @@ class HookScriptTests(unittest.TestCase):
             hooks_dir.mkdir(parents=True)
 
             for name in ("caveman-activate.js", "caveman-mode-tracker.js", "caveman-statusline.sh"):
-                (hooks_dir / name).write_text("")
+                (hooks_dir / name).write_text("", encoding="utf-8")
 
             settings = {
                 "hooks": {
@@ -79,17 +94,20 @@ class HookScriptTests(unittest.TestCase):
                     ],
                 }
             }
-            (claude_dir / "settings.json").write_text(json.dumps(settings, indent=2) + "\n")
+            (claude_dir / "settings.json").write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
 
             result = self.run_cmd(["bash", "src/hooks/install.sh"], home)
 
             self.assertNotIn("Nothing to do", result.stdout)
 
-            updated = json.loads((claude_dir / "settings.json").read_text())
+            updated = json.loads((claude_dir / "settings.json").read_text(encoding="utf-8"))
             self.assertIn("statusLine", updated)
             self.assertIn(str(hooks_dir / "caveman-statusline.sh"), updated["statusLine"]["command"])
 
+    @POSIX_SHELL_ONLY
     def test_uninstall_preserves_custom_statusline(self):
+        if BASH is None:
+            self.skipTest("bash not found")
         with tempfile.TemporaryDirectory(prefix="caveman-hooks-uninstall-") as tmp:
             home = Path(tmp)
             claude_dir = home / ".claude"
@@ -97,7 +115,7 @@ class HookScriptTests(unittest.TestCase):
             hooks_dir.mkdir(parents=True)
 
             for name in ("caveman-activate.js", "caveman-mode-tracker.js", "caveman-statusline.sh"):
-                (hooks_dir / name).write_text("")
+                (hooks_dir / name).write_text("", encoding="utf-8")
 
             settings = {
                 "statusLine": {
@@ -127,11 +145,11 @@ class HookScriptTests(unittest.TestCase):
                     ],
                 },
             }
-            (claude_dir / "settings.json").write_text(json.dumps(settings, indent=2) + "\n")
+            (claude_dir / "settings.json").write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
 
             self.run_cmd(["bash", "src/hooks/uninstall.sh"], home)
 
-            updated = json.loads((claude_dir / "settings.json").read_text())
+            updated = json.loads((claude_dir / "settings.json").read_text(encoding="utf-8"))
             self.assertEqual(
                 updated["statusLine"]["command"],
                 "bash /tmp/custom-status-with-caveman.sh",
@@ -152,13 +170,14 @@ class HookScriptTests(unittest.TestCase):
                         }
                     }
                 )
-                + "\n"
+                + "\n",
+                encoding="utf-8",
             )
 
             result = self.run_cmd(["node", "src/hooks/caveman-activate.js"], home)
 
             self.assertNotIn("STATUSLINE SETUP NEEDED", result.stdout)
-            self.assertEqual((claude_dir / ".caveman-active").read_text(), "full")
+            self.assertEqual((claude_dir / ".caveman-active").read_text(encoding="utf-8"), "full")
 
     # Regression for #587/#589 — hook at <root>/src/hooks/ must resolve SKILL.md
     # at <root>/skills/caveman/, not the nonexistent <root>/src/skills/.
@@ -188,7 +207,8 @@ class HookScriptTests(unittest.TestCase):
             skill_dir = claude_dir / "skills" / "caveman"
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text(
-                "---\nname: caveman\n---\nSTANDALONE MARKER RULESET\n"
+                "---\nname: caveman\n---\nSTANDALONE MARKER RULESET\n",
+                encoding="utf-8",
             )
 
             result = self.run_cmd(["node", str(hooks_dir / "caveman-activate.js")], home)
@@ -203,7 +223,8 @@ class HookScriptTests(unittest.TestCase):
             skill_dir = plugin_root / "skills" / "caveman"
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text(
-                "---\nname: caveman\n---\nPLUGIN ROOT MARKER RULESET\n"
+                "---\nname: caveman\n---\nPLUGIN ROOT MARKER RULESET\n",
+                encoding="utf-8",
             )
 
             result = self.run_cmd(

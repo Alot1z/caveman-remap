@@ -16,6 +16,14 @@ import tempfile
 from pathlib import Path
 from typing import List
 
+# Windows consoles default to cp1252, which cannot encode the emoji glyphs in
+# our status lines; replace unencodable characters instead of crashing.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except Exception:
+        pass
+
 OUTER_FENCE_REGEX = re.compile(
     r"\A\s*(`{3,}|~{3,})[^\n]*\n(.*)\n\1\s*\Z", re.DOTALL
 )
@@ -306,7 +314,6 @@ def compress_file(filepath: Path) -> bool:
     # re-ingest the `.original.md` copy as a live file. Mirror the source's
     # parent-dir name + stem under a platform-aware base to reduce collisions.
     backup_dir = backup_dir_for(filepath)
-    backup_dir.mkdir(parents=True, exist_ok=True)
     backup_path = backup_dir / (filepath.stem + ".original.md")
 
     if not original_text.strip():
@@ -355,6 +362,7 @@ def compress_file(filepath: Path) -> bool:
     # touching the input file. If the filesystem dropped bytes (encoding,
     # antivirus, disk full), unlink the bad backup and abort instead of
     # leaving the user with a corrupt backup + compressed primary.
+    backup_dir.mkdir(parents=True, exist_ok=True)
     write_text_atomic(backup_path, original_text)
     backup_readback = backup_path.read_text(encoding="utf-8", errors="ignore")
     if backup_readback != original_text:

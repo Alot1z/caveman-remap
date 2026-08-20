@@ -191,6 +191,24 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		if !compiledPlanAllowed {
 			break
 		}
+		// The epoch gate is STATEFUL: derivedEpochAllows re-anchors the stored
+		// prefix on every observe. Calling it twice per request — once with the
+		// client's original body, once with the transformed one — anchored turn
+		// N's baseline to bytes the client never sent, so turn N+1 compared the
+		// original against it, saw divergence, and skipped compression for the
+		// whole turn. That flipped the provider cache prefix the gate exists to
+		// protect, and on a wrapped session with the tool-schema strip enabled it
+		// alternated compression on/off every other turn. Evaluate ONCE, against
+		// the bytes the client actually sent, and reuse the answer. Still lazy:
+		// requests that never reach a transform never anchor.
+		epochChecked, epochOK := false, false
+		epochAllows := func() bool {
+			if !epochChecked {
+				epochChecked = true
+				epochOK = s.cacheEpochAllows(r, adapter, meta, body, evidence.SessionID)
+			}
+			return epochOK
+		}
 		// Subscription-classified traffic falls back to S0 passthrough whenever the
 		// live-zone conditions do not hold (operator off-switch, no schema-aware
 		// prefix stabilizer, no MCP recovery, no durable prefix cache) — the path
@@ -212,7 +230,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		// exclusively through the live-zone predicate above (which itself requires MCP
 		// recovery), so neither can ever compress with no way back to the elided bytes.
 		markerOnlyAllowed := (s.recoveryViaMCP && authMode != AuthModeOAuth && authMode != AuthModeSubscription) || nonPAYGLiveZone
-		if (markerOnlyAllowed || serverRetrieveAllowed) && s.cacheEpochAllows(r, adapter, meta, body, evidence.SessionID) {
+		if (markerOnlyAllowed || serverRetrieveAllowed) && epochAllows() {
 			// The request reached the compression path as a candidate. It is eligible
 			// whether or not compressRequest ultimately shrinks any bytes — the
 			// requests_eligible_for_compression denominator counts candidates, not wins.
@@ -241,7 +259,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		// rewrite admissible here. It runs last so its byte offsets are computed on
 		// the bytes actually going upstream, and it is skipped under a compiled
 		// Cave Build, whose transform set is locked to what evals approved.
-		if len(lockedRoutes) == 0 && s.toolSchemaStripAllowed(adapter, evidence.SessionID) && s.cacheEpochAllows(r, adapter, meta, transform.Body, evidence.SessionID) {
+		if len(lockedRoutes) == 0 && s.toolSchemaStripAllowed(adapter, evidence.SessionID) && epochAllows() {
 			if stripped, handle, ok := s.stripToolSchema(transform.Body, meta, requestID); ok {
 				transform.Body = stripped
 				transform.OptimizerIDs = append(transform.OptimizerIDs, toolSchemaStripOptimizerID)

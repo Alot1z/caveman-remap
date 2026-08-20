@@ -534,14 +534,19 @@ func (r *Runtime) startRepositoryEvidence(request Request) {
 	}
 	key := repositoryKey(request.Session)
 	r.repositoryMu.Lock()
+	// Check the bail-out BEFORE creating the entry. Inserting first meant a second
+	// CWD in an already-warming session left a repositoryMaps entry whose `done`
+	// was never closed (the warming goroutine below only starts when !exists), so
+	// the next request for that key blocked its waiter forever and
+	// repositoryWarming stayed true for the rest of the session.
+	if r.repositorySessionRefs[request.Session.ID] != "" || r.repositoryWarming[request.Session.ID] {
+		r.repositoryMu.Unlock()
+		return
+	}
 	entry, exists := r.repositoryMaps[key]
 	if !exists {
 		entry = &repositoryMapEntry{done: make(chan struct{})}
 		r.repositoryMaps[key] = entry
-	}
-	if r.repositorySessionRefs[request.Session.ID] != "" || r.repositoryWarming[request.Session.ID] {
-		r.repositoryMu.Unlock()
-		return
 	}
 	r.repositoryWarming[request.Session.ID] = true
 	r.repositoryMu.Unlock()

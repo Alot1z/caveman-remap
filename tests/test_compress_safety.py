@@ -272,3 +272,29 @@ class CompressSafetyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOuterWrapperStripping(unittest.TestCase):
+    """strip_llm_wrapper removes an outer ```markdown fence the model added
+    around the WHOLE output. It must not fire on a document that merely starts
+    and ends with a fence.
+
+    The old regex (\\A\\s*(fence)[^\\n]*\\n(.*)\\n\\1\\s*\\Z with DOTALL and a greedy
+    .*) never checked the two fences were the same block, so an ordinary README
+    section came back with its first and last fence markers deleted and its two
+    code blocks merged into prose. Validation then failed on both the compress
+    and the fix path, and the section was permanently uncompressible after three
+    paid API calls.
+    """
+
+    def test_two_separate_blocks_are_left_alone(self):
+        text = "```bash\nnpm install\n```\n\nSome prose.\n\n```bash\nnpm test\n```"
+        self.assertEqual(compress_mod.strip_llm_wrapper(text), text)
+
+    def test_a_real_wrapper_is_stripped(self):
+        text = "```markdown\n# Title\n\nbody text\n```"
+        self.assertEqual(compress_mod.strip_llm_wrapper(text), "# Title\n\nbody text")
+
+    def test_a_longer_wrapper_around_inner_fences_is_stripped(self):
+        text = "````markdown\n# Title\n\n```bash\nls\n```\n````"
+        self.assertEqual(compress_mod.strip_llm_wrapper(text), "# Title\n\n```bash\nls\n```")

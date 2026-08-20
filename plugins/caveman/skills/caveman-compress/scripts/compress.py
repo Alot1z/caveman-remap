@@ -24,9 +24,8 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-OUTER_FENCE_REGEX = re.compile(
-    r"\A\s*(`{3,}|~{3,})[^\n]*\n(.*)\n\1\s*\Z", re.DOTALL
-)
+# A fence marker at the start of a line, at CommonMark's 0-3 space indent.
+FENCE_LINE_REGEX = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 
 # YAML frontmatter: starts at file start with --- on its own line, ends with --- on its own line.
 # Captures the entire block (including delimiters and trailing newline) and the body after.
@@ -114,11 +113,41 @@ def is_sensitive_path(filepath: Path) -> bool:
 
 
 def strip_llm_wrapper(text: str) -> str:
-    """Strip outer ```markdown ... ``` fence when it wraps the entire output."""
-    m = OUTER_FENCE_REGEX.match(text)
-    if m:
-        return m.group(2)
-    return text
+    r"""Strip an outer ```markdown ... ``` fence when it wraps the ENTIRE output.
+
+    The wrapper is only real when the first and last fence lines are the SAME
+    block. The old regex (``\A\s*(fence)[^\n]*\n(.*)\n\1\s*\Z`` with DOTALL and
+    a greedy ``.*``) never checked that: it matched any document that merely
+    STARTS and ENDS with a fence line. An ordinary README section —
+    ```bash npm install``` , prose, ```bash npm test``` — came back with its
+    first and last fence markers deleted and its two code blocks merged into
+    prose, so validation failed on both the compress and the fix path and the
+    section was permanently uncompressible after three paid API calls.
+    """
+    lines = text.split("\n")
+    first, last = 0, len(lines) - 1
+    while first < len(lines) and not lines[first].strip():
+        first += 1
+    while last > first and not lines[last].strip():
+        last -= 1
+    if first >= last:
+        return text
+    opener = FENCE_LINE_REGEX.match(lines[first])
+    closer = FENCE_LINE_REGEX.match(lines[last])
+    if not opener or not closer:
+        return text
+    marker = opener.group(1)
+    # Closing fence: same character, at least as long, and nothing else on the line.
+    if closer.group(1)[0] != marker[0] or len(closer.group(1)) < len(marker):
+        return text
+    if lines[last].strip() != closer.group(1):
+        return text
+    # Any fence of the same kind in between means these two are not one block.
+    for line in lines[first + 1:last]:
+        inner = FENCE_LINE_REGEX.match(line)
+        if inner and inner.group(1)[0] == marker[0] and len(inner.group(1)) >= len(marker):
+            return text
+    return "\n".join(lines[first + 1:last])
 
 
 def write_text_atomic(path: Path, text: str, newline: str = "\n") -> None:
@@ -291,6 +320,7 @@ Compress this markdown into caveman format.
 
 STRICT RULES:
 - Do NOT modify anything inside ``` code blocks
+- Do NOT modify anything inside a 4-space-indented code block either — those are code too, and they are validated
 - Do NOT modify anything inside inline backticks
 - Preserve ALL URLs exactly
 - Preserve ALL headings exactly

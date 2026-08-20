@@ -54,6 +54,12 @@ README_PATH = REPO_DIR / "README.md"
 RESULTS_DIR = SCRIPT_DIR / "results"
 
 NORMAL_SYSTEM = "You are a helpful assistant."
+# The control arm. Without it this script measures caveman against an UNPROMPTED
+# baseline, which is exactly the conflation evals/llm_run.py was built to prevent:
+# "how much of the reduction is the skill, and how much is any 'be terse'
+# instruction?" A baseline-only comparison credits the skill for both. Same string
+# the eval harness uses (evals/llm_run.py TERSE_PREFIX) so the two agree.
+TERSE_SYSTEM = "Answer concisely."
 BENCHMARK_START = "<!-- BENCHMARK-TABLE-START -->"
 BENCHMARK_END = "<!-- BENCHMARK-TABLE-END -->"
 
@@ -110,10 +116,15 @@ def run_benchmarks(client, model, prompts, caveman_system, trials):
             "category": prompt_entry["category"],
             "prompt": prompt_text,
             "normal": [],
+            "terse": [],
             "caveman": [],
         }
 
-        for mode, system in [("normal", NORMAL_SYSTEM), ("caveman", caveman_system)]:
+        for mode, system in [
+            ("normal", NORMAL_SYSTEM),
+            ("terse", TERSE_SYSTEM),
+            ("caveman", caveman_system),
+        ]:
             for t in range(1, trials + 1):
                 print(
                     f"  [{i}/{total}] {pid} | {mode} | trial {t}/{trials}",
@@ -129,43 +140,61 @@ def run_benchmarks(client, model, prompts, caveman_system, trials):
 
 
 def compute_stats(results):
+    """Per-task medians plus BOTH deltas: caveman vs terse (the honest one, what
+    the skill adds over any 'be terse' instruction) and caveman vs the unprompted
+    baseline (what the two arms together achieve)."""
     rows = []
     all_savings = []
+    all_savings_vs_terse = []
 
     for entry in results:
-        normal_medians = statistics.median(
-            [t["output_tokens"] for t in entry["normal"]]
-        )
-        caveman_medians = statistics.median(
-            [t["output_tokens"] for t in entry["caveman"]]
-        )
-        savings = 1 - (caveman_medians / normal_medians) if normal_medians > 0 else 0
+        normal_median = statistics.median([t["output_tokens"] for t in entry["normal"]])
+        terse_median = statistics.median([t["output_tokens"] for t in entry["terse"]])
+        caveman_median = statistics.median([t["output_tokens"] for t in entry["caveman"]])
+        savings = 1 - (caveman_median / normal_median) if normal_median > 0 else 0
+        savings_vs_terse = 1 - (caveman_median / terse_median) if terse_median > 0 else 0
         all_savings.append(savings)
+        all_savings_vs_terse.append(savings_vs_terse)
 
         rows.append(
             {
                 "id": entry["id"],
                 "category": entry["category"],
                 "prompt": entry["prompt"],
-                "normal_median": int(normal_medians),
-                "caveman_median": int(caveman_medians),
+                "normal_median": int(normal_median),
+                "terse_median": int(terse_median),
+                "caveman_median": int(caveman_median),
                 "savings_pct": round(savings * 100),
+                "savings_vs_terse_pct": round(savings_vs_terse * 100),
             }
         )
 
-    avg_savings = round(statistics.mean(all_savings) * 100)
-    min_savings = round(min(all_savings) * 100)
-    max_savings = round(max(all_savings) * 100)
     avg_normal = round(statistics.mean([r["normal_median"] for r in rows]))
+    avg_terse = round(statistics.mean([r["terse_median"] for r in rows]))
     avg_caveman = round(statistics.mean([r["caveman_median"] for r in rows]))
 
+    # Two DIFFERENT statistics, kept apart and labelled. The Average ROW prints
+    # the ratio of the averaged token columns printed beside it, because a
+    # mean-of-per-task-ratios in that cell contradicts the two numbers it sits
+    # between (1214 and 294 is 76%, printed next to a 65% mean-of-ratios).
     return rows, {
-        "avg_savings": avg_savings,
-        "min_savings": min_savings,
-        "max_savings": max_savings,
+        "avg_savings": pct(avg_normal, avg_caveman),
+        "avg_savings_vs_terse": pct(avg_terse, avg_caveman),
+        "mean_task_savings": round(statistics.mean(all_savings) * 100),
+        "mean_task_savings_vs_terse": round(statistics.mean(all_savings_vs_terse) * 100),
+        "min_savings": round(min(all_savings) * 100),
+        "max_savings": round(max(all_savings) * 100),
+        "min_savings_vs_terse": round(min(all_savings_vs_terse) * 100),
+        "max_savings_vs_terse": round(max(all_savings_vs_terse) * 100),
         "avg_normal": avg_normal,
+        "avg_terse": avg_terse,
         "avg_caveman": avg_caveman,
     }
+
+
+def pct(before, after):
+    """Reduction from before to after, as a whole-number percent."""
+    return round((1 - after / before) * 100) if before > 0 else 0
 
 
 def format_prompt_label(prompt_id):
@@ -185,21 +214,29 @@ def format_prompt_label(prompt_id):
 
 
 def format_table(rows, summary):
+    """Three arms, and the terse column is not decoration: "vs terse" is what the
+    skill itself buys. "vs baseline" is the skill plus the generic terseness ask,
+    and quoting it alone credits the skill for both."""
     lines = [
-        "| Task | Normal (tokens) | Caveman (tokens) | Saved |",
-        "|------|---------------:|----------------:|------:|",
+        "| Task | Baseline (tokens) | Terse (tokens) | Caveman (tokens) | vs terse | vs baseline |",
+        "|------|-----------------:|--------------:|----------------:|--------:|-----------:|",
     ]
     for r in rows:
         label = format_prompt_label(r["id"])
         lines.append(
-            f"| {label} | {r['normal_median']} | {r['caveman_median']} | {r['savings_pct']}% |"
+            f"| {label} | {r['normal_median']} | {r['terse_median']} | {r['caveman_median']} "
+            f"| {r['savings_vs_terse_pct']}% | {r['savings_pct']}% |"
         )
     lines.append(
-        f"| **Average** | **{summary['avg_normal']}** | **{summary['avg_caveman']}** | **{summary['avg_savings']}%** |"
+        f"| **Average** | **{summary['avg_normal']}** | **{summary['avg_terse']}** "
+        f"| **{summary['avg_caveman']}** | **{summary['avg_savings_vs_terse']}%** "
+        f"| **{summary['avg_savings']}%** |"
     )
     lines.append("")
     lines.append(
-        f"*Range: {summary['min_savings']}%–{summary['max_savings']}% savings across prompts.*"
+        f"*Average row is the ratio of the token columns beside it. Per-task means differ: "
+        f"{summary['mean_task_savings_vs_terse']}% vs terse, {summary['mean_task_savings']}% vs baseline. "
+        f"Per-task range vs terse: {summary['min_savings_vs_terse']}%–{summary['max_savings_vs_terse']}%.*"
     )
     return "\n".join(lines)
 

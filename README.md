@@ -273,6 +273,8 @@ One install also brings the small tools:
 
 > [!IMPORTANT]
 > **Honest number warning.** The skill only shrinks **output** tokens. Input and reasoning tokens are untouched, and the skill itself adds ~1–1.5k input tokens per turn. Whole-session savings run smaller than the output number, and on already-terse workloads they can go net-negative. The real win is **readability and speed**; cost savings are the bonus. When caveman wins, when it loses, and how to measure it yourself: **[docs/HONEST-NUMBERS.md](./docs/HONEST-NUMBERS.md)**.
+>
+> **"Normal" above means an unprompted assistant, not a terse one.** Some of that 65% is what any "answer concisely" instruction would buy you. `benchmarks/run.py` now runs a terse control arm alongside the other two, so the next regenerated table splits the two apart; the numbers above predate it.
 
 ## Wrap any agent
 

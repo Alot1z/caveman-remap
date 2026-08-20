@@ -44,6 +44,11 @@ export function resolveHookInvocations(env: NodeJS.ProcessEnv = process.env): Ho
   return candidates;
 }
 
+// TRY_NEXT tells call() that this candidate never ran the hook, so the next one
+// in the list should be tried. Distinct from undefined, which means the hook ran
+// and produced nothing usable (fail-open, stop).
+const TRY_NEXT = "__caveman_try_next__" as const;
+
 export class HookBridge {
   private invocations: HookInvocation[];
 
@@ -57,7 +62,7 @@ export class HookBridge {
     const input = JSON.stringify({ event_name: event, surface: "cli", ...payload });
     for (const invocation of this.invocations) {
       const raw = await this.invoke(invocation, event, input);
-      if (raw === "ENOENT") continue; // try the next candidate binary
+      if (raw === TRY_NEXT) continue; // this candidate did not run the hook
       if (raw === undefined || !raw.trim()) return undefined;
       try {
         return sanitizeHookResponse(JSON.parse(raw));
@@ -68,7 +73,7 @@ export class HookBridge {
     return undefined;
   }
 
-  private invoke(invocation: HookInvocation, event: HookEvent, input: string): Promise<string | undefined | "ENOENT"> {
+  private invoke(invocation: HookInvocation, event: HookEvent, input: string): Promise<string | undefined | typeof TRY_NEXT> {
     return new Promise((resolve) => {
       // On Windows `caveman` on PATH is a .cmd shim (or a non-executable Unix
       // shim beside it), and ~/.caveman/bin/caveman is extensionless — execFile
@@ -80,7 +85,7 @@ export class HookBridge {
       try {
         portable = portableInvocation(invocation.command, [...invocation.args, "native-hook", "pi", event]);
       } catch {
-        resolve("ENOENT");
+        resolve(TRY_NEXT);
         return;
       }
       const child = execFile(
@@ -88,8 +93,18 @@ export class HookBridge {
         portable.args,
         { timeout: event === "SessionStart" ? SESSION_START_TIMEOUT_MS : HOOK_TIMEOUT_MS, maxBuffer: HOOK_MAX_BUFFER, encoding: "utf8" },
         (error, stdout) => {
-          if (error && (error as NodeJS.ErrnoException).code === "ENOENT") return resolve("ENOENT");
-          if (error && stdout === "") return resolve(undefined);
+          // Any failure that produced NO output means this candidate did not run
+          // the hook, whatever the errno: a missing binary (ENOENT), a stamped
+          // absolute [node, …/dist/index.js] whose script has moved (node runs
+          // fine, "Cannot find module", exit 1), an unusable shim. Advancing only
+          // on ENOENT stopped the loop dead on every one of those and left the
+          // PATH candidates untried — the permanent silent direct mode this
+          // fallback list exists to prevent.
+          // A TIMEOUT is not "did not run" — the hook ran and was too slow, and
+          // retrying every candidate would multiply the budget SessionStart is
+          // held to. Fail open on that one, advance on the rest.
+          const timedOut = !!error && (error as NodeJS.ErrnoException & { killed?: boolean }).killed === true;
+          if (error && stdout === "") return resolve(timedOut ? undefined : TRY_NEXT);
           resolve(stdout);
         },
       );

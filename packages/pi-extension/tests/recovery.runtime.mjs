@@ -177,3 +177,31 @@ test("abort signal cancels a pending retrieve without killing the child", async 
     cleanup();
   }
 });
+
+// Node emits 'error' ON the stdin stream, not only through the write callback,
+// once a write is genuinely in flight (verified: with the pipe buffer full, both
+// the callback and the callback-less form raise an uncaught EPIPE). An uncaught
+// exception in a Pi extension kills the HOST — the one thing guardedBase promises
+// never happens. Here a multi-megabyte query fills the pipe, the child is
+// SIGKILLed underneath it, and the next write breaks. Without the stdin 'error'
+// listener this test does not fail, it takes the runner down.
+test("a broken stdin pipe degrades the retrieve instead of crashing the host", async () => {
+  const { path, cleanup } = shim();
+  const log = join(mkdtempSync(join(tmpdir(), "cave-pi-epipe-")), "spawns");
+  await withEnv({ STUB_MCP_SPAWN_LOG: log }, async () => {
+    const recovery = new RecoveryClient(path);
+    assert.equal(await recovery.ensure(), true);
+    const pids = readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map(Number);
+    assert.ok(pids.length > 0, "stub never recorded a spawn");
+
+    // In flight and unread: 2 MB overflows the pipe buffer, so the write is still
+    // pending in the stream when the reader disappears.
+    const inFlight = recovery.retrieve(KNOWN_HANDLE, "q".repeat(2_000_000), undefined);
+    for (const pid of pids) { try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ } }
+    const results = await Promise.all([inFlight, recovery.retrieve(KNOWN_HANDLE, undefined, undefined)]);
+    for (const result of results) {
+      assert.equal(result.isError, true, "a dead pipe must surface as a failed retrieve");
+    }
+    recovery.dispose();
+  }).finally(() => { cleanup(); rmSync(dirname(log), { recursive: true, force: true }); });
+});

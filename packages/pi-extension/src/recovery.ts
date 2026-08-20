@@ -151,6 +151,13 @@ export class RecoveryClient {
     this.buffer = "";
     child.on("error", () => this.onChildGone(child));
     child.on("exit", () => this.onChildGone(child));
+    // stdin needs its own listener. Node emits 'error' ON THE STREAM in addition
+    // to invoking the write callback, so when caveman-mcp dies mid-call the EPIPE
+    // became an unhandled 'error' and killed the Pi host — the one thing
+    // guardedBase promises never happens. The write callback in call() rejects
+    // that request; this reaps the child so the next call degrades to "recovery
+    // unavailable" instead of throwing. lifecycle.ts does the same for its hooks.
+    child.stdin?.on("error", () => this.onChildGone(child));
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => this.onData(chunk));
     try {
@@ -176,9 +183,14 @@ export class RecoveryClient {
   private stop(child: ChildProcess | undefined): void {
     if (!child) return;
     try { child.stdin?.end(); } catch { /* already gone */ }
+    // Deliberately NOT unref'd. On session_shutdown "quit" the event loop drains
+    // straight away, so an unref'd timer never fires and a child that ignored the
+    // stdin close was never signalled at all — it outlived the host still holding
+    // ccr.db. Both timers are cleared the moment the child exits, so a
+    // well-behaved child still costs nothing.
     const term = setTimeout(() => { try { child.kill("SIGTERM"); } catch { /* already gone */ } }, 500);
-    term.unref?.();
-    child.once("exit", () => clearTimeout(term));
+    const kill = setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* already gone */ } }, 2000);
+    child.once("exit", () => { clearTimeout(term); clearTimeout(kill); });
   }
 
   private onChildGone(child: ChildProcess): void {

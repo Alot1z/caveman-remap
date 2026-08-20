@@ -178,12 +178,24 @@ def verify_synced_files() -> None:
     section("Synced Files")
     skill_source = ROOT / "skills/caveman/SKILL.md"
 
+    # Every artifact sync-skill.yml mirrors, not just the first one. Checking one
+    # of four let the other three drift silently between runs.
     skill_copies = [
-        ROOT / "plugins/caveman/skills/caveman/SKILL.md",
+        (ROOT / "plugins/caveman/skills/caveman/SKILL.md", skill_source),
+        (ROOT / "plugins/caveman/skills/cavecrew/SKILL.md", ROOT / "skills/cavecrew/SKILL.md"),
+        (
+            ROOT / "plugins/caveman/skills/caveman-compress/SKILL.md",
+            ROOT / "skills/caveman-compress/SKILL.md",
+        ),
     ]
-    for copy in skill_copies:
+    for agent in ("cavecrew-investigator", "cavecrew-builder", "cavecrew-reviewer"):
+        skill_copies.append(
+            (ROOT / f"plugins/caveman/agents/{agent}.md", ROOT / f"agents/{agent}.md")
+        )
+    for copy, source in skill_copies:
+        ensure(copy.exists(), f"Missing plugin mirror: {copy}")
         ensure(
-            copy.read_text(encoding="utf-8") == skill_source.read_text(encoding="utf-8"),
+            copy.read_text(encoding="utf-8") == source.read_text(encoding="utf-8"),
             f"Skill copy mismatch: {copy}",
         )
 
@@ -193,6 +205,23 @@ def verify_synced_files() -> None:
             archive.read("caveman/SKILL.md").decode("utf-8")
             == skill_source.read_text(encoding="utf-8"),
             "caveman.skill payload mismatch",
+        )
+        # EXTRA entries, not just missing ones. `zip -r` adds to an existing
+        # archive, and dist/caveman.skill is tracked, so a file deleted from
+        # skills/caveman/ stayed in the shipped ZIP forever — invisible to a
+        # presence-only check.
+        packaged = {
+            name for name in archive.namelist() if not name.endswith("/")
+        }
+        on_disk = {
+            f"caveman/{path.relative_to(ROOT / 'skills/caveman').as_posix()}"
+            for path in (ROOT / "skills/caveman").rglob("*")
+            if path.is_file() and "__pycache__" not in path.parts
+        }
+        ensure(
+            packaged == on_disk,
+            f"caveman.skill contents drifted: stale={sorted(packaged - on_disk)}, "
+            f"missing={sorted(on_disk - packaged)}",
         )
 
     ensure(

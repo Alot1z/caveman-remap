@@ -7,6 +7,7 @@ on:
       - "sdk-python-v*"
       - "agent-v*"
       - "create-agent-v*"
+      - "pi-v*"
 
 permissions:
   contents: read

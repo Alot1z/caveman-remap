@@ -190,7 +190,7 @@ jobs:
         run: |
           set -euo pipefail
           npm install --global npm@11.5.1
-          npm publish dist/*.tgz --access public
+          npm publish ./dist/*.tgz --access public
 
   publish-pypi:
     if: needs.build.outputs.ecosystem == 'pypi'

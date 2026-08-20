@@ -43,9 +43,14 @@ Write-Host "Uninstalling caveman hooks..."
 # is `Cannot find module ...caveman-activate.js` on every session start (#471).
 if (Test-Path $Settings) {
     if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-        Write-Host "WARNING: 'node' not found - cannot safely edit settings.json." -ForegroundColor Yellow
-        Write-Host "         Remove the caveman SessionStart and UserPromptSubmit"
-        Write-Host "         entries from $Settings manually."
+        # Abort - do NOT fall through to deleting the hook files. settings.json
+        # still points at them, and removing them is exactly #471 on every
+        # session start. Same reason the node exit code below aborts.
+        Write-Host "ERROR: 'node' not found - cannot safely edit settings.json." -ForegroundColor Yellow
+        Write-Host "       Nothing was removed. Install node and re-run, or remove the"
+        Write-Host "       caveman SessionStart, UserPromptSubmit and statusLine entries"
+        Write-Host "       from $Settings by hand first."
+        exit 1
     } else {
         # Back up before editing, same policy as install.ps1: never overwrite an
         # existing .bak, which is the only pre-caveman copy the user has.

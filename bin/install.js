@@ -59,6 +59,23 @@ const HOOK_FILES = [
   'cavecrew-model-overrides.js',
 ];
 
+// hooks/package.json is the ONE entry in HOOK_FILES with no `caveman` in its
+// name, because it is not ours: it pins the module system for EVERY plugin's
+// .js hooks in that directory. We used to copy it in unconditionally and delete
+// it outright on uninstall, so a co-installed plugin shipping ESM hooks had its
+// {"type":"module"} silently replaced with {"type":"commonjs"} — and then removed
+// altogether. Install leaves a foreign manifest alone; uninstall deletes only a
+// manifest whose content is exactly the one we ship.
+const HOOKS_MANIFEST = 'package.json';
+function hooksManifestIsOurs(p) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+    return !!parsed && parsed.type === 'commonjs' && Object.keys(parsed).length === 1;
+  } catch (_) {
+    return false;
+  }
+}
+
 // ── Argv ───────────────────────────────────────────────────────────────────
 function parseArgs(argv) {
   const opts = {
@@ -997,6 +1014,11 @@ async function installHooks(ctx) {
   let warnedNoChecksums = false;
   for (const f of HOOK_FILES) {
     const dest = path.join(hooksDir, f);
+    if (f === HOOKS_MANIFEST && fs.existsSync(dest) && !hooksManifestIsOurs(dest)) {
+      warn(`  ${dest} belongs to another plugin — left untouched.`);
+      warn("  caveman's hooks are CommonJS; if that file declares \"type\":\"module\" they will not load.");
+      continue;
+    }
     if (sourceDir && fs.existsSync(path.join(sourceDir, f))) {
       fs.copyFileSync(path.join(sourceDir, f), dest);
     } else {
@@ -1149,16 +1171,27 @@ async function runInit(ctx) {
     note(`  would download ${INIT_SCRIPT_URL} and run it on ${process.cwd()}`);
     return true;
   }
+  const scratch = privateTmpDir();
   try {
-    const tmp = path.join(os.tmpdir(), `caveman-init-${process.pid}.js`);
+    const tmp = path.join(scratch, 'caveman-init.js');
     await downloadTo(INIT_SCRIPT_URL, tmp);
     const r = child_process.spawnSync(absoluteNodePath(), [tmp, ...args], { stdio: 'inherit' });
-    try { fs.unlinkSync(tmp); } catch (_) {}
     return spawnOk(r);
   } catch (e) {
     warn('  ' + e.message);
     return false;
+  } finally {
+    try { fs.rmSync(scratch, { recursive: true, force: true }); } catch (_) { /* best effort */ }
   }
+}
+
+// privateTmpDir returns a fresh 0700 directory with an unguessable name. The old
+// predictable paths (`caveman-init-<pid>.js`, `caveman-checksums-<pid>-<ms>`)
+// could be pre-planted as symlinks by any local user, and `curl -o` follows a
+// symlink — so the installer wrote through it and, for the init script, then
+// EXECUTED what landed there.
+function privateTmpDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'caveman-'));
 }
 
 // ── HTTPS download via stdlib ─────────────────────────────────────────────
@@ -1199,7 +1232,8 @@ function sha256File(p) {
 // the standard `sha256sum` text format: "<64-hex>  <path>" (two spaces, or
 // " *<path>" binary marker).
 async function loadRemoteHookChecksums() {
-  const tmp = path.join(os.tmpdir(), `caveman-checksums-${process.pid}-${Date.now()}.sha256`);
+  const scratch = privateTmpDir();
+  const tmp = path.join(scratch, 'checksums.sha256');
   try {
     await downloadTo(`${HOOKS_REMOTE}/checksums.sha256`, tmp);
     const txt = fs.readFileSync(tmp, 'utf8');
@@ -1212,7 +1246,7 @@ async function loadRemoteHookChecksums() {
   } catch (_) {
     return null;
   } finally {
-    try { fs.unlinkSync(tmp); } catch (_) { /* best effort */ }
+    try { fs.rmSync(scratch, { recursive: true, force: true }); } catch (_) { /* best effort */ }
   }
 }
 
@@ -1227,8 +1261,20 @@ function uninstall(ctx) {
   // Hooks: remove from settings.json + delete hook files.
   const hooksDir = path.join(configDir, 'hooks');
   const settingsPath = path.join(configDir, 'settings.json');
+  // settingsClean gates the file deletion below. Deleting the hook scripts while
+  // settings.json still points at them is issue #471's exact shape: Claude Code
+  // dies with `Cannot find module …caveman-activate.js` on EVERY session start
+  // afterwards. So a settings.json we could not read (malformed) or could not
+  // write is a hard stop for the deletion, not a warning to continue past.
+  let settingsClean = true;
   if (fs.existsSync(settingsPath)) {
     const settings = SETTINGS.readSettings(settingsPath);
+    if (!settings) {
+      settingsClean = false;
+      cleanupFailed = true;
+      warn(`  could not parse ${settingsPath} — leaving the hook files in place.`);
+      warn('  Remove the caveman entries from it by hand, then re-run --uninstall.');
+    }
     if (settings) {
       const removed = SETTINGS.removeCavemanHooks(settings);
       // Drop our statusline if it points at our script
@@ -1241,15 +1287,22 @@ function uninstall(ctx) {
         if (!opts.dryRun) SETTINGS.writeSettings(settingsPath, settings);
         ok(`  removed ${removed} caveman hook entr${removed === 1 ? 'y' : 'ies'} from settings.json`);
       } catch (e) {
-        warn(`  could not update ${settingsPath}; continuing other cleanup: ${e && e.message || e}`);
+        settingsClean = false;
+        cleanupFailed = true;
+        warn(`  could not update ${settingsPath}: ${e && e.message || e}`);
+        warn('  leaving the hook files in place so the entries it still holds keep resolving.');
       }
     }
   }
 
-  if (fs.existsSync(hooksDir)) {
+  if (settingsClean && fs.existsSync(hooksDir)) {
     for (const f of HOOK_FILES) {
       const p = path.join(hooksDir, f);
       if (!fs.existsSync(p)) continue;
+      if (f === HOOKS_MANIFEST && !hooksManifestIsOurs(p)) {
+        note(`  left ${p} (another plugin's)`);
+        continue;
+      }
       if (opts.dryRun) {
         note(`  would remove ${p}`);
       } else {

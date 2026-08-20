@@ -42,9 +42,14 @@ echo "Uninstalling caveman hooks..."
 if [ -f "$SETTINGS" ]; then
   # Require node for the same reason install.sh does — safe JSON editing
   if ! command -v node >/dev/null 2>&1; then
-    echo "WARNING: 'node' not found — cannot safely edit settings.json."
-    echo "         Remove the caveman SessionStart and UserPromptSubmit"
-    echo "         entries from $SETTINGS manually."
+    # Abort — do NOT fall through to deleting the hook files. settings.json
+    # still points at them, and removing them is exactly #471 on every
+    # session start. Same reason the node -e failure above exits non-zero.
+    echo "ERROR: 'node' not found — cannot safely edit settings.json."
+    echo "       Nothing was removed. Install node and re-run, or remove the"
+    echo "       caveman SessionStart, UserPromptSubmit and statusLine entries"
+    echo "       from $SETTINGS by hand first."
+    exit 1
   else
     # Back up before editing, same policy as install.sh: never overwrite an
     # existing .bak, which is the only pre-caveman copy the user has.

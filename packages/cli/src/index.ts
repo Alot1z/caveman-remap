@@ -5606,6 +5606,16 @@ async function startWrapProxy(mode: WrapRuntimeMode, mcpRecovery: boolean, toon:
   // Same reason as `start`: the dead account variable never rides along inherited.
   delete env.CAVEMAN_WRAP_ENTITLED;
   const child = spawn(resolved, [], { stdio: "ignore", env, detached: true, windowsHide: true });
+  // The caller wraps this in try/catch for fail-open startup, but a try/catch
+  // cannot catch an EventEmitter 'error' — it arrives asynchronously and becomes
+  // an uncaughtException that kills the CLI before the agent ever launches. A
+  // wrong-arch binary (ENOEXEC), a lost x-bit between the isExecutable check and
+  // the spawn (EACCES), or CAVEMAN_PROXY_BIN pointing at a Windows .cmd shim
+  // (EINVAL) all take that path. Every other spawn in this file guards it; the
+  // proxy start is exactly the one that must degrade to "no proxy", not die.
+  child.on("error", (error) => {
+    process.stderr.write(`${mark("warn")} could not start ${bin}: ${(error as Error).message}\n`);
+  });
   child.unref();
   for (let i = 0; i < 20; i++) {
     await sleep(100);
@@ -13864,6 +13874,13 @@ function usageSecretDir() {
 
 function readStdin(): Promise<Buffer> {
   return new Promise((resolve, reject) => {
+    // No pipe, no input. On a TTY stdin never ends, so `caveman compress` or
+    // `toon encode` typed without a redirect sat there forever looking like a
+    // prompt with nothing to type into.
+    if (process.stdin.isTTY) {
+      reject(new Error("no input on stdin — pipe a file in, e.g. `cat file | caveman …`"));
+      return;
+    }
     const chunks: Buffer[] = [];
     process.stdin.on("data", (chunk) => chunks.push(chunk));
     process.stdin.on("end", () => resolve(Buffer.concat(chunks)));

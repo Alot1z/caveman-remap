@@ -84,13 +84,13 @@ npx skills add JuliusBrussee/caveman
 The full installer also wires the Claude Code hooks and statusline, finds every supported agent on your machine, and is safe to rerun (Node.js 18+):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/JuliusBrussee/caveman/v2.1.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/JuliusBrussee/caveman/v2.2.0/install.sh | bash
 ```
 
 Windows (PowerShell 5.1+):
 
 ```powershell
-irm https://raw.githubusercontent.com/JuliusBrussee/caveman/v2.1.0/install.ps1 | iex
+irm https://raw.githubusercontent.com/JuliusBrussee/caveman/v2.2.0/install.ps1 | iex
 ```
 
 One agent only:

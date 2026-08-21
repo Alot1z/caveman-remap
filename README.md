@@ -144,7 +144,7 @@ caveman claude             # Claude Code + Codex + Gemini CLI + opencode; aider 
 
 **What the engine does to a payload** — `detect()` types each payload, then routes it to a compressor that keeps what answers depend on:
 
-| Detected type | Keeps | Target |
+| Detected type | Keeps | Target Savings|
 |---|---|---|
 | `json` | keys, structure, error/message subtrees; collapses repetitive arrays | 70–90% |
 | `log` | errors, stack traces, first/last lines; drops INFO and progress noise | 85–95% |

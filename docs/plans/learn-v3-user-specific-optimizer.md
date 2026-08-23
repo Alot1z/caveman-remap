@@ -1,8 +1,33 @@
 # caveman learn v3: from honest linter to personal cost optimizer
 
-Status: research + viability assessment. Written 2026-08-20 against `main` @ a42ef76.
-Supersedes nothing — it is the layer above `docs/plans/learn-v2-smart-optimizer.md`,
-most of whose P0/P1/P2 is now shipped.
+Status: **largely implemented 2026-08-21.** Written 2026-08-20 against `main` @ a42ef76.
+The layer above `docs/plans/learn-v2-smart-optimizer.md`, most of whose P0/P1/P2 was
+already shipped.
+
+## What shipped (2026-08-21)
+
+| # | Feature | Where | Notes |
+|---|---|---|---|
+| F1 | Spend attribution | `learn_pricing.go` | Disjoint provider-counted buckets per adapter (Anthropic/opencode are disjoint; OpenAI/Gemini are inclusive and are normalized). Priced from the dated catalog, stamped with its version. Unknown model → disclosed, never priced at a sibling's rate. Sinks priced at the user's **measured** effective input rate. |
+| F2 | Cache economics | `detect_cache_hygiene.go` | `cache_efficiency` sink: effective input $/Mtok and multiplier vs list. Per-turn hooks listed as candidates — including caveman's own. Carries no token volume (it is the rate the others are priced at). |
+| F3 | Session outcome join | `detect_outcomes.go` | Git commit-overlap cohorts. Fails **closed**: a repo git cannot answer is dropped, never counted as commitless. |
+| F4 | Tool-output portfolio | `detect_tool_portfolio.go` | Ranked by normalized signature (`Read(lockfile)`, `Bash(git diff)`); no paths or arguments survive normalization. |
+| F5 | Personal baseline (growth half) | `detect_config_trend.go` | `config_growth` from the existing snapshot-history table: growth vs this machine's own past, not a guideline. Reports the delta only, so it never double-counts the weight sink. |
+| F7 | Trajectory distillation | `detect_procedures.go` | `procedure_repeat:*` candidates mined from tool-signature n-grams. Explicitly routed **away** from the net-token-negative gate. |
+| — | Holdout harness | `learn_experiment.go` | The `controlled_holdout` rung: on/off arms over the user's own sessions, ≥5 sessions per arm or no verdict. Flags a cheaper-but-more-error-prone arm. |
+| F8 | Subagent economics | `detect_subagent_spend.go` | Sidechain token share and per-type spawn counts. No practice id, no "spawn fewer" advice — the decree holds. |
+| F9 | Invoice reconciliation | `learn_reconcile.go` | Coverage vs a provider usage CSV; the **unattributed** share is the finding. Fail-closed header mapping, never by column position. |
+| F10 | Cloud handoff digest | `learn_digest.go` | Allowlist-built: identities, magnitudes, rungs. No locators, no evidence maps, no paths. Identity-bearing sink ids are collapsed to their family. |
+| — | **Attribution ladder** | `learn_attribution.go` | The spine: artifact fingerprint at apply time + a named method per confirmed row, with standing confounders. Savings bucketed by rung, never summed across rungs. Regressions never priced. |
+
+Surfaces: `caveman learn savings`, `caveman learn experiment start|arm|stop|list|report`,
+`caveman learn export`, `caveman learn reconcile --usage-export <csv>`, plus a window-cost
+and effective-input line on the default report.
+
+**Not built: F6 (learn → runtime policy).** The emitter is trivial; the consumer is not.
+Nothing in the local wrap or the hooks reads a policy file today, so shipping the emitter
+alone would be scaffolding for a reader that does not exist. It needs a decision about
+where enforcement lives (`nativeruntime` vs hooks) before the artifact is worth writing.
 
 ## Where v2 landed
 

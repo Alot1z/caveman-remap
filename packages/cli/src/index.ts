@@ -11318,7 +11318,13 @@ async function nativeHook(argv: string[]) {
   if (sessionId) entry.host_session_id = sessionId;
   if (toolName) entry.tool_name = toolName;
   if (cwd) entry.cwd_sha256 = `sha256:${createHash("sha256").update(cwd).digest("hex")}`;
-  if (normalizedEvent === "SessionStart") {
+  // SessionStart revives a missing local proxy, but native routing points every
+  // LATER turn of the session at that proxy too, and a wrap-owned instance
+  // idle-exits ~30m after its wrap dies. A plain (unwrapped) session then
+  // hard-fails with ConnectionRefused on its next prompt, with nothing left to
+  // restart the proxy. The port check below makes the revive idempotent, so run
+  // it for the mid-session events that reach the full CLI as well.
+  if (normalizedEvent === "SessionStart" || normalizedEvent === "UserPromptSubmit" || normalizedEvent === "PostCompact") {
     try {
       const opts = defaultWrapOptions();
       const gw = gatewayURL();

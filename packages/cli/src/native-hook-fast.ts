@@ -39,6 +39,39 @@ function caveHome(): string {
   return process.env.CAVEMAN_HOME ?? join(homedir(), ".caveman");
 }
 
+// localGatewayEndpoint resolves the gateway target and returns its host/port
+// only when it is a loopback proxy — the only case where a dead port means
+// "the local proxy needs restarting". Managed gateways (CAVE_GATEWAY_URL /
+// persisted gatewayUrl off-loopback) return undefined and never pay a
+// per-prompt delegate spawn. Default mirrors the full CLI's PROXY_ADDR.
+function localGatewayEndpoint(): { host: string; port: number } | undefined {
+  let gw: unknown = process.env.CAVE_GATEWAY_URL;
+  if (typeof gw !== "string" || !gw.trim()) {
+    try { gw = object(JSON.parse(readFileSync(join(homedir(), ".caveman-cloud", "config.json"), "utf8"))).gatewayUrl; } catch { /* local default */ }
+  }
+  if (typeof gw !== "string" || !gw.trim()) return { host: "127.0.0.1", port: 8787 };
+  try {
+    const url = new URL(gw);
+    const host = url.hostname;
+    if (host !== "127.0.0.1" && host !== "localhost" && host !== "::1" && host !== "[::1]") return undefined;
+    return { host: host === "[::1]" ? "::1" : host, port: url.port ? Number(url.port) : 8787 };
+  } catch { return { host: "127.0.0.1", port: 8787 }; }
+}
+
+// gatewayListening is the same signal the full CLI's revive block keys on
+// (portListening): a loopback TCP probe, ~1ms either way. Gating the delegate
+// on the PORT rather than the runtime socket matters — record pass-through,
+// noProxy, or a slow runtime all leave the socket dead while the proxy is up,
+// and must not pay a full-CLI spawn on every prompt.
+function gatewayListening(endpoint: { host: string; port: number }): Promise<boolean> {
+  return new Promise((settle) => {
+    const socket = netConnect({ host: endpoint.host, port: endpoint.port, timeout: 250 });
+    socket.on("connect", () => { socket.destroy(); settle(true); });
+    socket.on("error", () => settle(false));
+    socket.on("timeout", () => { socket.destroy(); settle(false); });
+  });
+}
+
 function object(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -365,13 +398,15 @@ function fallback(entry: Record<string, unknown>): void {
 // in this package already does (#799).
 const DELEGATE_TIMEOUT_MS = 3000;
 
-function delegateToFullCLI(raw: Buffer, agent: NativeAgent): void {
+function delegateToFullCLI(raw: Buffer, agent: NativeAgent): boolean {
   const cli = join(dirname(fileURLToPath(import.meta.url)), "index.js");
   const result = spawnSync(process.execPath, [cli, "native-hook", agent], { input: raw, maxBuffer: 3 * 1024 * 1024, env: process.env, timeout: DELEGATE_TIMEOUT_MS });
   if (!result.error && result.status === 0) {
     if (result.stdout?.length) process.stdout.write(result.stdout);
     if (result.stderr?.length) process.stderr.write(result.stderr);
+    return true;
   }
+  return false;
 }
 
 async function main(): Promise<void> {
@@ -409,7 +444,23 @@ async function main(): Promise<void> {
   if (cwd) entry.cwd_sha256 = `sha256:${createHash("sha256").update(cwd).digest("hex")}`;
   const runtimeRequest = sessionID && eventName !== "Unknown" ? request(agent, eventName, sessionID, event) : undefined;
   const response = runtimeRequest ? await callRuntime(runtimeRequest) : undefined;
-  if (!response) fallback(entry);
+  if (!response) {
+    // A dead loopback gateway PORT at prompt time is the SessionStart revive
+    // signal arriving mid-session: native routing still points this session's
+    // next request at the local proxy, but a wrap-owned proxy idle-exits after
+    // its wrap dies and a plain session has no other way to restart it — the
+    // turn hard-fails with ConnectionRefused. Delegate this one event to the
+    // full CLI, which revives the proxy exactly like SessionStart (and records
+    // the event itself). The port probe — not the dead runtime socket — is the
+    // trigger, so proxy-up/socket-down states (record pass-through, noProxy,
+    // slow runtime) never pay the spawn; a failed delegate falls through so
+    // the event is still recorded.
+    if (eventName === "UserPromptSubmit") {
+      const endpoint = localGatewayEndpoint();
+      if (endpoint && !(await gatewayListening(endpoint)) && delegateToFullCLI(raw, agent)) return;
+    }
+    fallback(entry);
+  }
   if (eventName === "SessionEnd" && response?.message) process.stderr.write(`${response.message}\n`);
   const mode = policyMode();
   const context = mode === "record" || !configuredCore() ? undefined : response?.context;

@@ -12736,6 +12736,17 @@ type LearnConfirmed = {
   verdict: "improved" | "unchanged" | "regressed" | "insufficient_data";
   supporting_prefix_tokens?: number;
   supporting_prefix_sessions?: number;
+  // How the after-value was obtained, and whether the artifact caveman
+  // fingerprinted at apply time is still the artifact on disk. Absent on older
+  // proxies; a row without it is unattributed, not attributed-by-default.
+  attribution?: {
+    method: string;
+    rung: number;
+    confidence: string;
+    provenance: string;
+    target_path?: string;
+    confounders?: string[];
+  };
 };
 
 type LearnPortfolioGroup = {
@@ -12763,6 +12774,24 @@ type LearnRepo = {
   measured_prefix_tokens?: number;
 };
 
+// LearnSpend prices the scanned window from provider-counted usage at the
+// dated catalog's published rates. It is spend attribution, never a savings
+// claim, and older proxies omit it — treat it as absent-able.
+type LearnSpendComponent = { key: string; tokens: number; usd: number; share_pct?: number };
+type LearnSpend = {
+  basis: string;
+  currency: string;
+  catalog_version?: string;
+  window_days?: number;
+  usd: number;
+  tokens?: number;
+  components?: LearnSpendComponent[];
+  unpriced?: { provider: string; model: string; tokens: number; reason: string }[];
+  effective_input_usd_per_mtok?: number;
+  effective_input_multiplier?: number;
+  caveats?: string[];
+};
+
 type LearnPlan = {
   schema: "caveman.learn.v1";
   basis: "inferred";
@@ -12771,6 +12800,7 @@ type LearnPlan = {
   cave_score: { score: number; basis: string; scope?: string };
   sinks: LearnSink[];
   retro?: LearnRetro;
+  spend?: LearnSpend;
   confirmed?: LearnConfirmed[];
   portfolio?: LearnPortfolio;
   repos?: LearnRepo[];
@@ -13032,6 +13062,37 @@ export function buildLearnTuiModel(
   };
 }
 
+// renderLearnSpendLines shows what the scanned window cost and, more usefully,
+// what a million input tokens ACTUALLY cost after the user's own cache mix.
+// The multiplier is the one number that decides whether every other finding in
+// the report is expensive or trivial, so it earns a line above the moves.
+function renderLearnSpendLines(spend: LearnSpend | undefined, markdown: boolean): string[] {
+  if (!spend) return [];
+  const lines: string[] = [];
+  const currency = spend.currency || "USD";
+  const label = markdown ? "### Window cost" : "window cost";
+  if (spend.usd > 0) {
+    const window = spend.window_days ? ` over ${spend.window_days}d` : "";
+    lines.push(`${label}  ${fmtMoney(spend.usd, currency)}${window}  ·  provider-counted tokens at published rates`);
+  }
+  const multiplier = spend.effective_input_multiplier ?? 0;
+  const rate = spend.effective_input_usd_per_mtok ?? 0;
+  if (multiplier > 0 && rate > 0) {
+    lines.push(`effective input  ${fmtMoney(rate, currency)}/Mtok  ·  ${multiplier.toFixed(2)}x list after cache reuse`);
+  }
+  const components = (spend.components ?? []).filter((component) => component.usd > 0);
+  if (components.length > 0 && spend.usd > 0) {
+    lines.push(components.map((component) => `${component.key.replace("_", " ")} ${Math.round(component.share_pct ?? 0)}%`).join("  ·  "));
+  }
+  for (const row of spend.unpriced ?? []) {
+    lines.push(`unpriced  ${row.provider}/${row.model}  ${humanTokens(row.tokens)} tokens excluded — total is a floor`);
+  }
+  if (lines.length > 0) {
+    lines.push("subscription plans have no marginal cost; the figure is then the API-equivalent value of the tokens");
+  }
+  return lines;
+}
+
 export function renderLearnPlan(
   plan: LearnPlan,
   options: { markdown?: boolean; report?: string; diff?: LearnDiff; verbose?: boolean; all?: boolean } = {},
@@ -13069,6 +13130,8 @@ export function renderLearnPlan(
     }
     const diffText = learnDiffText(options.diff);
     if (diffText) lines.push(diffText);
+    const spendLines = renderLearnSpendLines(plan.spend, markdown);
+    if (spendLines.length > 0) lines.push("", ...spendLines);
     if (confirmedLines.length > 0) lines.push("", ...confirmedLines);
     if (verbose) {
       lines.push("", ...renderLearnDetailedRows(plan, markdown), "", LEARN_DETAILED_NEXT);
@@ -13130,7 +13193,12 @@ function renderLearnConfirmed(confirmed: LearnConfirmed[] | undefined, markdown:
       return [markdown ? `- *${line}*` : line];
     }
     if (entry.after === undefined || !Number.isFinite(entry.after)) return [];
-    const line = `${symbols[entry.verdict]} ${entry.sink_id} — ${learnMeasureValue(entry.before)} → ${learnMeasureValue(entry.after)} ${learnMeasureUnit(entry.unit)} over ${entry.sessions_after} sessions (${entry.verdict}) · applied ${applied}`;
+    // How it was measured travels with the number. A confirmed row without its
+    // attribution reads as stronger evidence than it is.
+    const attribution = entry.attribution
+      ? ` · ${entry.attribution.method} (${entry.attribution.confidence}${entry.attribution.provenance === "intact" ? "" : `, ${entry.attribution.provenance}`})`
+      : "";
+    const line = `${symbols[entry.verdict]} ${entry.sink_id} — ${learnMeasureValue(entry.before)} → ${learnMeasureValue(entry.after)} ${learnMeasureUnit(entry.unit)} over ${entry.sessions_after} sessions (${entry.verdict}) · applied ${applied}${attribution}`;
     return [markdown ? `- ${line}` : line];
   });
   if (rows.length === 0) return [];
@@ -13331,6 +13399,90 @@ function renderLearnApply(raw: Record<string, any>, dryRun: boolean): string {
   return `${lines.join("\n")}\n`;
 }
 
+// renderLearnSavings prints the attributed savings ledger. The design rule it
+// enforces visually is the same one the analyzer enforces structurally: rows
+// are grouped by how they were measured, and there is no single blended total.
+// A re-counted file and a before/after session median never share a number.
+export function renderLearnSavings(raw: Record<string, any>): string {
+  const rows = Array.isArray(raw.rows) ? (raw.rows as Record<string, any>[]) : [];
+  const currency = String(raw.currency ?? "");
+  const out: string[] = [];
+  if (rows.length === 0) {
+    out.push("no fix recorded yet");
+    out.push("apply one through the caveman-learn skill and it lands here with its attribution");
+    for (const caveat of (raw.caveats ?? []) as string[]) out.push(dim(`· ${caveat}`));
+    return `${out.join("\n")}\n`;
+  }
+  const byRung = raw.total_saved_usd_by_rung as Record<string, number> | undefined;
+  const grouped = new Map<string, Record<string, any>[]>();
+  for (const row of rows) {
+    const method = String(row.attribution?.method ?? "unattributed");
+    if (!grouped.has(method)) grouped.set(method, []);
+    grouped.get(method)!.push(row);
+  }
+  for (const [method, group] of grouped) {
+    const total = byRung?.[method];
+    const head = total != null && currency
+      ? `${method}  ${fmtMoney(total, currency)}/day`
+      : method;
+    out.push(bold(head));
+    for (const row of group) {
+      const verdict = String(row.verdict ?? "");
+      const badge = verdict === "improved" ? green("✓") : verdict === "regressed" ? red("✗") : yellow("~");
+      const saved = row.saved_value != null
+        ? `${Number(row.saved_value) > 0 ? "−" : "+"}${Math.abs(Number(row.saved_value)).toFixed(0)} ${String(row.unit ?? "")}`
+        : verdict;
+      const money = row.saved_usd != null && currency ? `  ${fmtMoney(Number(row.saved_usd), currency)}/day` : "";
+      out.push(`  ${badge} ${String(row.sink_id ?? "")}  ${saved}${money}`);
+      out.push(dim(`      ${String(row.attribution?.provenance ?? "")} · confidence ${String(row.attribution?.confidence ?? "")}`));
+      for (const confounder of (row.attribution?.confounders ?? []) as string[]) {
+        out.push(dim(`      · ${confounder}`));
+      }
+    }
+    out.push("");
+  }
+  for (const caveat of (raw.caveats ?? []) as string[]) out.push(dim(`· ${caveat}`));
+  return `${out.join("\n")}\n`;
+}
+
+// fmtMoney keeps sub-cent figures legible instead of rounding real spend to
+// $0.00, which reads as "nothing" when it is not.
+export function fmtMoney(value: number, currency: string): string {
+  const symbol = currency === "USD" ? "$" : `${currency} `;
+  if (!Number.isFinite(value)) return `${symbol}0`;
+  if (Math.abs(value) >= 1) return `${symbol}${value.toFixed(2)}`;
+  if (Math.abs(value) >= 0.01) return `${symbol}${value.toFixed(3)}`;
+  return `${symbol}${value.toFixed(5)}`;
+}
+
+
+// renderExperimentReport prints a holdout result. The design rule: the verdict
+// never appears without the arm sizes that produced it, and the confounders are
+// in the default view rather than behind a flag.
+export function renderExperimentReport(raw: Record<string, any>): string {
+  const arms = Array.isArray(raw.arms) ? (raw.arms as Record<string, any>[]) : [];
+  const out: string[] = [bold(`experiment ${String(raw.label ?? "")}`)];
+  if (raw.sink_id) out.push(dim(`sink ${String(raw.sink_id)} · ${String(raw.fix_kind ?? "")}`));
+  for (const arm of arms) {
+    out.push(`  ${String(arm.arm).padEnd(4)}  ${arm.sessions} sessions  median ${humanTokens(Number(arm.median_session_tokens ?? 0))} tok/session  ${Number(arm.error_turns_per_turn ?? 0).toFixed(2)} err/turn`);
+  }
+  const verdict = String(raw.verdict ?? "insufficient_data");
+  const badge = verdict === "improved" ? green("✓") : verdict === "regressed" ? red("✗") : yellow("~");
+  const delta = raw.median_session_tokens_delta_pct != null
+    ? `  ${Number(raw.median_session_tokens_delta_pct) > 0 ? "+" : ""}${Number(raw.median_session_tokens_delta_pct).toFixed(1)}%`
+    : "";
+  const money = raw.saved_usd_per_session != null && raw.currency
+    ? `  ${fmtMoney(Number(raw.saved_usd_per_session), String(raw.currency))}/session`
+    : "";
+  out.push(`  ${badge} ${verdict}${delta}${money}`);
+  if (raw.attribution?.method) {
+    out.push(dim(`  ${String(raw.attribution.method)} · confidence ${String(raw.attribution.confidence ?? "")}`));
+    for (const confounder of (raw.attribution.confounders ?? []) as string[]) out.push(dim(`  · ${confounder}`));
+  }
+  for (const caveat of (raw.caveats ?? []) as string[]) out.push(dim(`  · ${caveat}`));
+  return `${out.join("\n")}\n`;
+}
+
 function learnUsage(): void {
   console.log(`${invokedAs()} learn [--all|--plain|--json|--md] [--since 30d] [--sources claude,codex,gemini,opencode,aider]
   default       interactive setup score + grouped top moves
@@ -13339,6 +13491,14 @@ function learnUsage(): void {
   --json|--md   machine-readable or detailed Markdown output
   implement     open Claude Code or Codex to review and fix findings
   apply         prepare one finding for consent-gated editing
+
+  savings       what applied fixes returned, grouped by how it was measured
+  experiment    prove a change with an on/off holdout over your own sessions
+                start <label> [--sink <id>] · arm <label> on|off · report <label>
+                · list · stop <label>
+  export        privacy-safe digest of findings (identities and magnitudes only)
+  reconcile --usage-export <csv>
+                compare what was measured against what the provider billed
 
   advanced:
   applied <sink_id> [--fix-kind <kind>] [--note <text>]
@@ -13459,6 +13619,31 @@ async function learn(rest: string[]) {
   const sub = rest[0];
   if (sub === "--help" || sub === "-h" || sub === "help") return learnUsage();
   if (sub === "implement") return learnImplement(rest.slice(1));
+  if (sub === "export" || sub === "reconcile") {
+    // Both are inspect-before-you-act surfaces, so they stay machine-readable:
+    // the digest is a file the user reads before deciding to share it, and a
+    // reconciliation is a table, not a headline.
+    process.stdout.write(formatLearnProxyJSON(proxyExecLearn(["learn", ...rest], false)));
+    return;
+  }
+  if (sub === "experiment") {
+    const rawText = proxyExecLearn(["learn", ...rest], false);
+    if (rest.includes("--json") || !["report"].includes(String(rest[1] ?? ""))) {
+      process.stdout.write(formatLearnProxyJSON(rawText));
+      return;
+    }
+    process.stdout.write(renderExperimentReport(JSON.parse(rawText) as Record<string, any>));
+    return;
+  }
+  if (sub === "savings") {
+    const rawText = proxyExecLearn(["learn", ...rest], false);
+    if (rest.includes("--json")) {
+      process.stdout.write(formatLearnProxyJSON(rawText));
+      return;
+    }
+    process.stdout.write(renderLearnSavings(JSON.parse(rawText) as Record<string, any>));
+    return;
+  }
   if (sub === "applied" || sub === "simulate") {
     const rawText = proxyExecLearn(["learn", ...rest], false);
     process.stdout.write(formatLearnProxyJSON(rawText));

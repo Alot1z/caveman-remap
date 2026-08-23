@@ -447,6 +447,37 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 			RetryOriginal: true,
 		}, wholeBody(body), wholeBody(body))
 	}
+	// Non-streaming responses are one JSON document: read the whole upstream
+	// body BEFORE the client sees any header. Forwarding chunk-by-chunk meant a
+	// mid-body upstream failure (HTTP/2 stream reset, GOAWAY, connection loss
+	// under concurrent subagent load) surfaced as a 200 with a truncated gzip
+	// payload — the client's ZlibError in #897 — instead of an error it can
+	// retry. One upstream retry, then a clean 502.
+	if !meta.Stream {
+		data, rerr := readUpstreamBody(resp)
+		if rerr != nil && r.Context().Err() == nil {
+			if s.logger != nil {
+				s.logger.Warn("upstream body read failed; retrying once", "error", redact.Error(rerr), "request_id", requestID)
+			}
+			s.inflight.Add(1)
+			retryResp, derr := s.doUpstream(r.Context(), buildUpstream(transform.Body, upstreamHeaders))
+			s.inflight.Add(-1)
+			if derr == nil {
+				resp = retryResp
+				data, rerr = readUpstreamBody(resp)
+			} else {
+				rerr = derr
+			}
+		}
+		if rerr != nil {
+			httpx.Error(w, r, http.StatusBadGateway, "cave_upstream_body_read_failed", "Upstream response could not be read completely.")
+			estimateWG.Wait()
+			s.record(start, 0, requestID, traceID, rc, meta, authMode, http.StatusBadGateway, 0, len(body), rawHash, transformedHash, "cave_upstream_body_read_failed", transform.OptimizerIDs, providers.UsageObservation{CacheStatus: "unknown"}, comp, toolSchemaHandle, false, estimate, evidence, providerCachePrefixSHA256, providerCacheComponentSHA256, cacheBoundaryKnown, cacheBust, compressionEligible)
+			return
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(data))
+		resp.Header.Set("Content-Length", strconv.Itoa(len(data)))
+	}
 	defer resp.Body.Close()
 
 	copySafeResponseHeaders(w.Header(), resp.Header)
@@ -1530,6 +1561,21 @@ func labelOrDefault(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+// readUpstreamBody drains a non-streaming upstream body in full. The cap only
+// bounds memory; a provider JSON document never approaches it.
+func readUpstreamBody(resp *http.Response) ([]byte, error) {
+	defer resp.Body.Close()
+	limit := int64(env.Int("CAVE_MAX_RESPONSE_BUFFER_BYTES", 64<<20))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("upstream body exceeds %d bytes", limit)
+	}
+	return data, nil
 }
 
 type countingWriter struct {

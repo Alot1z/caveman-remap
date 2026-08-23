@@ -156,6 +156,13 @@ func runAgentEvidence(logger *slog.Logger, args []string) {
 
 func runServe(logger *slog.Logger) {
 	home := mustHome(logger)
+	// The wrap CLI spawns this process detached with stdio ignored, so without
+	// a file every warning the proxy emits (upstream failures, copy errors) is
+	// lost and field reports like #897 arrive with no proxy-side evidence.
+	if f := openProxyLog(filepath.Join(home, "proxy.log")); f != nil {
+		defer f.Close()
+		logger = slog.New(slog.NewJSONHandler(io.MultiWriter(os.Stdout, f), &slog.HandlerOptions{ReplaceAttr: redact.SlogReplaceAttr}))
+	}
 	cfg, err := config.Load(env.String("CAVEMAN_CONFIG", filepath.Join(home, "caveman.yaml")))
 	if err != nil {
 		logger.Error("cannot load caveman.yaml", "error", err)
@@ -175,7 +182,7 @@ func runServe(logger *slog.Logger) {
 	// One CCR store backs both exact S4 recovery and typed native-agent session
 	// objects. Record mode still never writes recovery originals: it only permits
 	// metadata-safe native runtime state when an installed host pack sends events.
-	opts := standalone.Options{SessionMarkerKey: sessionMarkerKey}
+	opts := standalone.Options{SessionMarkerKey: sessionMarkerKey, Logger: logger}
 	switch {
 	case (cfg.Mode == "compress" || cfg.Mode == "pixel") && recovery != nil:
 		opts.Compressor = standalone.NewEngineCompressor(recovery)
@@ -921,6 +928,19 @@ func fatalJSON(logger *slog.Logger, err error) {
 }
 
 // mustHome resolves and creates the ~/.caveman directory, honoring CAVEMAN_HOME.
+// openProxyLog appends to path, rotating a single previous generation once the
+// file passes 16MB. Nil on any error: logging must never block serving.
+func openProxyLog(path string) *os.File {
+	if info, err := os.Stat(path); err == nil && info.Size() > 16<<20 {
+		_ = os.Rename(path, path+".1")
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil
+	}
+	return f
+}
+
 func mustHome(logger *slog.Logger) string {
 	home := env.String("CAVEMAN_HOME", "")
 	if home == "" {

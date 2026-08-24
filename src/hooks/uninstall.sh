@@ -1,6 +1,6 @@
 #!/bin/bash
 # caveman — uninstaller for the SessionStart + UserPromptSubmit hooks
-# Removes: hook files in ~/.claude/hooks, settings.json entries, and the flag file
+# Removes: hook files in ~/.claude/hooks, settings.json entries, and the mode state
 # Usage: bash src/hooks/uninstall.sh
 #   or:  bash <(curl -s https://raw.githubusercontent.com/JuliusBrussee/caveman/main/src/hooks/uninstall.sh)
 set -e
@@ -8,7 +8,6 @@ set -e
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 HOOKS_DIR="$CLAUDE_DIR/hooks"
 SETTINGS="$CLAUDE_DIR/settings.json"
-FLAG_FILE="$CLAUDE_DIR/.caveman-active"
 
 HOOK_FILES=("package.json" "caveman-config.js" "caveman-parse.js" "caveman-activate.js" "caveman-mode-tracker.js" "caveman-stats.js" "caveman-statusline.sh" "cavecrew-model-overrides.js")
 
@@ -166,10 +165,22 @@ if [ -f "$SETTINGS.bak" ]; then
   echo "  Removed: $SETTINGS.bak"
 fi
 
-# 4. Remove flag file
-if [ -f "$FLAG_FILE" ]; then
-  rm "$FLAG_FILE"
-  echo "  Removed: $FLAG_FILE"
+# 4. Remove mode state
+#
+# .caveman-history.jsonl is deliberately NOT removed: it is the user's
+# accumulated lifetime savings record, not caveman plumbing. Keep this list in
+# sync with the uninstall block in bin/install.js.
+for state in ".caveman-active" ".caveman-active.prev" ".caveman-mode-log.jsonl" ".caveman-statusline-suffix" ".caveman-nudge-shown"; do
+  if [ -f "$CLAUDE_DIR/$state" ]; then
+    rm "$CLAUDE_DIR/$state"
+    echo "  Removed: $CLAUDE_DIR/$state"
+  fi
+done
+
+# Per-session mode files (one <session_id>.mode / .prev per window)
+if [ -d "$CLAUDE_DIR/.caveman-sessions" ]; then
+  rm -rf "$CLAUDE_DIR/.caveman-sessions"
+  echo "  Removed: $CLAUDE_DIR/.caveman-sessions"
 fi
 
 echo ""

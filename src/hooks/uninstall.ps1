@@ -1,5 +1,5 @@
 # caveman — uninstaller for the SessionStart + UserPromptSubmit hooks (Windows PowerShell)
-# Removes: hook files in ~/.claude/hooks, settings.json entries, and the flag file
+# Removes: hook files in ~/.claude/hooks, settings.json entries, and the mode state
 # Usage: powershell -ExecutionPolicy Bypass -File src\hooks\uninstall.ps1
 #   or:  irm https://raw.githubusercontent.com/JuliusBrussee/caveman/main/src/hooks/uninstall.ps1 | iex
 param()
@@ -9,7 +9,6 @@ $ErrorActionPreference = "Stop"
 $ClaudeDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE ".claude" }
 $HooksDir = Join-Path $ClaudeDir "hooks"
 $Settings = Join-Path $ClaudeDir "settings.json"
-$FlagFile = Join-Path $ClaudeDir ".caveman-active"
 
 $HookFiles = @("package.json", "caveman-config.js", "caveman-parse.js", "caveman-activate.js", "caveman-mode-tracker.js", "caveman-stats.js", "caveman-statusline.sh", "caveman-statusline.ps1", "cavecrew-model-overrides.js")
 
@@ -188,10 +187,24 @@ if ($RemovedFiles -eq 0) {
     Write-Host "  No hook files found in $HooksDir"
 }
 
-# 3. Remove flag file
-if (Test-Path $FlagFile) {
-    Remove-Item $FlagFile -Force
-    Write-Host "  Removed: $FlagFile"
+# 3. Remove mode state
+#
+# .caveman-history.jsonl is deliberately NOT removed: it is the user's
+# accumulated lifetime savings record, not caveman plumbing. Keep this list in
+# sync with the uninstall block in bin/install.js.
+foreach ($state in @(".caveman-active", ".caveman-active.prev", ".caveman-mode-log.jsonl", ".caveman-statusline-suffix", ".caveman-nudge-shown")) {
+    $StatePath = Join-Path $ClaudeDir $state
+    if (Test-Path $StatePath) {
+        Remove-Item $StatePath -Force
+        Write-Host "  Removed: $StatePath"
+    }
+}
+
+# Per-session mode files (one <session_id>.mode / .prev per window)
+$SessionsDir = Join-Path $ClaudeDir ".caveman-sessions"
+if (Test-Path $SessionsDir) {
+    Remove-Item $SessionsDir -Recurse -Force
+    Write-Host "  Removed: $SessionsDir"
 }
 
 Write-Host ""

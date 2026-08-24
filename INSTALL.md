@@ -174,6 +174,19 @@ cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.caveman-active"
 
 If it's missing or empty, the SessionStart hook didn't fire. See troubleshooting below.
 
+Each Claude Code window keeps its own mode in
+`${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.caveman-sessions/`, one small file per
+session. The `.caveman-active` file above is a mirror of whichever window wrote
+most recently — handy for a quick "is caveman on", but with several windows open
+it shows one of them, not all. To see them all:
+
+```bash
+ls "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.caveman-sessions/"
+```
+
+A window where you said "stop caveman" stores `off` and stays off — including
+across the automatic context compaction that happens in long sessions.
+
 Statusline should show `[CAVEMAN]` (orange) at the bottom of Claude Code. After your first `/caveman-stats` run it appends a savings counter like `[CAVEMAN] ⛏ 12.4k`.
 
 ## Uninstall
@@ -189,7 +202,7 @@ What it removes:
 - The Claude Code plugin and the Gemini CLI extension (if installed).
 - The opencode native plugin (`~/.config/opencode/plugins/caveman/`, the `plugin` and `mcp.caveman-shrink` entries from `opencode.json`, our skill/agent/command files, the caveman block from `AGENTS.md`, and the opencode flag file).
 - The OpenClaw workspace skill folder and the marker-fenced block from `~/.openclaw/workspace/SOUL.md` (when present).
-- Per-session state (`.caveman-active`, `.caveman-active.prev`, `.caveman-mode-log.jsonl`, `.caveman-statusline-suffix`, and `.caveman-nudge-shown`).
+- All mode state in `$CLAUDE_CONFIG_DIR`: the `.caveman-sessions/` directory (one file per window), `.caveman-active`, `.caveman-active.prev`, `.caveman-mode-log.jsonl`, `.caveman-statusline-suffix`, and `.caveman-nudge-shown`.
 
 What it does **not** remove:
 
@@ -213,8 +226,23 @@ Still broken? [Open an issue](https://github.com/JuliusBrussee/caveman/issues).
 
 1. Run `node bin/install.js --list` — confirm `claude` is on the detected list. If not, `claude` isn't on `PATH`. Fix that first.
 2. Open `$CLAUDE_CONFIG_DIR/settings.json` (default `~/.claude/settings.json`) and look for `"hooks"` containing `caveman-activate.js` and `caveman-mode-tracker.js`. If missing, re-run with `--force`.
-3. Check `$CLAUDE_CONFIG_DIR/.caveman-active` exists with content `full`. If not, the SessionStart hook silent-failed — check `$CLAUDE_CONFIG_DIR/hooks/` for the JS files and try `node $CLAUDE_CONFIG_DIR/hooks/caveman-activate.js < /dev/null` to see if it errors.
+3. Check `$CLAUDE_CONFIG_DIR/.caveman-active` exists with content `full`. If not, the SessionStart hook silent-failed — check `$CLAUDE_CONFIG_DIR/hooks/` for the JS files and try `node $CLAUDE_CONFIG_DIR/hooks/caveman-activate.js < /dev/null` to see if it errors. Keep the `< /dev/null`: the hook reads its payload from stdin, and a pipe that never closes makes it wait out its 3s watchdog.
 4. Restart Claude Code. The SessionStart hook only fires on session start, not mid-session.
+
+**"One window is caveman, another isn't."**
+
+That's intended. Mode is per window. Say `/caveman` in the window you want it in.
+`${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.caveman-sessions/` has one file per session
+if you want to see the current state of each.
+
+**"I said 'stop caveman' and it came back on its own."**
+
+Fixed. This used to happen when a long conversation hit automatic context
+compaction: the SessionStart hook re-ran and re-applied your configured default.
+Deactivation is now stored as a durable value that survives compaction and
+resume. If you still see it, check whether `CAVEMAN_DEFAULT_MODE` or a repo-local
+`.caveman.json` is re-arming it on a genuinely new session, or whether you ran
+`/clear` — that is a deliberate reset, and intended.
 
 **"Hooks failing on Windows."**
 

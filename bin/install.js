@@ -1463,6 +1463,17 @@ function uninstall(ctx) {
       note(`  removed ${statePath}`);
     }
   }
+  // Per-session mode files (one <session_id>.mode / .prev per window). Keep in
+  // sync with the uninstall blocks in src/hooks/uninstall.sh and uninstall.ps1.
+  const sessionsDir = path.join(configDir, '.caveman-sessions');
+  if (fs.existsSync(sessionsDir)) {
+    if (opts.dryRun) {
+      note(`  would remove ${sessionsDir}`);
+    } else {
+      try { fs.rmSync(sessionsDir, { recursive: true, force: true }); } catch (_) {}
+      note(`  removed ${sessionsDir}`);
+    }
+  }
   const historyPath = path.join(configDir, '.caveman-history.jsonl');
   if (fs.existsSync(historyPath)) {
     note(`  kept ${historyPath} (lifetime history — delete manually if unwanted)`);

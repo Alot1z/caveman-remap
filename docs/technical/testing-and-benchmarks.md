@@ -30,7 +30,6 @@ Individual packages expose narrower scripts:
 pnpm --dir packages/cli test
 pnpm --dir packages/agent test
 npm --prefix extension test
-pnpm --dir packages/graders test
 pnpm --dir packages/shared/contracts test
 ```
 

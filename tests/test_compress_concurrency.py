@@ -219,13 +219,14 @@ class CompressFileLockIntegrationTests(unittest.TestCase):
                 results = []
 
                 def run():
-                    with mock.patch.object(compress_mod, "call_claude", side_effect=slow_claude), \
-                         mock.patch.object(compress_mod, "validate", return_value=valid):
-                        results.append(compress_mod.compress_file(path))
+                    results.append(compress_mod.compress_file(path))
 
                 t1 = threading.Thread(target=run, daemon=True)
                 t2 = threading.Thread(target=run, daemon=True)
-                with mock.patch.object(compress_mod, "LOCK_WAIT_SECONDS", 2), \
+                # Patched once here, not inside run(): two threads each entering their own mock.patch.object on the same attribute unpatch in start order, not entry order, so the first thread's exit would restore the real call_claude/validate while the other thread is still mid-flight.
+                with mock.patch.object(compress_mod, "call_claude", side_effect=slow_claude), \
+                     mock.patch.object(compress_mod, "validate", return_value=valid), \
+                     mock.patch.object(compress_mod, "LOCK_WAIT_SECONDS", 2), \
                      mock.patch.object(compress_mod, "LOCK_POLL_INTERVAL", 0.02):  # a lock regression should fail this test in ~2s, not block the run for the real 900s default; a 1s poll interval would leave only two attempts in that budget on a loaded CI box
                     t1.start()
                     time.sleep(0.05)  # ensure t1 acquires the lock first

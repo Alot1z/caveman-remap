@@ -118,6 +118,8 @@ Examples:
 ```
 /caveman-compress CLAUDE.md
         ↓
+acquire cross-session lock on the file  (waits up to 15 min if another run holds it, then errors)
+        ↓
 detect file type        (no tokens)
         ↓
 Claude compresses       (tokens: one call)

@@ -202,17 +202,21 @@ class FileLockTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
                 target = Path("/tmp/whatever/CLAUDE.md")
                 entered = []
-                with mock.patch.object(compress_mod, "_try_lock_nonblocking", side_effect=OSError(errno.EOPNOTSUPP, "Operation not supported")):
+                with mock.patch.object(compress_mod, "_try_lock_nonblocking", side_effect=OSError(errno.EOPNOTSUPP, "Operation not supported")), \
+                     mock.patch.object(compress_mod, "LOCK_WAIT_SECONDS", 2), \
+                     mock.patch.object(compress_mod, "LOCK_POLL_INTERVAL", 0.02):  # matches sibling lock tests: a misclassification regression should fail this fast, not spin out the real 900s budget
                     with compress_mod.file_lock(target):
                         entered.append(True)  # must still reach the critical section instead of raising
                 self.assertEqual(entered, [True])
 
     def test_enolck_is_not_treated_as_unsupported_and_still_raises(self):
-        # ENOLCK is the kernel out of lock-record memory, not "this filesystem has no locking" — treating it as the latter would let a genuinely contended lock proceed unlocked.
+        # ENOLCK is not a reliable "this filesystem has no locking" signal (it can also mean transient kernel lock-record exhaustion) — treating it as one could let a genuinely contended lock proceed unlocked.
         with tempfile.TemporaryDirectory() as data_home:
             with mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
                 target = Path("/tmp/whatever/CLAUDE.md")
-                with mock.patch.object(compress_mod, "_try_lock_nonblocking", side_effect=OSError(errno.ENOLCK, "No locks available")):
+                with mock.patch.object(compress_mod, "_try_lock_nonblocking", side_effect=OSError(errno.ENOLCK, "No locks available")), \
+                     mock.patch.object(compress_mod, "LOCK_WAIT_SECONDS", 2), \
+                     mock.patch.object(compress_mod, "LOCK_POLL_INTERVAL", 0.02):  # matches sibling lock tests: a misclassification regression should fail this fast, not spin out the real 900s budget
                     with self.assertRaises(OSError) as ctx:
                         with compress_mod.file_lock(target):
                             pass  # pragma: no cover - must never be reached
@@ -265,7 +269,7 @@ class CompressFileLockIntegrationTests(unittest.TestCase):
                     t2.start()
                     t1.join(timeout=10)
                     t2.join(timeout=10)
-                    # Asserted inside the patch scope: a still-alive thread here would otherwise resume, past this point, against the REAL call_claude once the patches above unwind.
+                    # Asserted inside the patch scope so a failure here is reported before the later assertions run, while the patched state is still the one that produced it.
                     self.assertFalse(t1.is_alive())
                     self.assertFalse(t2.is_alive())
 

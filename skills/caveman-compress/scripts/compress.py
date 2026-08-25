@@ -179,7 +179,7 @@ def file_lock(filepath: Path):
                     printed_waiting = True
                 time.sleep(LOCK_POLL_INTERVAL)
             except OSError as e:
-                if e.errno in (errno.EOPNOTSUPP, errno.ENOSYS):  # filesystem doesn't implement flock/byte-range locking at all (some NFS/SMB/FUSE mounts) — degrade to no coordination rather than fail a run that worked before this lock existed. ENOLCK deliberately excluded: it means the kernel is out of lock-record memory, a transient condition, not "unsupported" — treating it as unsupported would let a genuinely contended lock proceed unlocked
+                if e.errno in (errno.EOPNOTSUPP, errno.ENOSYS):  # filesystem doesn't implement flock/byte-range locking at all (some NFS/SMB/FUSE mounts) — degrade to no coordination rather than fail a run that worked before this lock existed. ENOLCK deliberately excluded: it can mean transient kernel lock-record exhaustion, so it isn't a reliable "unsupported" signal — treating it as one could let a genuinely contended lock proceed unlocked
                     print(f"⚠️ {lock_dir}'s filesystem doesn't support file locking — proceeding without cross-session coordination.", flush=True)
                     break
                 raise
@@ -462,8 +462,8 @@ def compress_file(filepath: Path) -> bool:
     # Resolve first so the lock and every check below key off the same canonical path regardless of how the caller spelled it.
     filepath = filepath.resolve()
 
-    # None of these three checks depends on mutual exclusion, so they run before the lock is taken — a rejected input (bad path, oversized, sensitive name) shouldn't leave a permanent lock file behind in shared state.
     MAX_FILE_SIZE = 500_000  # 500KB
+    # None of these three checks depends on mutual exclusion, so they run before the lock is taken — a rejected input (bad path, oversized, sensitive name) shouldn't leave a permanent lock file behind in shared state.
     if not filepath.exists():
         raise FileNotFoundError(f"File not found: {filepath}")
     if filepath.stat().st_size > MAX_FILE_SIZE:

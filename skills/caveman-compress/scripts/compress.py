@@ -103,11 +103,11 @@ def backup_dir_for(filepath: Path) -> Path:
     return _state_base_dir("backups") / filepath.parent.name
 
 
-LOCK_WAIT_SECONDS = 900  # measured ~78s for a single Claude call on a 26KB file; a run can make up to MAX_RETRIES+1 such calls, so 120s hard-failed healthy runs well before the 500KB size cap
+LOCK_WAIT_SECONDS = 900  # must outlast a legitimate holder's worst-case run (up to MAX_RETRIES+1 Claude calls against the 500KB size cap) or a healthy wait misreads as a stuck lock
 LOCK_POLL_INTERVAL = 1.0
 
 
-class LockTimeoutError(RuntimeError):
+class LockTimeoutError(TimeoutError):
     """Raised when another process holds the compress lock past LOCK_WAIT_SECONDS."""
 
 
@@ -151,6 +151,10 @@ def file_lock(filepath: Path):
     if lock_dir.is_symlink():  # best-effort: catches a pre-staged symlink at this exact component; mkdir(exist_ok=True) would otherwise follow it, and _O_NOFOLLOW below only guards the final path component
         raise OSError(f"Refusing to use lock directory through a symlink: {lock_dir}")
     lock_dir.mkdir(parents=True, exist_ok=True)
+    if not _IS_WINDOWS:  # keys are unsalted hashes of a guessable path; keep the directory listing to this user only
+        os.chmod(lock_dir, 0o700)
+    if lock_path.is_symlink():  # best-effort on Windows too, where O_NOFOLLOW (POSIX-only, below) can't guard this component
+        raise OSError(f"Refusing to open lock file through a symlink: {lock_path}")
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | _O_NOFOLLOW, 0o600)
     try:
         if os.fstat(fd).st_size == 0:
@@ -173,6 +177,11 @@ def file_lock(filepath: Path):
                     print(f"Waiting for another caveman-compress run to finish with {filepath}...", flush=True)
                     printed_waiting = True
                 time.sleep(LOCK_POLL_INTERVAL)
+            except OSError as e:
+                if e.errno in (errno.ENOLCK, errno.EOPNOTSUPP, errno.ENOSYS):  # filesystem doesn't implement flock/byte-range locking (some NFS/SMB/FUSE mounts) — degrade to no coordination rather than fail a run that worked before this lock existed
+                    print(f"⚠️ {lock_dir}'s filesystem doesn't support file locking — proceeding without cross-session coordination.", flush=True)
+                    break
+                raise
         try:
             yield
         finally:
@@ -451,12 +460,7 @@ Return ONLY the fixed compressed file. No explanation.
 def compress_file(filepath: Path) -> bool:
     # Resolve first so the lock and every check below key off the same canonical path regardless of how the caller spelled it.
     filepath = filepath.resolve()
-    with file_lock(filepath):
-        return _compress_file_locked(filepath)
 
-
-def _compress_file_locked(filepath: Path) -> bool:
-    """Body of compress_file; runs entirely under compress_file's file_lock for this resolved path."""
     MAX_FILE_SIZE = 500_000  # 500KB
     if not filepath.exists():
         raise FileNotFoundError(f"File not found: {filepath}")
@@ -475,6 +479,15 @@ def _compress_file_locked(filepath: Path) -> bool:
             "Rename the file if this is a false positive."
         )
 
+    # These checks run before the lock is even taken: none of them depends on
+    # mutual exclusion, and a rejected input (bad path, oversized, sensitive
+    # name) shouldn't leave a permanent lock file behind in shared state.
+    with file_lock(filepath):
+        return _compress_file_locked(filepath)
+
+
+def _compress_file_locked(filepath: Path) -> bool:
+    """Body of compress_file; runs entirely under compress_file's file_lock for this resolved path."""
     print(f"Processing: {filepath}")
 
     if not should_compress(filepath):

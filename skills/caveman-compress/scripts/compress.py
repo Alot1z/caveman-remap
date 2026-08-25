@@ -479,9 +479,7 @@ def compress_file(filepath: Path) -> bool:
             "Rename the file if this is a false positive."
         )
 
-    # These checks run before the lock is even taken: none of them depends on
-    # mutual exclusion, and a rejected input (bad path, oversized, sensitive
-    # name) shouldn't leave a permanent lock file behind in shared state.
+    # These checks run before the lock is taken: none depends on mutual exclusion, and a rejected input (bad path, oversized, sensitive name) shouldn't leave a permanent lock file behind in shared state.
     with file_lock(filepath):
         return _compress_file_locked(filepath)
 

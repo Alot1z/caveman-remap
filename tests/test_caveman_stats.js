@@ -169,7 +169,6 @@ test('priceForModel matches by prefix across point releases', () => {
   assert.strictEqual(priceForModel('claude-3-5-sonnet-20241022'), 15.00);
   assert.strictEqual(priceForModel('claude-opus-5'), 25.00);
   assert.strictEqual(priceForModel('claude-sonnet-5'), 10.00);
-  assert.strictEqual(priceForModel('claude-haiku-5'), 5.00);
   assert.strictEqual(priceForModel('claude-fable-5'), 50.00);
   assert.strictEqual(priceForModel('claude-mythos-5'), 50.00);
   assert.strictEqual(priceForModel('claude-opus-5[1m]'), 25.00);

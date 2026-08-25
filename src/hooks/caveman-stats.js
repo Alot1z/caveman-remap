@@ -40,15 +40,13 @@ function ruleOverheadPerTurn() {
 // Most-specific prefixes MUST come first — priceForModel returns the first match.
 const MODEL_OUTPUT_PRICE_PER_M = [
   // Claude 5 family. Fable/Mythos (models.anthropic.com naming) sit at the
-  // top $50/M tier; Opus 5 dropped to $25/M. Sonnet 5 is on a $10/M intro
-  // rate through 2026-08-31 ($15/M standard from 2026-09-01) per
-  // shared/provider-catalog/catalog/current.yaml; the current-period value is
-  // listed so savings are not overstated during the intro window.
+  // top $50/M tier; Opus 5 dropped to $25/M. Sonnet 5's $10/M rate is the
+  // permanent standard price — the increase to $15/M planned for
+  // 2026-09-01 was cancelled (see anthropic.com/docs/en/about-claude/pricing).
   ['claude-fable-5',   50.00],
   ['claude-mythos-5',  50.00],
   ['claude-opus-5',    25.00],
   ['claude-sonnet-5',  10.00],
-  ['claude-haiku-5',    5.00],
   // Legacy Opus 4.0 / 4.1 (pre-4.5) billed at the old $75/M output tier,
   // including the dated ids (e.g. claude-opus-4-20250514).
   ['claude-opus-4-0',    75.00],

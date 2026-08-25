@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, symlin
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { createServer } from "node:net";
+import { connect as netConnect, createServer } from "node:net";
 import { createHmac } from "node:crypto";
 
 const cli = join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "index.js");
@@ -1311,5 +1311,96 @@ test("prototype-key directive ids fail closed", async () => {
     const out = await runCli(["hooks", "install", "--directive", id, "codex"], env);
     assert.notEqual(out.code, 0, `prototype key '${id}' must be rejected`);
     assert.match(out.stderr, /unknown directive/);
+  }
+});
+
+// Pi's rewrite surface is the native extension: `hooks install pi` must point
+// at `caveman enable pi` and exit 0 — never the silent exit-1 that turned the
+// whole multi-agent install red whenever `pi` sat on PATH.
+test("hooks install/uninstall pi point at the native extension and exit 0", async () => {
+  const env = { ...process.env, NO_COLOR: "1", HOME: mkdtempSync(join(tmpdir(), "cave-home-")), CAVEMAN_HOME: mkdtempSync(join(tmpdir(), "cave-dot-")) };
+  const install = await runCli(["hooks", "install", "pi"], env);
+  assert.equal(install.code, 0, install.stderr);
+  assert.match(install.stderr, /native extension.*caveman enable pi/);
+  const uninstall = await runCli(["hooks", "uninstall", "pi"], env);
+  assert.equal(uninstall.code, 0, uninstall.stderr);
+  assert.match(uninstall.stderr, /caveman disable pi/);
+});
+
+// Mid-session heal: native routing points every turn at the local proxy, but a
+// wrap-owned proxy idle-exits after its wrap dies, leaving plain sessions on
+// ConnectionRefused with only SessionStart able to restart it. A prompt that
+// finds the runtime socket dead must revive the proxy before the turn's API call.
+test("fast native-hook revives a dead local proxy at prompt time", { skip: process.platform === "win32" }, async () => {
+  const caveHome = mkdtempSync(join(tmpdir(), "cave-native-revive-"));
+  const probe = createServer(() => {});
+  await new Promise((resolve, reject) => {
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", resolve);
+  });
+  const port = probe.address().port;
+  await new Promise((resolve) => probe.close(resolve));
+  const bin = join(caveHome, "bin");
+  mkdirSync(bin, { recursive: true });
+  const pidFile = join(caveHome, "stub-proxy.pid");
+  const stub = join(bin, "caveman-proxy");
+  writeFileSync(stub, `#!/usr/bin/env node
+const net = require("node:net");
+const fs = require("node:fs");
+const [host, port] = process.env.CAVEMAN_LISTEN.split(":");
+const server = net.createServer(() => {});
+server.listen(Number(port), host, () => fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)));
+`, { mode: 0o755 });
+  const env = {
+    ...process.env, HOME: caveHome, CAVEMAN_HOME: caveHome, CAVEMAN_TELEMETRY: "0",
+    CAVEMAN_PROXY_BIN: stub, CAVEMAN_MCP_BIN: join(caveHome, "missing-mcp"),
+    CAVE_GATEWAY_URL: `http://127.0.0.1:${port}`,
+  };
+  try {
+    const out = await runFastNativeHook("claude", {
+      hook_event_name: "UserPromptSubmit", session_id: "revive-1", prompt: "hello again",
+    }, env);
+    assert.equal(out.code, 0, out.stderr);
+    // startWrapProxy returns once the port listens; the stub writes its pidfile
+    // in the same listen callback, so allow a brief settle on loaded machines.
+    for (let i = 0; i < 20 && !existsSync(pidFile); i++) await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.ok(existsSync(pidFile), "prompt-time hook must restart the dead local proxy");
+    await new Promise((resolve, reject) => {
+      const conn = netConnect({ host: "127.0.0.1", port, timeout: 1000 });
+      conn.on("connect", () => { conn.destroy(); resolve(); });
+      conn.on("error", reject);
+      conn.on("timeout", () => { conn.destroy(); reject(new Error("revived proxy not listening")); });
+    });
+  } finally {
+    try { process.kill(Number(readFileSync(pidFile, "utf8"))); } catch { /* already gone */ }
+  }
+});
+
+// Reviewer finding: the delegate trigger is the gateway PORT, not the runtime
+// socket. Proxy-up/socket-down states (record pass-through, slow runtime) must
+// keep the zero-spawn fast path and still record fallback evidence.
+test("fast native-hook stays spawn-free while the proxy port is alive", { skip: process.platform === "win32" }, async () => {
+  const caveHome = mkdtempSync(join(tmpdir(), "cave-native-nospawn-"));
+  const gate = createServer(() => {});
+  await new Promise((resolve, reject) => {
+    gate.once("error", reject);
+    gate.listen(0, "127.0.0.1", resolve);
+  });
+  const port = gate.address().port;
+  const marker = join(caveHome, "stub-invoked");
+  const stub = join(caveHome, "caveman-proxy");
+  writeFileSync(stub, `#!/bin/sh\ntouch ${marker}\n`, { mode: 0o755 });
+  try {
+    const out = await runFastNativeHook("claude", {
+      hook_event_name: "UserPromptSubmit", session_id: "nospawn-1", prompt: "hello",
+    }, {
+      ...process.env, HOME: caveHome, CAVEMAN_HOME: caveHome, CAVEMAN_TELEMETRY: "0",
+      CAVEMAN_PROXY_BIN: stub, CAVE_GATEWAY_URL: `http://127.0.0.1:${port}`,
+    });
+    assert.equal(out.code, 0, out.stderr);
+    assert.equal(existsSync(marker), false, "live proxy port must not trigger a revive spawn");
+    assert.ok(existsSync(join(caveHome, "runtime", "native-events.jsonl")), "dead runtime must still record fallback evidence");
+  } finally {
+    await new Promise((resolve) => gate.close(resolve));
   }
 });

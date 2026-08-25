@@ -232,13 +232,35 @@ CREATE TABLE IF NOT EXISTS applied_fixes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_applied_fixes_applied_at
-  ON applied_fixes(applied_at, id);`
+  ON applied_fixes(applied_at, id);
+
+CREATE TABLE IF NOT EXISTS experiments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  label TEXT NOT NULL UNIQUE,
+  sink_id TEXT,
+  fix_kind TEXT,
+  note TEXT,
+  created_at TEXT NOT NULL,
+  stopped_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS experiment_arms (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  experiment_id INTEGER NOT NULL,
+  arm TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  ended_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_experiment_arms_experiment
+  ON experiment_arms(experiment_id, started_at);`
 
 // migrations are additive ALTERs for stores created before a column existed.
 // CREATE TABLE IF NOT EXISTS never adds a column to an existing table, so each new
 // column is added here and a "duplicate column name" error (already migrated) is
 // ignored. New, empty databases get the columns from the schema above and skip these.
 var migrations = []string{
+	`ALTER TABLE applied_fixes ADD COLUMN target_json TEXT`,
 	`ALTER TABLE requests ADD COLUMN compression_ratio REAL`,
 	`ALTER TABLE requests ADD COLUMN compression_tokens_before INTEGER`,
 	`ALTER TABLE requests ADD COLUMN compression_tokens_after INTEGER`,

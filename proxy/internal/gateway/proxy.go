@@ -191,6 +191,24 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		if !compiledPlanAllowed {
 			break
 		}
+		// The epoch gate is STATEFUL: derivedEpochAllows re-anchors the stored
+		// prefix on every observe. Calling it twice per request — once with the
+		// client's original body, once with the transformed one — anchored turn
+		// N's baseline to bytes the client never sent, so turn N+1 compared the
+		// original against it, saw divergence, and skipped compression for the
+		// whole turn. That flipped the provider cache prefix the gate exists to
+		// protect, and on a wrapped session with the tool-schema strip enabled it
+		// alternated compression on/off every other turn. Evaluate ONCE, against
+		// the bytes the client actually sent, and reuse the answer. Still lazy:
+		// requests that never reach a transform never anchor.
+		epochChecked, epochOK := false, false
+		epochAllows := func() bool {
+			if !epochChecked {
+				epochChecked = true
+				epochOK = s.cacheEpochAllows(r, adapter, meta, body, evidence.SessionID)
+			}
+			return epochOK
+		}
 		// Subscription-classified traffic falls back to S0 passthrough whenever the
 		// live-zone conditions do not hold (operator off-switch, no schema-aware
 		// prefix stabilizer, no MCP recovery, no durable prefix cache) — the path
@@ -212,7 +230,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		// exclusively through the live-zone predicate above (which itself requires MCP
 		// recovery), so neither can ever compress with no way back to the elided bytes.
 		markerOnlyAllowed := (s.recoveryViaMCP && authMode != AuthModeOAuth && authMode != AuthModeSubscription) || nonPAYGLiveZone
-		if (markerOnlyAllowed || serverRetrieveAllowed) && s.cacheEpochAllows(r, adapter, meta, body, evidence.SessionID) {
+		if (markerOnlyAllowed || serverRetrieveAllowed) && epochAllows() {
 			// The request reached the compression path as a candidate. It is eligible
 			// whether or not compressRequest ultimately shrinks any bytes — the
 			// requests_eligible_for_compression denominator counts candidates, not wins.
@@ -241,7 +259,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		// rewrite admissible here. It runs last so its byte offsets are computed on
 		// the bytes actually going upstream, and it is skipped under a compiled
 		// Cave Build, whose transform set is locked to what evals approved.
-		if len(lockedRoutes) == 0 && s.toolSchemaStripAllowed(adapter, evidence.SessionID) && s.cacheEpochAllows(r, adapter, meta, transform.Body, evidence.SessionID) {
+		if len(lockedRoutes) == 0 && s.toolSchemaStripAllowed(adapter, evidence.SessionID) && epochAllows() {
 			if stripped, handle, ok := s.stripToolSchema(transform.Body, meta, requestID); ok {
 				transform.Body = stripped
 				transform.OptimizerIDs = append(transform.OptimizerIDs, toolSchemaStripOptimizerID)
@@ -428,6 +446,37 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 			RuntimeMode:   effectiveRuntimeMode,
 			RetryOriginal: true,
 		}, wholeBody(body), wholeBody(body))
+	}
+	// Non-streaming responses are one JSON document: read the whole upstream
+	// body BEFORE the client sees any header. Forwarding chunk-by-chunk meant a
+	// mid-body upstream failure (HTTP/2 stream reset, GOAWAY, connection loss
+	// under concurrent subagent load) surfaced as a 200 with a truncated gzip
+	// payload — the client's ZlibError in #897 — instead of an error it can
+	// retry. One upstream retry, then a clean 502.
+	if !meta.Stream {
+		data, rerr := readUpstreamBody(resp)
+		if rerr != nil && r.Context().Err() == nil {
+			if s.logger != nil {
+				s.logger.Warn("upstream body read failed; retrying once", "error", redact.Error(rerr), "request_id", requestID)
+			}
+			s.inflight.Add(1)
+			retryResp, derr := s.doUpstream(r.Context(), buildUpstream(transform.Body, upstreamHeaders))
+			s.inflight.Add(-1)
+			if derr == nil {
+				resp = retryResp
+				data, rerr = readUpstreamBody(resp)
+			} else {
+				rerr = derr
+			}
+		}
+		if rerr != nil {
+			httpx.Error(w, r, http.StatusBadGateway, "cave_upstream_body_read_failed", "Upstream response could not be read completely.")
+			estimateWG.Wait()
+			s.record(start, 0, requestID, traceID, rc, meta, authMode, http.StatusBadGateway, 0, len(body), rawHash, transformedHash, "cave_upstream_body_read_failed", transform.OptimizerIDs, providers.UsageObservation{CacheStatus: "unknown"}, comp, toolSchemaHandle, false, estimate, evidence, providerCachePrefixSHA256, providerCacheComponentSHA256, cacheBoundaryKnown, cacheBust, compressionEligible)
+			return
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(data))
+		resp.Header.Set("Content-Length", strconv.Itoa(len(data)))
 	}
 	defer resp.Body.Close()
 
@@ -1512,6 +1561,21 @@ func labelOrDefault(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+// readUpstreamBody drains a non-streaming upstream body in full. The cap only
+// bounds memory; a provider JSON document never approaches it.
+func readUpstreamBody(resp *http.Response) ([]byte, error) {
+	defer resp.Body.Close()
+	limit := int64(env.Int("CAVE_MAX_RESPONSE_BUFFER_BYTES", 64<<20))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("upstream body exceeds %d bytes", limit)
+	}
+	return data, nil
 }
 
 type countingWriter struct {

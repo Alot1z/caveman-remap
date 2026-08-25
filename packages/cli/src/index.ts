@@ -52,6 +52,7 @@ import {
   type JSONValue,
 } from "./agent-mcp.js";
 import { portableInvocation } from "./portable-command.js";
+import { hardenedGitArgs, hardenedGitEnv } from "./git-safe.js";
 
 type TokenStore = "keychain" | "file";
 type TelemetryConfig = { enabled: boolean; anonymousId?: string; decidedAt: string; promptVersion: number };
@@ -326,6 +327,9 @@ const LEGACY_HANDLERS: Record<string, CommandHandler> = {
   // humans should not need to.
   "native-hook": (argv) => nativeHook(argv),
   setup: (argv) => setup(argv),
+  // Unprinted (porcelain caps): sync Go binaries to this CLI's pin, then check
+  // npm for a newer CLI — the one verb that answers "am I current?".
+  update: (argv) => update(argv),
   opportunities: (argv) => argv[0] === "list" ? get("/api/v1/opportunities").then(print) : commandUsage("opportunities list"),
   snippets,
   dev: (argv) => {
@@ -484,7 +488,7 @@ const TELEMETRY_COMMAND_ALLOWLIST = [
   "agent", "audit", "billing", "browse", "compress", "convert", "costs", "deploy", "dev", "doctor", "evals", "experiments",
   "explore", "help", "hooks", "init", "keys", "learn", "login", "logout", "mcp", "mem", "opportunities", "plan",
   "projects", "providers", "receipts", "retrieve", "score", "sdk", "setup", "shrink", "shrink-hook", "skills",
-  "run", "snippets", "start", "stats", "status", "sync", "telemetry", "toon", "traces", "trial", "unknown", "usage", "verify", "version", "welcome", "whoami", "wrap",
+  "run", "snippets", "start", "stats", "status", "sync", "telemetry", "toon", "traces", "trial", "unknown", "update", "usage", "verify", "version", "welcome", "whoami", "wrap",
 ] as const;
 const TELEMETRY_COMMANDS = new Set<string>(TELEMETRY_COMMAND_ALLOWLIST);
 const TELEMETRY_SUBCOMMANDS = new Set([
@@ -515,7 +519,7 @@ type TelemetryState = "on" | "off";
 type TelemetrySource = "env" | "config" | "runtime" | "default";
 type TelemetryRuntimeState = { state: TelemetryState; source: TelemetrySource; config: TelemetryConfig | undefined };
 type TelemetryExitClass = "ok" | "error";
-type TelemetryErrorClass = "network" | "auth" | "usage" | "unknown_command" | "other";
+type TelemetryErrorClass = "network" | "auth" | "usage" | "unknown_command" | "exec_failed" | "other";
 
 function telemetryState(): TelemetryRuntimeState {
   const dnt = process.env.DO_NOT_TRACK;
@@ -1006,6 +1010,10 @@ function emitTelemetryEvents(events: Record<string, unknown>[]): Promise<void> {
 function classifyTelemetryError(error: unknown): TelemetryErrorClass {
   const message = error instanceof Error ? error.message : "";
   if (telemetryCommandName() === "unknown" || message.startsWith("unknown command:")) return "unknown_command";
+  // Spawn failures and Windows shim rejections (portable-command.ts) — keep
+  // these out of "other" so agent-launch breakage is visible in telemetry. The
+  // bare "spawn E…" form covers sync spawn throws that skip the exec wrappers.
+  if (/^failed to exec |^spawn |windows command shim/i.test(message)) return "exec_failed";
   if (/not logged in|unauthorized|forbidden|auth/i.test(message)) return "auth";
   if (/fetch failed|ECONN|ENOTFOUND|ETIMEDOUT|network/i.test(message)) return "network";
   if (/^usage:/i.test(message) || /invalid|unknown .*flag/i.test(message)) return "usage";
@@ -2453,6 +2461,54 @@ async function setupInstall(json: boolean, options: { continuing?: boolean } = {
   await writeFile(binaryInstallManifestPath(), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
   await chmod(binaryInstallManifestPath(), 0o600);
   printInstallResult(installed, platform, binDir, json, options.continuing);
+}
+
+// ── caveman update ───────────────────────────────────────────────────────────
+// Syncs the Go binaries in ~/.caveman/bin to the release this CLI pins
+// (setupInstall is idempotent: stale manifest or checksum mismatch
+// re-downloads, current binaries print "already installed"), then checks npm
+// for a newer CLI. A newer CLI pins a newer binary release, so an outdated or
+// unverifiable CLI means the update is not proven complete — exit non-zero.
+function cliVersionBehind(current: string, latest: string): boolean {
+  const have = current.split(".").map((part) => parseInt(part, 10) || 0);
+  const want = latest.split(".").map((part) => parseInt(part, 10) || 0);
+  for (let i = 0; i < 3; i++) {
+    if ((want[i] ?? 0) !== (have[i] ?? 0)) return (want[i] ?? 0) > (have[i] ?? 0);
+  }
+  return false;
+}
+
+async function latestPublishedCliVersion(timeoutSeconds: number): Promise<string | null> {
+  const registry = (process.env.CAVEMAN_NPM_REGISTRY ?? "https://registry.npmjs.org").replace(/\/+$/, "");
+  try {
+    const response = await fetch(`${registry}/@caveman-ai%2fcli`, {
+      headers: { accept: "application/vnd.npm.install-v1+json" },
+      signal: AbortSignal.timeout(timeoutSeconds * 1000),
+    });
+    if (!response.ok) return null;
+    const parsed = (await response.json()) as { "dist-tags"?: { latest?: unknown } };
+    const latest = parsed?.["dist-tags"]?.latest;
+    return typeof latest === "string" && latest ? latest : null;
+  } catch {
+    return null;
+  }
+}
+
+async function update(argv: string[] = []) {
+  if (argv.length > 0) commandUsage("update");
+  await setupInstall(false, { continuing: true });
+  const current = cliVersion();
+  const latest = await latestPublishedCliVersion(setupTimeoutSeconds());
+  if (!latest) {
+    console.error(`${mark("warn")} binaries synced to ${BINARY_RELEASE}, but npm was unreachable — cannot confirm CLI ${current} is the latest`);
+    process.exit(1);
+  }
+  if (cliVersionBehind(current, latest)) {
+    console.error(`${mark("warn")} binaries synced for CLI ${current}, but ${latest} is out — update the CLI, then run this again:`);
+    console.error(`  ${cyan("npm install -g @caveman-ai/cli@latest")}`);
+    process.exit(1);
+  }
+  console.log(`${mark("ok")} up to date — CLI ${current}, binaries ${BINARY_RELEASE}`);
 }
 
 type AgentNativeBundleSkill = {
@@ -4273,7 +4329,7 @@ export function formatSessionSavings(
   // `caveman doctor` only accepts these targets; a wrappable agent that isn't
   // one (e.g. openclaw) must fall back to `generic` so the remediation hint is a
   // runnable command, not a usage error.
-  const doctorTargets = new Set(["claude", "codex", "hermes", "gemini", "opencode", "aider"]);
+  const doctorTargets = new Set(["claude", "codex", "hermes", "gemini", "opencode", "pi", "aider"]);
   const rawTarget = agentId && agentId.trim() ? agentId.trim() : "";
   const doctorTarget = rawTarget ? (doctorTargets.has(rawTarget) ? rawTarget : "generic") : "<agent>";
   // A null summary means the proxy could NOT be read (binary missing, db locked,
@@ -4882,7 +4938,7 @@ function normalizeAgentShortcutWrapArgs(input: string[]): string[] {
 // native path would ever start the proxy or apply routedAiderArgs — a direct
 // launch would point it at a dead endpoint. Aider keeps the wrap door.
 function nativeAgentId(id: string): NativeAgent | undefined {
-  return id === "claude" || id === "codex" || id === "hermes" || id === "gemini" || id === "opencode" ? id : undefined;
+  return id === "claude" || id === "codex" || id === "hermes" || id === "gemini" || id === "opencode" || id === "pi" ? id : undefined;
 }
 
 // `caveman <agent>` — the default door. It persistently enables the native
@@ -4948,7 +5004,14 @@ async function agentShortcut(rest: string[]) {
   const stopProxyKeepalive = startProxyKeepalive();
   const code = await new Promise<number>((resolve, reject) => {
     const invocation = portableInvocation(bin, [...agent.args, ...rest.slice(1)]);
-    const child = spawn(invocation.command, invocation.args, { stdio: "inherit" });
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(invocation.command, invocation.args, { stdio: "inherit" });
+    } catch (error) {
+      // macOS reports some exec failures (e.g. ENOEXEC) synchronously — wrap
+      // them like the async 'error' path so the message names the binary.
+      throw new Error(`failed to exec ${bin}: ${(error as Error).message}`);
+    }
     // tty-generated signals (Ctrl+C / Ctrl+\) already reach the child through
     // the shared foreground group — forwarding would double-deliver them. But
     // process-directed SIGTERM/SIGHUP (timeout(1), supervisors, pkill) only hit
@@ -5309,6 +5372,7 @@ async function spawnWrapped(
       const pluginDir = buildClaudeEphemeralPlugin(ephemeralMcpBinary, includeShrink, Boolean(opts.autoRecall), ephemeralDelegateMcp);
       childArgs = ["--plugin-dir", pluginDir, ...cmdArgs];
     }
+    if (!direct && agent?.id === "pi") childArgs = buildPiWrapArgs(cmdArgs, env, gw);
     if (!direct && agent?.id === "aider") childArgs = routedAiderArgs(cmdArgs);
   } catch (error) {
     direct = true;
@@ -5336,7 +5400,14 @@ async function spawnWrapped(
   try {
     code = await new Promise<number>((resolve, reject) => {
       const invocation = portableInvocation(bin, childArgs);
-      const child = spawn(invocation.command, invocation.args, { stdio: "inherit", env });
+      let child: ReturnType<typeof spawn>;
+      try {
+        child = spawn(invocation.command, invocation.args, { stdio: "inherit", env });
+      } catch (error) {
+        // macOS reports some exec failures (e.g. ENOEXEC) synchronously — wrap
+        // them like the async 'error' path so the message names the binary.
+        throw new Error(`failed to exec ${bin}: ${(error as Error).message}`);
+      }
       const signalHandlers = new Map<NodeJS.Signals, () => void>();
       const removeSignalHandlers = () => {
         for (const [signal, handler] of signalHandlers) process.removeListener(signal, handler);
@@ -5536,6 +5607,16 @@ async function startWrapProxy(mode: WrapRuntimeMode, mcpRecovery: boolean, toon:
   // Same reason as `start`: the dead account variable never rides along inherited.
   delete env.CAVEMAN_WRAP_ENTITLED;
   const child = spawn(resolved, [], { stdio: "ignore", env, detached: true, windowsHide: true });
+  // The caller wraps this in try/catch for fail-open startup, but a try/catch
+  // cannot catch an EventEmitter 'error' — it arrives asynchronously and becomes
+  // an uncaughtException that kills the CLI before the agent ever launches. A
+  // wrong-arch binary (ENOEXEC), a lost x-bit between the isExecutable check and
+  // the spawn (EACCES), or CAVEMAN_PROXY_BIN pointing at a Windows .cmd shim
+  // (EINVAL) all take that path. Every other spawn in this file guards it; the
+  // proxy start is exactly the one that must degrade to "no proxy", not die.
+  child.on("error", (error) => {
+    process.stderr.write(`${mark("warn")} could not start ${bin}: ${(error as Error).message}\n`);
+  });
   child.unref();
   for (let i = 0; i < 20; i++) {
     await sleep(100);
@@ -6238,7 +6319,7 @@ function buildClaudeEphemeralPlugin(
   return dir;
 }
 
-type NativeAgent = "claude" | "codex" | "hermes" | "gemini" | "opencode" | "aider";
+type NativeAgent = "claude" | "codex" | "hermes" | "gemini" | "opencode" | "pi" | "aider";
 
 const NATIVE_CAPABILITIES = [
   "provider_proxy", "session_start", "prompt_submit", "model_before", "model_after",
@@ -6254,6 +6335,7 @@ const NATIVE_CAPABILITY_SUPPORT: Record<NativeAgent, ReadonlySet<NativeCapabilit
   hermes: new Set(["provider_proxy", "session_start", "prompt_submit", "model_after", "pre_tool", "post_tool", "session_end", "mcp", "native_package", "local_runtime_available"]),
   gemini: new Set(["provider_proxy", "session_start", "prompt_submit", "model_before", "model_after", "pre_tool", "post_tool", "pre_compact", "session_end", "mcp", "local_runtime_available"]),
   opencode: new Set(["provider_proxy", "session_start", "prompt_submit", "pre_tool", "post_tool", "post_tool_rewrite", "pre_compact", "post_compact", "session_end", "mcp", "native_package", "skills", "local_runtime_available"]),
+  pi: new Set(["provider_proxy", "session_start", "prompt_submit", "model_before", "model_after", "pre_tool", "post_tool", "post_tool_rewrite", "pre_compact", "post_compact", "session_end", "mcp", "native_package", "local_runtime_available"]),
   aider: new Set(["provider_proxy", "local_runtime_available"]),
 };
 
@@ -6297,7 +6379,7 @@ function nativeCapabilityReport(agent: NativeAgent, components: NativeComponents
     if (capability === "mcp") return components.mcp_recovery;
     if (capability === "skills" || capability === "ide_shared_config") return false;
     if (capability === "native_package") return components.lifecycle_hooks;
-    if (capability === "post_tool_rewrite") return lifecycleActive && (agent === "claude" || agent === "opencode");
+    if (capability === "post_tool_rewrite") return lifecycleActive && (agent === "claude" || agent === "opencode" || agent === "pi");
     return lifecycleActive;
   };
   const basis = versionStatus === "tested" ? "tested_manifest" : "installed_surface_probe_safe_subset";
@@ -6312,7 +6394,7 @@ type NativeMutation = {
   file: string;
   before: Buffer | null;
   after: Buffer;
-  kind: "claude-settings" | "claude-mcp" | "codex-hooks" | "codex-config" | "hermes-config" | "hermes-plugin-manifest" | "hermes-plugin-init" | "gemini-settings" | "gemini-env" | "opencode-config" | "opencode-plugin" | "aider-config" | "aider-core";
+  kind: "claude-settings" | "claude-mcp" | "codex-hooks" | "codex-config" | "hermes-config" | "hermes-plugin-manifest" | "hermes-plugin-init" | "gemini-settings" | "gemini-env" | "opencode-config" | "opencode-plugin" | "pi-extension" | "aider-config" | "aider-core";
   owned?: Record<string, unknown>;
 };
 
@@ -6772,6 +6854,33 @@ function opencodeNativeMutations(gw: string, mcpBinary: string): NativeMutation[
       kind: "opencode-plugin",
     },
   ];
+}
+
+function piNativeMutations(): NativeMutation[] {
+  const extensionDir = join(homedir(), ".pi", "agent", "extensions");
+  // Pi's extension auto-discovery accepts only .ts/.js (isExtensionFile in
+  // pi-coding-agent 0.84.2); a .mjs here would journal fine and never load.
+  const extensionPath = join(extensionDir, "caveman-native.js");
+  const before = fileBytes(extensionPath);
+  if (before && !before.toString("utf8").includes("caveman:native-pi")) {
+    throw new Error(`${extensionPath} already exists and is not Caveman-owned; refusing to overwrite it`);
+  }
+  // Plain `pi` launches carry no wrap env, so the persistent artifact bakes in
+  // the invocation this enable resolved (falling back to PATH when unset) —
+  // same pattern as the generated opencode plugin.
+  const { cmd, pre } = cavemanInvocation();
+  const after = Buffer.concat([
+    Buffer.from("// caveman:native-pi — GENERATED by `caveman enable pi`.\n"),
+    Buffer.from(`process.env.CAVEMAN_PI_HOOK_CMD ??= ${JSON.stringify(JSON.stringify([cmd, ...pre]))};\n`),
+    readFileSync(resolvePiExtension()),
+  ]);
+  return [{
+    file: extensionPath,
+    before,
+    after,
+    kind: "pi-extension",
+    owned: { sha256: bytesHash(after), created_extension_dir: !existsSync(extensionDir) },
+  }];
 }
 
 function aiderCorePath(): string {
@@ -7344,20 +7453,22 @@ function nativeMutationsFor(agent: NativeAgent, gw: string, mcpBinary: string | 
           ? geminiNativeMutations(gw, mcpBinary!)
           : agent === "opencode"
             ? opencodeNativeMutations(gw, mcpBinary!)
-            : aiderNativeMutations(gw);
+            : agent === "pi"
+              ? piNativeMutations()
+              : aiderNativeMutations(gw);
 }
 
 function enableNative(argv: string[]) {
   const detected = argv.includes("--detected");
   const target = argv.find((arg) => !arg.startsWith("--"));
   if ((!detected && !target) || (detected && target) || argv.some((arg) => arg !== "--detected" && arg !== target)) {
-    commandUsage("enable <claude|codex|hermes|gemini|opencode|aider> | enable --detected");
+    commandUsage("enable <claude|codex|hermes|gemini|opencode|pi|aider> | enable --detected");
   }
   const profiles = detected
-    ? AGENTS.filter((agent) => (agent.id === "claude" || agent.id === "codex" || agent.id === "hermes" || agent.id === "gemini" || agent.id === "opencode" || agent.id === "aider") && which(binOf(agent)))
-    : AGENTS.filter((agent) => agent.id === target && (agent.id === "claude" || agent.id === "codex" || agent.id === "hermes" || agent.id === "gemini" || agent.id === "opencode" || agent.id === "aider"));
+    ? AGENTS.filter((agent) => (agent.id === "claude" || agent.id === "codex" || agent.id === "hermes" || agent.id === "gemini" || agent.id === "opencode" || agent.id === "pi" || agent.id === "aider") && which(binOf(agent)))
+    : AGENTS.filter((agent) => agent.id === target && (agent.id === "claude" || agent.id === "codex" || agent.id === "hermes" || agent.id === "gemini" || agent.id === "opencode" || agent.id === "pi" || agent.id === "aider"));
   if (profiles.length === 0) {
-    console.error(detected ? "no supported native agent detected on PATH" : `caveman enable: supported agents are claude, codex, hermes, gemini, opencode, and aider (got ${target ?? ""})`);
+    console.error(detected ? "no supported native agent detected on PATH" : `caveman enable: supported agents are claude, codex, hermes, gemini, opencode, pi, and aider (got ${target ?? ""})`);
     process.exit(1);
   }
   const gw = gatewayURL();
@@ -7381,7 +7492,9 @@ function enableNative(argv: string[]) {
       process.stderr.write(agent === "aider" ? "  recovery MCP: unavailable in Aider\n" : `  recovery MCP: ${mcpBinary}\n`);
       process.stderr.write(agent === "aider"
         ? `  Core: read-only ${aiderCorePath()}; lifecycle/tool interception unavailable; Ledger observational\n`
-        : `  lifecycle/Core/tool rewrite: ${nativeHookCommand(agent)}${agent === "hermes" ? " via native plugin" : ` + ${cavemanBinForHook()} shrink-hook`}\n`);
+        : agent === "pi"
+          ? `  lifecycle/Core/tool rewrite: bundled Pi extension -> ${nativeHookCommand(agent)}\n`
+          : `  lifecycle/Core/tool rewrite: ${nativeHookCommand(agent)}${agent === "hermes" ? " via native plugin" : ` + ${cavemanBinForHook()} shrink-hook`}\n`);
       applyNativeMutations(agent, profile, mutations);
       return "enabled" as const;
     });
@@ -7537,7 +7650,7 @@ function restoreNativeOperation(operation: NativeJournal["operations"][number]):
     }
     return Buffer.from(text.replace(`${block}\n\n`, "").replace(`\n\n${block}\n`, "\n").replace(`${block}\n`, "").replace(block, ""));
   }
-  if (operation.kind === "opencode-plugin") {
+  if (operation.kind === "opencode-plugin" || operation.kind === "pi-extension") {
     throw new Error(`${operation.file} changed after enable; refusing destructive disable`);
   }
   if (operation.kind === "opencode-config") {
@@ -7648,26 +7761,35 @@ function restoreNativeJournalFiles(journal: NativeJournal): Array<{ file: string
   return current;
 }
 
-function cleanupNativeAgentFiles(target: NativeAgent): void {
-  if (target !== "hermes") return;
-  try {
-    if (readdirSync(hermesNativePluginDir()).length === 0) rmSync(hermesNativePluginDir(), { recursive: true });
-  } catch { /* absent or non-empty: preserve */ }
+function cleanupNativeAgentFiles(target: NativeAgent, journal: NativeJournal): void {
+  if (target === "hermes") {
+    try {
+      if (readdirSync(hermesNativePluginDir()).length === 0) rmSync(hermesNativePluginDir(), { recursive: true });
+    } catch { /* absent or non-empty: preserve */ }
+  }
+  if (target === "pi") {
+    const extension = journal.operations.find((operation) => operation.kind === "pi-extension");
+    if (extension?.owned?.created_extension_dir !== true) return;
+    const extensionDir = dirname(extension.file);
+    try {
+      if (readdirSync(extensionDir).length === 0) rmSync(extensionDir, { recursive: true });
+    } catch { /* absent or non-empty: preserve */ }
+  }
 }
 
 function disableNativeAgent(target: NativeAgent): boolean {
   const disabled = withIntegrationLock(target, () => {
     recoverPendingNativeInstallUnlocked(target);
     const journal = readNativeJournal(target);
-    if (!journal) return false;
+    if (!journal) return undefined;
     restoreNativeJournalFiles(journal);
-    return true;
+    return journal;
   });
   if (!disabled) {
     process.stderr.write(`${mark("warn")} ${target}: no native Caveman integration journal found\n`);
     return false;
   }
-  cleanupNativeAgentFiles(target);
+  cleanupNativeAgentFiles(target, disabled);
   const name = findAgent(target)?.display_name ?? target;
   process.stderr.write(`${mark("ok")} ${name}: ${target === "aider" ? "shallow" : "native"} Caveman disabled; unrelated host edits preserved\n`);
   return true;
@@ -7705,7 +7827,7 @@ function repairNativeAgent(target: NativeAgent): void {
 
 function disableNative(argv: string[]) {
   if (argv.length === 1 && argv[0] === "--all") {
-    const targets = (["claude", "codex", "hermes", "gemini", "opencode", "aider"] as NativeAgent[])
+    const targets = (["claude", "codex", "hermes", "gemini", "opencode", "pi", "aider"] as NativeAgent[])
       .filter((agent) => Boolean(readNativeJournal(agent) || readPendingNativeJournal(agent)));
     if (targets.length === 0) {
       process.stderr.write(`${mark("warn")} no native Caveman integrations are journaled\n`);
@@ -7723,7 +7845,7 @@ function disableNative(argv: string[]) {
     return;
   }
   const target = argv[0];
-  if ((target !== "claude" && target !== "codex" && target !== "hermes" && target !== "gemini" && target !== "opencode" && target !== "aider") || argv.length !== 1) commandUsage("disable <claude|codex|hermes|gemini|opencode|aider> | disable --all");
+  if ((target !== "claude" && target !== "codex" && target !== "hermes" && target !== "gemini" && target !== "opencode" && target !== "pi" && target !== "aider") || argv.length !== 1) commandUsage("disable <claude|codex|hermes|gemini|opencode|pi|aider> | disable --all");
   disableNativeAgent(target);
 }
 
@@ -7777,6 +7899,8 @@ function nativeIntegrationStatus(agent: NativeAgent) {
           }) && JSON.stringify(mcp.caveman) === JSON.stringify(operation.owned?.installed_mcp);
         } else if (operation.kind === "opencode-plugin") {
           owned = current.toString("utf8").includes("caveman:native-opencode");
+        } else if (operation.kind === "pi-extension") {
+          owned = current.toString("utf8").includes("caveman:native-pi");
         } else if (operation.kind === "aider-config") {
           const text = current.toString("utf8");
           owned = typeof operation.owned?.route_block === "string" && typeof operation.owned?.read_block === "string"
@@ -7800,13 +7924,28 @@ function nativeIntegrationStatus(agent: NativeAgent) {
   const coreResolution = runtimeConfig.resolution.values["think.core"];
   const coreConfigured = coreResolution.value === true;
   const mcp = probeMcpBinary();
-  const expectedRoute = appendUrlPath(gatewayURL(), agent === "claude" ? "/w/claude" : agent === "hermes" ? "/w/hermes" : agent === "gemini" ? "/w/gemini" : agent === "opencode" ? "/w/opencode" : agent === "aider" ? "/w/aider/openai/v1" : detectCodexWrapAuthMode() === "subscription" ? "/chatgpt" : "/w/codex");
-  const routeKind: NativeMutation["kind"] = agent === "claude" ? "claude-settings" : agent === "codex" ? "codex-config" : agent === "hermes" ? "hermes-config" : agent === "gemini" ? "gemini-env" : agent === "opencode" ? "opencode-config" : "aider-config";
+  const expectedRoute = appendUrlPath(gatewayURL(), agent === "claude" ? "/w/claude" : agent === "hermes" ? "/w/hermes" : agent === "gemini" ? "/w/gemini" : agent === "opencode" ? "/w/opencode" : agent === "pi" ? "/w/pi" : agent === "aider" ? "/w/aider/openai/v1" : detectCodexWrapAuthMode() === "subscription" ? "/chatgpt" : "/w/codex");
+  const routeKind: NativeMutation["kind"] = agent === "claude" ? "claude-settings" : agent === "codex" ? "codex-config" : agent === "hermes" ? "hermes-config" : agent === "gemini" ? "gemini-env" : agent === "opencode" ? "opencode-config" : agent === "pi" ? "pi-extension" : "aider-config";
   const routeOperation = journal?.operations.find((operation) => operation.kind === routeKind);
+  // Pi's artifact encodes no route: the extension resolves the gateway at
+  // runtime through the same env → config → default chain as gatewayURL(), so
+  // route drift between enable and now cannot happen. What CAN drift is the
+  // bundle itself after a CLI upgrade — require the on-disk artifact to end
+  // with the currently shipped bundle bytes so `doctor pi --fix` sees it.
+  const piBundleCurrent = agent !== "pi" || (() => {
+    const current = routeOperation ? fileBytes(routeOperation.file) : null;
+    if (!current) return false;
+    try {
+      const shipped = readFileSync(resolvePiExtension());
+      return current.length >= shipped.length && current.subarray(current.length - shipped.length).equals(shipped);
+    } catch {
+      return false;
+    }
+  })();
   const routeHealthy = ownedHealthy && (agent === "opencode"
     ? (routeOperation?.owned?.routes as Record<string, unknown> | undefined)?.openai === appendUrlPath(expectedRoute, "/openai/v1")
       && (routeOperation?.owned?.routes as Record<string, unknown> | undefined)?.anthropic === appendUrlPath(expectedRoute, "/anthropic/v1")
-    : routeOperation?.owned?.route === expectedRoute);
+    : agent === "pi" ? piBundleCurrent : routeOperation?.owned?.route === expectedRoute);
   const proxyHealthy = wrapMode(gatewayURL()) === "managed" || Boolean(probeProxyVersion()?.capabilities.includes("native_runtime_v1"));
   const recoveryHealthy = agent === "aider" || Boolean(mcp?.probe.current);
   const state = !available ? "unavailable" : transactionPending ? "degraded" : !installed ? "available" : !packCurrent || !ownedHealthy || !routeHealthy || !proxyHealthy || !recoveryHealthy ? "degraded" : "installed";
@@ -7816,11 +7955,11 @@ function nativeIntegrationStatus(agent: NativeAgent) {
 	  : coreSupported && nativeCoreRuntimeState().active;
   const fileText = checks.map((check) => fileBytes(check.file)?.toString("utf8") ?? "").join("\n");
   const components: NativeComponents = {
-    routing: routeHealthy && proxyHealthy && (agent === "claude" ? fileText.includes("ANTHROPIC_BASE_URL") : agent === "codex" ? fileText.includes("model_providers.caveman") : agent === "hermes" ? fileText.includes(HERMES_NATIVE_ROUTE_BEGIN) : agent === "gemini" ? fileText.includes(GEMINI_NATIVE_ENV_BEGIN) : agent === "opencode" ? fileText.includes("caveman:native-opencode") : fileText.includes(AIDER_NATIVE_ROUTE_BEGIN)),
+    routing: routeHealthy && proxyHealthy && (agent === "claude" ? fileText.includes("ANTHROPIC_BASE_URL") : agent === "codex" ? fileText.includes("model_providers.caveman") : agent === "hermes" ? fileText.includes(HERMES_NATIVE_ROUTE_BEGIN) : agent === "gemini" ? fileText.includes(GEMINI_NATIVE_ENV_BEGIN) : agent === "opencode" ? fileText.includes("caveman:native-opencode") : agent === "pi" ? fileText.includes("caveman:native-pi") : fileText.includes(AIDER_NATIVE_ROUTE_BEGIN)),
     lifecycle_hooks: agent !== "aider" && ownedHealthy,
     core: coreActive,
     mcp_recovery: agent !== "aider" && ownedHealthy && Boolean(mcp?.probe.current),
-    tool_rewrite: agent !== "aider" && ownedHealthy && (agent === "hermes" ? false : fileText.includes("shrink-hook")),
+    tool_rewrite: agent !== "aider" && ownedHealthy && (agent === "hermes" ? false : agent === "pi" ? fileText.includes("caveman:native-pi") : fileText.includes("shrink-hook")),
     shared_runtime: proxyHealthy,
   };
   const versionStatus = nativeVersionStatus(host.version, profile.tested_agent_version);
@@ -7905,7 +8044,7 @@ function genericIntegrationStatus(runtimeReachable: boolean) {
 async function nativeDoctor(argv: string[]) {
   const fix = argv.includes("--fix");
   const target = argv.find((arg) => arg !== "--fix");
-  if ((target !== "claude" && target !== "codex" && target !== "hermes" && target !== "gemini" && target !== "opencode" && target !== "aider" && target !== "generic") || argv.length !== (fix ? 2 : 1) || (fix && target === "generic")) commandUsage("doctor <claude|codex|hermes|gemini|opencode|aider|generic> [--fix]");
+  if ((target !== "claude" && target !== "codex" && target !== "hermes" && target !== "gemini" && target !== "opencode" && target !== "pi" && target !== "aider" && target !== "generic") || argv.length !== (fix ? 2 : 1) || (fix && target === "generic")) commandUsage("doctor <claude|codex|hermes|gemini|opencode|pi|aider|generic> [--fix]");
   if (target === "generic") {
     const { host, port } = gatewayHostPort();
     const result = genericIntegrationStatus(await portListening(host, port));
@@ -8368,7 +8507,10 @@ export function buildWrapEnv(agent?: AgentProfile, gw = gatewayURL(), mcpMode: M
     throw new Error("managed Gemini CLI routing is unsupported because Gemini CLI cannot send separate Caveman and upstream credentials");
   }
   const renderedGw = agent ? attributedGatewayUrl(gw, agent) : gw;
-  const env: NodeJS.ProcessEnv = { ...process.env, ...wrapBaseUrlEnv(renderedGw) };
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...(agent?.injection.method === "native-extension" ? {} : wrapBaseUrlEnv(renderedGw)),
+  };
   if (wrapMode(gw) === "managed") {
     const gatewayKey = connectedGatewayAPIKey();
     if (gatewayKey) env.CAVE_API_KEY = gatewayKey;
@@ -9607,6 +9749,12 @@ function queueStaleMcpBinary(probe: VersionedBinaryProbe): void {
 // (honesty rule: no-placeholder)
 function wrapMcpRecoveryAvailable(agent: AgentProfile | undefined, opts: WrapOptions): boolean {
   if (!wrapRecoveryEligible(opts) || !agent) return false;
+  if (agent.id === "pi") {
+    const compatibility = probeMcpBinary();
+    if (!compatibility) return false;
+    if (!compatibility.probe.current) queueStaleMcpBinary(compatibility.probe);
+    return compatibility.probe.current;
+  }
   // Two independent sources of a real caveman_retrieve: a marker from
   // `caveman tools mcp install`, or the profile's own config-file overlay. The
   // second only counts under `auto`, because that is exactly when buildWrapEnv
@@ -9660,6 +9808,27 @@ function resolveDelegateMcpCommand(): { command: string; args: string[] } | null
   ].filter(Boolean);
   const script = candidates.find((c) => existsSync(c));
   return script ? { command: process.execPath, args: [script] } : null;
+}
+
+function resolvePiExtension(): string {
+  const extension = process.env.CAVEMAN_PI_EXTENSION?.trim()
+    || join(dirname(fileURLToPath(import.meta.url)), "caveman-pi-extension.mjs");
+  if (!existsSync(extension)) {
+    throw new Error(`Pi extension not found at ${extension}; set CAVEMAN_PI_EXTENSION or run the CLI build step`);
+  }
+  return extension;
+}
+
+function buildPiWrapArgs(cmdArgs: string[], env: NodeJS.ProcessEnv, gw: string): string[] {
+  const extension = resolvePiExtension();
+  const { cmd, pre } = cavemanInvocation();
+  env.CAVEMAN_PI_HOOK_CMD = JSON.stringify([cmd, ...pre]);
+  env.CAVE_GATEWAY_URL = gw;
+  // The profile's injection block declares the loader flag; using it here keeps the
+  // compiled registry the single source of truth for how the asset is loaded.
+  const profile = AGENTS.find((a) => a.id === "pi");
+  const loaderFlag = profile?.injection.method === "native-extension" ? profile.injection.loader_flag : "--extension";
+  return [loaderFlag, extension, ...cmdArgs];
 }
 
 const HERMES_MCP_BEGIN = "# >>> caveman:mcp";
@@ -10812,7 +10981,8 @@ function nativeGitDir(cwd: string): string | undefined {
 function nativeRepositoryState(cwd: string | undefined): string | undefined {
   if (!cwd) return undefined;
   try {
-    const status = execFileSync("git", ["-C", cwd, "status", "--porcelain=v1", "-z", "--branch", "--untracked-files=all"], {
+    const status = execFileSync("git", hardenedGitArgs(cwd, "status", "--porcelain=v1", "-z", "--branch", "--untracked-files=all"), {
+      env: hardenedGitEnv(),
       timeout: 100,
       maxBuffer: 8 * 1024 * 1024,
       encoding: "buffer",
@@ -11112,7 +11282,7 @@ function nativeWhy(argv: string[]) {
 // never cross the adapter boundary. Any malformed input/write failure stays
 // fail-open and emits no blocking decision.
 async function nativeHook(argv: string[]) {
-  const agent = argv[0] === "claude" || argv[0] === "codex" || argv[0] === "hermes" || argv[0] === "gemini" || argv[0] === "opencode" ? argv[0] : undefined;
+  const agent = argv[0] === "claude" || argv[0] === "codex" || argv[0] === "hermes" || argv[0] === "gemini" || argv[0] === "opencode" || argv[0] === "pi" ? argv[0] : undefined;
   if (!agent) process.exit(0);
   let raw: Buffer;
   try { raw = await readStdin(); } catch { process.exit(0); }
@@ -11150,7 +11320,13 @@ async function nativeHook(argv: string[]) {
   if (sessionId) entry.host_session_id = sessionId;
   if (toolName) entry.tool_name = toolName;
   if (cwd) entry.cwd_sha256 = `sha256:${createHash("sha256").update(cwd).digest("hex")}`;
-  if (normalizedEvent === "SessionStart") {
+  // SessionStart revives a missing local proxy, but native routing points every
+  // LATER turn of the session at that proxy too, and a wrap-owned instance
+  // idle-exits ~30m after its wrap dies. A plain (unwrapped) session then
+  // hard-fails with ConnectionRefused on its next prompt, with nothing left to
+  // restart the proxy. The port check below makes the revive idempotent, so run
+  // it for the mid-session events that reach the full CLI as well.
+  if (normalizedEvent === "SessionStart" || normalizedEvent === "UserPromptSubmit" || normalizedEvent === "PostCompact") {
     try {
       const opts = defaultWrapOptions();
       const gw = gatewayURL();
@@ -11228,7 +11404,7 @@ async function nativeHook(argv: string[]) {
     process.stdout.write(JSON.stringify({
       hookSpecificOutput: { hookEventName: "PostToolUse", updatedToolOutput: runtimeResponse.output_replacement },
     }));
-  } else if (policyMode !== "record" && agent === "opencode" && normalizedEvent === "PostToolUse" && runtimeResponse) {
+  } else if (policyMode !== "record" && (agent === "opencode" || agent === "pi") && (normalizedEvent === "PostToolUse" || normalizedEvent === "PostToolUseFailure") && runtimeResponse) {
     process.stdout.write(JSON.stringify(runtimeResponse));
   }
 }
@@ -11361,10 +11537,13 @@ function expandTilde(p: string): string {
 // commandHookKind classifies an agent's command-output hook surface so callers can
 // speak about it honestly: "hard" = a deterministic pre-exec command rewrite (RTK
 // parity), "soft" = a model nudge in an auto-read instructions file (best-effort,
-// not a rewrite), "none" = no surface we can install (manual `caveman shrink` only).
-function commandHookKind(a: AgentProfile): "hard" | "soft" | "none" {
+// not a rewrite), "native" = the rewrite ships inside the agent's native
+// extension (`caveman enable <agent>`), nothing separate to install here,
+// "none" = no surface we can install (manual `caveman shrink` only).
+function commandHookKind(a: AgentProfile): "hard" | "soft" | "native" | "none" {
   const ch = a.command_hook;
   if (!ch) return "none";
+  if (ch.method === "pi-extension") return "native";
   return ch.method === "instruction-note" ? "soft" : "hard";
 }
 
@@ -11394,6 +11573,10 @@ function installShrinkHookForAgent(a: AgentProfile): boolean {
       return installShrinkPluginHermes();
     case "openclaw-plugin":
       return installShrinkPluginOpenClaw();
+    case "pi-extension":
+      // Pi's rewrite surface IS the native extension (`caveman enable pi`); there is
+      // no separate hook artifact to install here.
+      return false;
     case "instruction-note":
       return installShrinkNote(ch.file);
   }
@@ -11415,6 +11598,9 @@ function removeShrinkHookForAgent(a: AgentProfile): boolean {
       return removeShrinkPluginHermes();
     case "openclaw-plugin":
       return removeShrinkPluginOpenClaw();
+    case "pi-extension":
+      // Removed together with the native extension (`caveman disable pi`).
+      return false;
     case "instruction-note":
       return removeShrinkNote(ch.file);
   }
@@ -12279,7 +12465,8 @@ function hooksCmd(rest: string[]) {
   } else {
     // No agent named: target every known agent with an installable hook surface
     // that is actually present on PATH (mirrors `mcp install`'s detect-all path).
-    targets = AGENTS.filter((a) => commandHookKind(a) !== "none" && which(binOf(a)));
+    // "native" surfaces install through `caveman enable <agent>`, not here.
+    targets = AGENTS.filter((a) => commandHookKind(a) !== "none" && commandHookKind(a) !== "native" && which(binOf(a)));
     if (targets.length === 0) {
       console.error("no hookable agents detected on PATH; pass an agent id, e.g. `caveman hooks install claude`");
       process.exit(1);
@@ -12294,6 +12481,8 @@ function hooksCmd(rest: string[]) {
         n++;
         if (commandHookKind(a) === "hard") hard++;
         process.stderr.write(`${mark("ok")} ${a.display_name}: ${hookInstalledPhrase(a)}\n`);
+      } else if (commandHookKind(a) === "native") {
+        process.stderr.write(`${mark("ok")} ${a.display_name}: command-output rewrite ships with the native extension — run ${cyan(`caveman enable ${a.id}`)}\n`);
       } else if (commandHookKind(a) === "none") {
         process.stderr.write(`${mark("warn")} ${a.display_name}: no automatic command-output hook surface — run noisy commands through ${cyan("caveman shrink -- <cmd>")}\n`);
       } else {
@@ -12312,6 +12501,10 @@ function hooksCmd(rest: string[]) {
     return;
   }
   for (const a of targets) {
+    if (commandHookKind(a) === "native") {
+      process.stderr.write(`${mark("ok")} ${a.display_name}: command-output rewrite ships with the native extension — remove with ${cyan(`caveman disable ${a.id}`)}\n`);
+      continue;
+    }
     const removed = removeShrinkHookForAgent(a);
     try { unlinkSync(shrinkHookMarkerPath(a.id)); } catch { /* no marker — fine */ }
     process.stderr.write(`${mark(removed ? "ok" : "warn")} ${a.display_name}: ${removed ? "command-output hook removed" : "no caveman hook found"}\n`);
@@ -12551,6 +12744,17 @@ type LearnConfirmed = {
   verdict: "improved" | "unchanged" | "regressed" | "insufficient_data";
   supporting_prefix_tokens?: number;
   supporting_prefix_sessions?: number;
+  // How the after-value was obtained, and whether the artifact caveman
+  // fingerprinted at apply time is still the artifact on disk. Absent on older
+  // proxies; a row without it is unattributed, not attributed-by-default.
+  attribution?: {
+    method: string;
+    rung: number;
+    confidence: string;
+    provenance: string;
+    target_path?: string;
+    confounders?: string[];
+  };
 };
 
 type LearnPortfolioGroup = {
@@ -12578,6 +12782,24 @@ type LearnRepo = {
   measured_prefix_tokens?: number;
 };
 
+// LearnSpend prices the scanned window from provider-counted usage at the
+// dated catalog's published rates. It is spend attribution, never a savings
+// claim, and older proxies omit it — treat it as absent-able.
+type LearnSpendComponent = { key: string; tokens: number; usd: number; share_pct?: number };
+type LearnSpend = {
+  basis: string;
+  currency: string;
+  catalog_version?: string;
+  window_days?: number;
+  usd: number;
+  tokens?: number;
+  components?: LearnSpendComponent[];
+  unpriced?: { provider: string; model: string; tokens: number; reason: string }[];
+  effective_input_usd_per_mtok?: number;
+  effective_input_multiplier?: number;
+  caveats?: string[];
+};
+
 type LearnPlan = {
   schema: "caveman.learn.v1";
   basis: "inferred";
@@ -12586,6 +12808,7 @@ type LearnPlan = {
   cave_score: { score: number; basis: string; scope?: string };
   sinks: LearnSink[];
   retro?: LearnRetro;
+  spend?: LearnSpend;
   confirmed?: LearnConfirmed[];
   portfolio?: LearnPortfolio;
   repos?: LearnRepo[];
@@ -12847,6 +13070,37 @@ export function buildLearnTuiModel(
   };
 }
 
+// renderLearnSpendLines shows what the scanned window cost and, more usefully,
+// what a million input tokens ACTUALLY cost after the user's own cache mix.
+// The multiplier is the one number that decides whether every other finding in
+// the report is expensive or trivial, so it earns a line above the moves.
+function renderLearnSpendLines(spend: LearnSpend | undefined, markdown: boolean): string[] {
+  if (!spend) return [];
+  const lines: string[] = [];
+  const currency = spend.currency || "USD";
+  const label = markdown ? "### Window cost" : "window cost";
+  if (spend.usd > 0) {
+    const window = spend.window_days ? ` over ${spend.window_days}d` : "";
+    lines.push(`${label}  ${fmtMoney(spend.usd, currency)}${window}  ·  provider-counted tokens at published rates`);
+  }
+  const multiplier = spend.effective_input_multiplier ?? 0;
+  const rate = spend.effective_input_usd_per_mtok ?? 0;
+  if (multiplier > 0 && rate > 0) {
+    lines.push(`effective input  ${fmtMoney(rate, currency)}/Mtok  ·  ${multiplier.toFixed(2)}x list after cache reuse`);
+  }
+  const components = (spend.components ?? []).filter((component) => component.usd > 0);
+  if (components.length > 0 && spend.usd > 0) {
+    lines.push(components.map((component) => `${component.key.replace("_", " ")} ${Math.round(component.share_pct ?? 0)}%`).join("  ·  "));
+  }
+  for (const row of spend.unpriced ?? []) {
+    lines.push(`unpriced  ${row.provider}/${row.model}  ${humanTokens(row.tokens)} tokens excluded — total is a floor`);
+  }
+  if (lines.length > 0) {
+    lines.push("subscription plans have no marginal cost; the figure is then the API-equivalent value of the tokens");
+  }
+  return lines;
+}
+
 export function renderLearnPlan(
   plan: LearnPlan,
   options: { markdown?: boolean; report?: string; diff?: LearnDiff; verbose?: boolean; all?: boolean } = {},
@@ -12884,6 +13138,8 @@ export function renderLearnPlan(
     }
     const diffText = learnDiffText(options.diff);
     if (diffText) lines.push(diffText);
+    const spendLines = renderLearnSpendLines(plan.spend, markdown);
+    if (spendLines.length > 0) lines.push("", ...spendLines);
     if (confirmedLines.length > 0) lines.push("", ...confirmedLines);
     if (verbose) {
       lines.push("", ...renderLearnDetailedRows(plan, markdown), "", LEARN_DETAILED_NEXT);
@@ -12945,7 +13201,12 @@ function renderLearnConfirmed(confirmed: LearnConfirmed[] | undefined, markdown:
       return [markdown ? `- *${line}*` : line];
     }
     if (entry.after === undefined || !Number.isFinite(entry.after)) return [];
-    const line = `${symbols[entry.verdict]} ${entry.sink_id} — ${learnMeasureValue(entry.before)} → ${learnMeasureValue(entry.after)} ${learnMeasureUnit(entry.unit)} over ${entry.sessions_after} sessions (${entry.verdict}) · applied ${applied}`;
+    // How it was measured travels with the number. A confirmed row without its
+    // attribution reads as stronger evidence than it is.
+    const attribution = entry.attribution
+      ? ` · ${entry.attribution.method} (${entry.attribution.confidence}${entry.attribution.provenance === "intact" ? "" : `, ${entry.attribution.provenance}`})`
+      : "";
+    const line = `${symbols[entry.verdict]} ${entry.sink_id} — ${learnMeasureValue(entry.before)} → ${learnMeasureValue(entry.after)} ${learnMeasureUnit(entry.unit)} over ${entry.sessions_after} sessions (${entry.verdict}) · applied ${applied}${attribution}`;
     return [markdown ? `- ${line}` : line];
   });
   if (rows.length === 0) return [];
@@ -13146,6 +13407,90 @@ function renderLearnApply(raw: Record<string, any>, dryRun: boolean): string {
   return `${lines.join("\n")}\n`;
 }
 
+// renderLearnSavings prints the attributed savings ledger. The design rule it
+// enforces visually is the same one the analyzer enforces structurally: rows
+// are grouped by how they were measured, and there is no single blended total.
+// A re-counted file and a before/after session median never share a number.
+export function renderLearnSavings(raw: Record<string, any>): string {
+  const rows = Array.isArray(raw.rows) ? (raw.rows as Record<string, any>[]) : [];
+  const currency = String(raw.currency ?? "");
+  const out: string[] = [];
+  if (rows.length === 0) {
+    out.push("no fix recorded yet");
+    out.push("apply one through the caveman-learn skill and it lands here with its attribution");
+    for (const caveat of (raw.caveats ?? []) as string[]) out.push(dim(`· ${caveat}`));
+    return `${out.join("\n")}\n`;
+  }
+  const byRung = raw.total_saved_usd_by_rung as Record<string, number> | undefined;
+  const grouped = new Map<string, Record<string, any>[]>();
+  for (const row of rows) {
+    const method = String(row.attribution?.method ?? "unattributed");
+    if (!grouped.has(method)) grouped.set(method, []);
+    grouped.get(method)!.push(row);
+  }
+  for (const [method, group] of grouped) {
+    const total = byRung?.[method];
+    const head = total != null && currency
+      ? `${method}  ${fmtMoney(total, currency)}/day`
+      : method;
+    out.push(bold(head));
+    for (const row of group) {
+      const verdict = String(row.verdict ?? "");
+      const badge = verdict === "improved" ? green("✓") : verdict === "regressed" ? red("✗") : yellow("~");
+      const saved = row.saved_value != null
+        ? `${Number(row.saved_value) > 0 ? "−" : "+"}${Math.abs(Number(row.saved_value)).toFixed(0)} ${String(row.unit ?? "")}`
+        : verdict;
+      const money = row.saved_usd != null && currency ? `  ${fmtMoney(Number(row.saved_usd), currency)}/day` : "";
+      out.push(`  ${badge} ${String(row.sink_id ?? "")}  ${saved}${money}`);
+      out.push(dim(`      ${String(row.attribution?.provenance ?? "")} · confidence ${String(row.attribution?.confidence ?? "")}`));
+      for (const confounder of (row.attribution?.confounders ?? []) as string[]) {
+        out.push(dim(`      · ${confounder}`));
+      }
+    }
+    out.push("");
+  }
+  for (const caveat of (raw.caveats ?? []) as string[]) out.push(dim(`· ${caveat}`));
+  return `${out.join("\n")}\n`;
+}
+
+// fmtMoney keeps sub-cent figures legible instead of rounding real spend to
+// $0.00, which reads as "nothing" when it is not.
+export function fmtMoney(value: number, currency: string): string {
+  const symbol = currency === "USD" ? "$" : `${currency} `;
+  if (!Number.isFinite(value)) return `${symbol}0`;
+  if (Math.abs(value) >= 1) return `${symbol}${value.toFixed(2)}`;
+  if (Math.abs(value) >= 0.01) return `${symbol}${value.toFixed(3)}`;
+  return `${symbol}${value.toFixed(5)}`;
+}
+
+
+// renderExperimentReport prints a holdout result. The design rule: the verdict
+// never appears without the arm sizes that produced it, and the confounders are
+// in the default view rather than behind a flag.
+export function renderExperimentReport(raw: Record<string, any>): string {
+  const arms = Array.isArray(raw.arms) ? (raw.arms as Record<string, any>[]) : [];
+  const out: string[] = [bold(`experiment ${String(raw.label ?? "")}`)];
+  if (raw.sink_id) out.push(dim(`sink ${String(raw.sink_id)} · ${String(raw.fix_kind ?? "")}`));
+  for (const arm of arms) {
+    out.push(`  ${String(arm.arm).padEnd(4)}  ${arm.sessions} sessions  median ${humanTokens(Number(arm.median_session_tokens ?? 0))} tok/session  ${Number(arm.error_turns_per_turn ?? 0).toFixed(2)} err/turn`);
+  }
+  const verdict = String(raw.verdict ?? "insufficient_data");
+  const badge = verdict === "improved" ? green("✓") : verdict === "regressed" ? red("✗") : yellow("~");
+  const delta = raw.median_session_tokens_delta_pct != null
+    ? `  ${Number(raw.median_session_tokens_delta_pct) > 0 ? "+" : ""}${Number(raw.median_session_tokens_delta_pct).toFixed(1)}%`
+    : "";
+  const money = raw.saved_usd_per_session != null && raw.currency
+    ? `  ${fmtMoney(Number(raw.saved_usd_per_session), String(raw.currency))}/session`
+    : "";
+  out.push(`  ${badge} ${verdict}${delta}${money}`);
+  if (raw.attribution?.method) {
+    out.push(dim(`  ${String(raw.attribution.method)} · confidence ${String(raw.attribution.confidence ?? "")}`));
+    for (const confounder of (raw.attribution.confounders ?? []) as string[]) out.push(dim(`  · ${confounder}`));
+  }
+  for (const caveat of (raw.caveats ?? []) as string[]) out.push(dim(`  · ${caveat}`));
+  return `${out.join("\n")}\n`;
+}
+
 function learnUsage(): void {
   console.log(`${invokedAs()} learn [--all|--plain|--json|--md] [--since 30d] [--sources claude,codex,gemini,opencode,aider]
   default       interactive setup score + grouped top moves
@@ -13154,6 +13499,14 @@ function learnUsage(): void {
   --json|--md   machine-readable or detailed Markdown output
   implement     open Claude Code or Codex to review and fix findings
   apply         prepare one finding for consent-gated editing
+
+  savings       what applied fixes returned, grouped by how it was measured
+  experiment    prove a change with an on/off holdout over your own sessions
+                start <label> [--sink <id>] · arm <label> on|off · report <label>
+                · list · stop <label>
+  export        privacy-safe digest of findings (identities and magnitudes only)
+  reconcile --usage-export <csv>
+                compare what was measured against what the provider billed
 
   advanced:
   applied <sink_id> [--fix-kind <kind>] [--note <text>]
@@ -13274,6 +13627,31 @@ async function learn(rest: string[]) {
   const sub = rest[0];
   if (sub === "--help" || sub === "-h" || sub === "help") return learnUsage();
   if (sub === "implement") return learnImplement(rest.slice(1));
+  if (sub === "export" || sub === "reconcile") {
+    // Both are inspect-before-you-act surfaces, so they stay machine-readable:
+    // the digest is a file the user reads before deciding to share it, and a
+    // reconciliation is a table, not a headline.
+    process.stdout.write(formatLearnProxyJSON(proxyExecLearn(["learn", ...rest], false)));
+    return;
+  }
+  if (sub === "experiment") {
+    const rawText = proxyExecLearn(["learn", ...rest], false);
+    if (rest.includes("--json") || !["report"].includes(String(rest[1] ?? ""))) {
+      process.stdout.write(formatLearnProxyJSON(rawText));
+      return;
+    }
+    process.stdout.write(renderExperimentReport(JSON.parse(rawText) as Record<string, any>));
+    return;
+  }
+  if (sub === "savings") {
+    const rawText = proxyExecLearn(["learn", ...rest], false);
+    if (rest.includes("--json")) {
+      process.stdout.write(formatLearnProxyJSON(rawText));
+      return;
+    }
+    process.stdout.write(renderLearnSavings(JSON.parse(rawText) as Record<string, any>));
+    return;
+  }
   if (sub === "applied" || sub === "simulate") {
     const rawText = proxyExecLearn(["learn", ...rest], false);
     process.stdout.write(formatLearnProxyJSON(rawText));
@@ -13689,6 +14067,13 @@ function usageSecretDir() {
 
 function readStdin(): Promise<Buffer> {
   return new Promise((resolve, reject) => {
+    // No pipe, no input. On a TTY stdin never ends, so `caveman compress` or
+    // `toon encode` typed without a redirect sat there forever looking like a
+    // prompt with nothing to type into.
+    if (process.stdin.isTTY) {
+      reject(new Error("no input on stdin — pipe a file in, e.g. `cat file | caveman …`"));
+      return;
+    }
     const chunks: Buffer[] = [];
     process.stdin.on("data", (chunk) => chunks.push(chunk));
     process.stdin.on("end", () => resolve(Buffer.concat(chunks)));
@@ -14104,7 +14489,7 @@ async function status(argv: string[]) {
     },
     next,
   };
-  const native = (["claude", "codex", "hermes", "gemini", "opencode", "aider"] as const).map((agent) => {
+  const native = (["claude", "codex", "hermes", "gemini", "opencode", "pi", "aider"] as const).map((agent) => {
     const integration = nativeIntegrationStatus(agent);
     return {
       ...integration,
@@ -15395,7 +15780,9 @@ more
   caveman cloud          connected           ·  caveman help cloud`;
 
 function renderedAgentList(): string {
-  const visible = AGENTS.slice(0, 7).map((agent) => agent.id);
+  // 8 fits todays registry on one line; "+N more" would render longer than
+  // the ids it hides.
+  const visible = AGENTS.slice(0, 8).map((agent) => agent.id);
   const remaining = AGENTS.length - visible.length;
   return `${visible.join(" | ")}${remaining > 0 ? ` | +${remaining} more — ${invokedAs()} run` : ""}`;
 }

@@ -7,6 +7,7 @@ package standalone
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -119,6 +120,9 @@ func bearerKey(raw string) string {
 // the binary wires the engine-backed one when mode is compress or pixel.
 type Options struct {
 	HTTPClient *http.Client
+	// Logger receives gateway warnings (upstream failures, copy errors). Nil
+	// silences them, which is how the serve path ran until #897.
+	Logger     *slog.Logger
 	Compressor gateway.Compressor
 	// PrefixCache is the durable original→replacement map that keeps a compressed
 	// message byte-stable on every later turn (see gateway.PrefixCache). The binary
@@ -163,6 +167,7 @@ func New(cfg config.Config, sink gateway.TelemetrySink, opts Options) *gateway.S
 		ToolSchemaStrip:      cfg.ToolSchemaStrip,
 		BreakpointPlan:       cfg.BreakpointPlan,
 		HTTPClient:           client,
+		Logger:               opts.Logger,
 	})
 }
 

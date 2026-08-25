@@ -321,7 +321,10 @@ func (s *Server) recordChatGPT(rc RequestContext, r *http.Request, requestID, tr
 		}
 	}
 	s.sink.Record(RequestRecord{
-		Timestamp:                start.UTC().Format(time.RFC3339Nano),
+		// storeTSLayout, not RFC3339Nano: the store's `ts` column is space-separated
+		// and compared/ordered as text. 'T' sorts after ' ', so RFC3339 rows landed
+		// on the wrong side of every `--since` bound and mis-sorted under ORDER BY ts.
+		Timestamp:                start.UTC().Format("2006-01-02 15:04:05.000"),
 		RequestID:                requestID,
 		TraceID:                  traceID,
 		Label:                    labelOrDefault(rc.Label, "local"),

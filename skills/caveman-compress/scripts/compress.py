@@ -112,7 +112,7 @@ class LockTimeoutError(TimeoutError):
 
 
 def lock_path_for(filepath: Path) -> Path:
-    """Cross-session lock path keyed on the same (parent-dir-name, stem) identity backup_dir_for uses for its own collision guard, derived from backup_dir_for itself so the two can't drift apart — two source files that would write the same backup path must also serialize on the same lock. The key is hashed rather than embedded as plaintext so a lock for a file later refused as sensitive (e.g. id_rsa) doesn't leak its name into a world-readable state directory."""
+    """Cross-session lock path keyed on the same (parent-dir-name, stem) identity backup_dir_for uses for its own collision guard, derived from backup_dir_for itself so the two can't drift apart — two source files that would write the same backup path must also serialize on the same lock. Hashed into a fixed-length digest rather than embedded as plaintext so the key stays filesystem-safe regardless of the source path's length or characters."""
     resolved = filepath.resolve()
     backup_path = backup_dir_for(resolved) / (resolved.stem + ".original.md")
     digest = hashlib.sha256(str(backup_path).encode("utf-8")).hexdigest()[:16]
@@ -151,8 +151,9 @@ def file_lock(filepath: Path):
     if lock_dir.is_symlink():  # best-effort: catches a pre-staged symlink at this exact component; mkdir(exist_ok=True) would otherwise follow it, and _O_NOFOLLOW below only guards the final path component
         raise OSError(f"Refusing to use lock directory through a symlink: {lock_dir}")
     lock_dir.mkdir(parents=True, exist_ok=True)
-    if not _IS_WINDOWS:  # keys are unsalted hashes of a guessable path; keep the directory listing to this user only
-        os.chmod(lock_dir, 0o700)
+    if not _IS_WINDOWS:  # best-effort: keys are unsalted hashes of a guessable path, keep the directory listing to this user only; some CIFS/FAT/FUSE mounts reject chmod outright, so a failure here is not fatal
+        with contextlib.suppress(OSError):
+            os.chmod(lock_dir, 0o700)
     if lock_path.is_symlink():  # best-effort on Windows too, where O_NOFOLLOW (POSIX-only, below) can't guard this component
         raise OSError(f"Refusing to open lock file through a symlink: {lock_path}")
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | _O_NOFOLLOW, 0o600)
@@ -178,7 +179,7 @@ def file_lock(filepath: Path):
                     printed_waiting = True
                 time.sleep(LOCK_POLL_INTERVAL)
             except OSError as e:
-                if e.errno in (errno.ENOLCK, errno.EOPNOTSUPP, errno.ENOSYS):  # filesystem doesn't implement flock/byte-range locking (some NFS/SMB/FUSE mounts) — degrade to no coordination rather than fail a run that worked before this lock existed
+                if e.errno in (errno.EOPNOTSUPP, errno.ENOSYS):  # filesystem doesn't implement flock/byte-range locking at all (some NFS/SMB/FUSE mounts) — degrade to no coordination rather than fail a run that worked before this lock existed. ENOLCK deliberately excluded: it means the kernel is out of lock-record memory, a transient condition, not "unsupported" — treating it as unsupported would let a genuinely contended lock proceed unlocked
                     print(f"⚠️ {lock_dir}'s filesystem doesn't support file locking — proceeding without cross-session coordination.", flush=True)
                     break
                 raise
@@ -461,6 +462,7 @@ def compress_file(filepath: Path) -> bool:
     # Resolve first so the lock and every check below key off the same canonical path regardless of how the caller spelled it.
     filepath = filepath.resolve()
 
+    # None of these three checks depends on mutual exclusion, so they run before the lock is taken — a rejected input (bad path, oversized, sensitive name) shouldn't leave a permanent lock file behind in shared state.
     MAX_FILE_SIZE = 500_000  # 500KB
     if not filepath.exists():
         raise FileNotFoundError(f"File not found: {filepath}")
@@ -479,7 +481,6 @@ def compress_file(filepath: Path) -> bool:
             "Rename the file if this is a false positive."
         )
 
-    # These checks run before the lock is taken: none depends on mutual exclusion, and a rejected input (bad path, oversized, sensitive name) shouldn't leave a permanent lock file behind in shared state.
     with file_lock(filepath):
         return _compress_file_locked(filepath)
 

@@ -1,5 +1,6 @@
 """Tests for the cross-session compress lock — without it, two concurrent caveman-compress runs on the same file interleave reads/writes and silently corrupt output; file_lock serializes access per (parent-dir-name, stem), matching backup_dir_for's own collision domain."""
 
+import errno
 import os
 import sys
 import tempfile
@@ -196,6 +197,37 @@ class FileLockTests(unittest.TestCase):
                     pass
                 self.assertLess(time.monotonic() - start, 1)
 
+    def test_filesystem_without_lock_support_degrades_to_unlocked(self):
+        with tempfile.TemporaryDirectory() as data_home:
+            with mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
+                target = Path("/tmp/whatever/CLAUDE.md")
+                entered = []
+                with mock.patch.object(compress_mod, "_try_lock_nonblocking", side_effect=OSError(errno.EOPNOTSUPP, "Operation not supported")):
+                    with compress_mod.file_lock(target):
+                        entered.append(True)  # must still reach the critical section instead of raising
+                self.assertEqual(entered, [True])
+
+    def test_enolck_is_not_treated_as_unsupported_and_still_raises(self):
+        # ENOLCK is the kernel out of lock-record memory, not "this filesystem has no locking" — treating it as the latter would let a genuinely contended lock proceed unlocked.
+        with tempfile.TemporaryDirectory() as data_home:
+            with mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
+                target = Path("/tmp/whatever/CLAUDE.md")
+                with mock.patch.object(compress_mod, "_try_lock_nonblocking", side_effect=OSError(errno.ENOLCK, "No locks available")):
+                    with self.assertRaises(OSError) as ctx:
+                        with compress_mod.file_lock(target):
+                            pass  # pragma: no cover - must never be reached
+                self.assertEqual(ctx.exception.errno, errno.ENOLCK)
+
+    @unittest.skipIf(compress_mod._IS_WINDOWS, "POSIX permission bits only")
+    def test_lock_dir_is_chmod_0700(self):
+        with tempfile.TemporaryDirectory() as data_home:
+            with mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
+                target = Path("/tmp/whatever/CLAUDE.md")
+                with compress_mod.file_lock(target):
+                    pass
+                lock_dir = compress_mod.lock_path_for(target).parent
+                self.assertEqual(lock_dir.stat().st_mode & 0o777, 0o700)
+
 
 class CompressFileLockIntegrationTests(unittest.TestCase):
     def test_concurrent_compress_calls_serialize_instead_of_interleaving(self):
@@ -233,8 +265,9 @@ class CompressFileLockIntegrationTests(unittest.TestCase):
                     t2.start()
                     t1.join(timeout=10)
                     t2.join(timeout=10)
-                self.assertFalse(t1.is_alive())
-                self.assertFalse(t2.is_alive())
+                    # Asserted inside the patch scope: a still-alive thread here would otherwise resume, past this point, against the REAL call_claude once the patches above unwind.
+                    self.assertFalse(t1.is_alive())
+                    self.assertFalse(t2.is_alive())
 
                 # Exactly one compression ran — the lock stopped the second thread from touching the file while the first was mid-flight.
                 self.assertEqual(len(call_starts), 1)
@@ -242,6 +275,20 @@ class CompressFileLockIntegrationTests(unittest.TestCase):
                 self.assertEqual(sorted(results), [False, True])
                 self.assertEqual(path.read_text(encoding="utf-8"), compressed)
                 self.assertTrue(lock_path.exists())
+
+    def test_rejected_input_leaves_no_lock_file_behind(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as data_home:
+            with mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
+                sensitive = Path(tmp) / "id_rsa"
+                sensitive.write_text("fake key material")
+                with self.assertRaises(ValueError):
+                    compress_mod.compress_file(sensitive)
+                self.assertFalse(compress_mod._state_base_dir("locks").exists())
+
+                missing = Path(tmp) / "nope.md"
+                with self.assertRaises(FileNotFoundError):
+                    compress_mod.compress_file(missing)
+                self.assertFalse(compress_mod._state_base_dir("locks").exists())
 
 
 if __name__ == "__main__":

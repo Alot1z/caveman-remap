@@ -353,6 +353,11 @@ from .validate import validate
 
 MAX_RETRIES = 2
 
+# Bounds each individual Claude call so a stalled CLI (dropped network, an
+# auth prompt with no TTY to answer it) can't hang past what LOCK_WAIT_SECONDS
+# assumes for the whole run's worst case (MAX_RETRIES+1 calls).
+CLAUDE_CALL_TIMEOUT_SECONDS = LOCK_WAIT_SECONDS // (MAX_RETRIES + 1)
+
 
 # ---------- Claude Calls ----------
 
@@ -375,7 +380,7 @@ def call_claude(prompt: str) -> str:
         try:
             import anthropic
 
-            client = anthropic.Anthropic(api_key=api_key)
+            client = anthropic.Anthropic(api_key=api_key, timeout=CLAUDE_CALL_TIMEOUT_SECONDS)
             msg = client.messages.create(
                 model=os.environ.get("CAVEMAN_MODEL", "claude-sonnet-4-5"),
                 max_tokens=8192,
@@ -400,10 +405,16 @@ def call_claude(prompt: str) -> str:
             check=True,
             encoding="utf-8",
             errors="replace",
+            timeout=CLAUDE_CALL_TIMEOUT_SECONDS,
         )
         return strip_llm_wrapper(result.stdout.strip())
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Claude call failed:\n{e.stderr}")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"Claude CLI call timed out after {CLAUDE_CALL_TIMEOUT_SECONDS}s "
+            "(stalled network, or an auth prompt with no TTY to answer it)"
+        )
 
 
 def build_compress_prompt(original: str) -> str:

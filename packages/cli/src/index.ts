@@ -124,8 +124,12 @@ function gatewayUrlFromConfigFile(): string {
 // still runs verbatim with the generic provider base-URL injection.
 const AGENTS: AgentProfile[] = PROFILES;
 
-// binOf is the primary binary name to resolve on PATH for an agent profile.
+// binOf prefers the first installed published binary and falls back to the
+// primary name for install hints. Some packages intentionally publish aliases.
 function binOf(a: AgentProfile): string {
+  for (const name of a.binary_names) {
+    if (which(name)) return name;
+  }
   return a.binary_names[0] ?? a.id;
 }
 

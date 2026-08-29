@@ -264,22 +264,22 @@ def verify_manifests_and_syntax() -> None:
         "plugin.json must not declare `agents` — the array form loads no "
         "agents at all; the default agents/ scan is the only working path",
     )
-    # The default scan turns EVERY top-level .md in agents/ into a subagent,
-    # named from its frontmatter or filename. agents/AGENTS.md and
-    # agents/CLAUDE.md (maintainer docs for the profile registry) shipped as
-    # bogus subagents named AGENTS and CLAUDE; they now live in agents/docs/,
-    # which the scan does not recurse into.
+    # Claude's default scan recurses through agents/: every markdown file there
+    # becomes a user-visible subagent. Maintainer docs belong outside this tree.
     expected_agent_files = {
         "cavecrew-builder.md",
         "cavecrew-investigator.md",
         "cavecrew-reviewer.md",
     }
-    top_level_agent_md = {path.name for path in (ROOT / "agents").glob("*.md")}
+    all_agent_md = {
+        path.relative_to(ROOT / "agents").as_posix()
+        for path in (ROOT / "agents").rglob("*.md")
+    }
     ensure(
-        top_level_agent_md == expected_agent_files,
-        "agents/*.md is scanned wholesale into every user's subagent list; "
-        f"unexpected files ship as subagents: {sorted(top_level_agent_md - expected_agent_files)}. "
-        "Move non-agent markdown into agents/docs/.",
+        all_agent_md == expected_agent_files,
+        "agents/**/*.md is scanned wholesale into every user's subagent list; "
+        f"unexpected files ship as subagents: {sorted(all_agent_md - expected_agent_files)}. "
+        "Move non-agent markdown outside agents/.",
     )
 
     # Claude Code loads commands/*.md as flat skills alongside skills/*/SKILL.md,

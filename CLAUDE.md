@@ -156,11 +156,11 @@ with it and `Agents (3)` without it, so the three cavecrew subagents the
 (`agents: Invalid input`), so the default `agents/` scan is the only path that
 works. Do not re-add the key.
 
-Consequence: **every top-level `.md` in `agents/` becomes a subagent**, named
-from its frontmatter or filename. `agents/AGENTS.md` and `agents/CLAUDE.md`
-shipped as bogus subagents called `AGENTS` and `CLAUDE`; they now live in
-`agents/docs/`, which the scan does not recurse into. Put non-agent markdown
-there. `tests/verify_repo.py` fails the build on either regression.
+Consequence: **every `.md` anywhere in `agents/` becomes a subagent**, named
+from its frontmatter or filename. Maintainer documentation belongs outside that
+tree; profile-registry orientation lives in
+`docs/technical/agent-profile-registry.md`. `tests/verify_repo.py` fails build
+if any markdown beyond three intended cavecrew agents appears under `agents/`.
 
 ### `commands/*.md` shadows same-named skills — keep the `.md` stubs unique
 

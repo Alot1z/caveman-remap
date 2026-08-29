@@ -84,8 +84,8 @@ func (s claudeSessionSource) scanSession(ref sessionRef, since time.Time, emit f
 			UsageMessageID: claudeUsageMessageID(obj), Model: claudeModel(obj), ProviderKey: "anthropic",
 			ToolCalls: claudeTurnToolCalls(obj, pendingTools), TextPayloads: claudeTextPayloads(obj),
 			TaskSpawns: strings.Count(lower, `"name":"task"`), SkillUses: claudeStructuredSkillReferences(obj),
-			SkillHaystack: lower, Compaction: claudeCompactionMarker(obj),
-			JSONLLine: lineNo, RelPath: ref.relPath, Repo: repo, Side: obj["isSidechain"] == true,
+			Compaction: claudeCompactionMarker(obj),
+			JSONLLine:  lineNo, RelPath: ref.relPath, Repo: repo, Side: obj["isSidechain"] == true,
 		})
 	}
 	return false

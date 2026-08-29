@@ -1076,14 +1076,14 @@ async function installHooks(ctx) {
   SETTINGS.addCommandHook(settings, 'SessionStart', {
     command: PLATFORM_PATHS.hookCommand(node, [activate]),
     marker: 'caveman-activate',
-    timeout: 5,
+    timeout: 30,
     statusMessage: 'Loading caveman mode...',
   });
 
   SETTINGS.addCommandHook(settings, 'UserPromptSubmit', {
     command: PLATFORM_PATHS.hookCommand(node, [tracker]),
     marker: 'caveman-mode-tracker',
-    timeout: 5,
+    timeout: 30,
     statusMessage: 'Tracking caveman mode...',
   });
 

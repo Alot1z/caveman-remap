@@ -224,6 +224,15 @@ test("caveman claude enables the native integration and launches the agent direc
   assert.equal(againArgs, "-p hi");
 });
 
+test("caveman claude --help never installs persistent integration", async () => {
+  const { env, home } = nativeShortcutEnv();
+  const out = await runWithEnv(env, ["claude", "--help"]);
+  assert.equal(out.code, 0, out.stderr);
+  assert.equal(out.stdout, "--help|");
+  assert.equal(existsSync(join(home, "integrations", "claude.json")), false);
+  assert.equal(existsSync(join(home, ".claude", "settings.json")), false);
+});
+
 // timeout(1)/supervisors SIGTERM the launcher pid, not the process group. The
 // launcher must forward it to the child and then die by the same signal so
 // callers see a signal death, not a clean exit.

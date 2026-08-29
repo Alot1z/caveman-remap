@@ -447,7 +447,11 @@ func configSinksWithBehavior(cfg configScan, beh behaviorScan, turnsPerDay float
 		if cfg.ClaudeMDUser != nil {
 			userTokens = cfg.ClaudeMDUser.Tokens
 		}
-		if cfg.ClaudeMDProject != nil {
+		if len(cfg.ClaudeMDProjects) > 0 {
+			for _, snap := range cfg.ClaudeMDProjects {
+				projectTokens += snap.Tokens
+			}
+		} else if cfg.ClaudeMDProject != nil {
 			projectTokens = cfg.ClaudeMDProject.Tokens
 		}
 		evidence := map[string]any{
@@ -587,7 +591,7 @@ func deadLoadSink(deadTokens int, deadSkills []string, beh behaviorScan, turnsPe
 			"skill_count":      len(deadSkills),
 			"sessions_scanned": beh.SessionsScanned,
 			"skills":           sample,
-			"detection":        "structured+substring_guard",
+			"detection":        "structured",
 		},
 	}}
 }

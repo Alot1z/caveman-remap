@@ -31,8 +31,12 @@ class CallClaudeTimeoutTests(unittest.TestCase):
         with mock.patch.object(compress_mod.subprocess, "run") as run:
             run.return_value = mock.Mock(stdout="compressed", returncode=0)
             compress_mod.call_claude("prompt")
-            _, kwargs = run.call_args
+            args, kwargs = run.call_args
             self.assertEqual(kwargs.get("timeout"), compress_mod.CLAUDE_CALL_TIMEOUT_SECONDS)
+            self.assertEqual(
+                args[0][1:],
+                ["--print", "--setting-sources", "", "--strict-mcp-config"],
+            )
 
     def test_cli_timeout_raises_runtime_error_not_hang(self):
         with mock.patch.object(

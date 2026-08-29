@@ -1,6 +1,6 @@
 # agents — the agent-profile registry (`caveman wrap` data)
 
-Profiles for every AI coding agent `caveman wrap` can route through the byte-safe gateway. The
+Profiles for every AI coding agent `caveman wrap` can route through byte-safe gateway. The
 keystone is a **collapse toward data**, not an absolute: for
 most agents, adding one is a **data change** (one JSON file here) and the CLI's injection appliers
 + the proxy's wire-protocol adapters are the only code. But routing sits on a **three-tier honesty
@@ -18,30 +18,30 @@ scale** (`injection_completeness`), because several agents genuinely need code:
 scanned from `index.ts`) plus the inert-injection rule, and **fails closed** when a profile's
 declared `injection_completeness` claims more data-purity than reality (e.g. `declarative` for an
 agent that needs a builder). Separately, `buildWrapEnv` first sprays a generic base-URL union
-(`WRAP_BASE_URL_ENV_VARS` in `../cli/src/index.ts`) as a fail-open fallback that any SDK subprocess
+(`WRAP_BASE_URL_ENV_VARS` in `../../packages/cli/src/index.ts`) as a fail-open fallback that any SDK subprocess
 children inherit; each agent reads only its own subset, and the profile's injection then layers on
 top.
 
 ## Layout
-- `profiles/*.json` — one profile per agent (`claude`, `codex`, `gemini`, `aider`, `opencode`, `hermes`, `openclaw`).
-- `profiles/schema.json` — the profile contract (JSON Schema, draft-07).
-- `reserved-verbs.json` — command tokens no profile id or binary name may shadow;
+- [`../../agents/profiles/*.json`](../../agents/profiles/) — one profile per agent (`claude`, `codex`, `gemini`, `aider`, `opencode`, `hermes`, `openclaw`).
+- `../../agents/profiles/schema.json` — profile contract (JSON Schema, draft-07).
+- `../../agents/reserved-verbs.json` — command tokens no profile id or binary name may shadow;
   compiled into the CLI and tested against dispatcher reality.
-- `compile.mjs` — zero-dep compiler: validates every profile (fail-closed) and emits
-  `agents.json` + the CLI's embedded `../cli/src/{agents,reserved-verbs}.generated.ts`. It also
+- `../../agents/compile.mjs` — zero-dep compiler: validates every profile (fail-closed) and emits
+  `../../agents/agents.json` + CLI's embedded `../../packages/cli/src/{agents,reserved-verbs}.generated.ts`. It also
   fails closed on four honesty invariants: any model id pinned in the injection config must be
-  **priced by the provider catalog** (`../shared/provider-catalog/catalog/current.yaml`); a declared
+  **priced by provider catalog** (`../../shared/provider-catalog/catalog/current.yaml`); a declared
   `injection_completeness` must match the CLI's real routing; the `agent-conformance.yml` CI pins
   are **derived from `tested_agent_version`** and must equal it; and a declared `last_verified_at`
   must be inside the staleness budget.
-- `agents.json` — generated published registry (do not hand-edit).
-- `probe-installed.mjs` — isolated `--version` + `--help` gate for installed profile binaries;
+- `../../agents/agents.json` — generated published registry (do not hand-edit).
+- `../../agents/probe-installed.mjs` — isolated `--version` + `--help` gate for installed profile binaries;
   `--require <id>` and `--all` fail on missing, broken, or version-drifted binaries. `--allow-newer`
   reclassifies a working binary **newer** than the pin as `drift` (not `broken`) — used by the
   non-blocking @latest lane.
-- `drift-report.mjs` — turns a `probe --allow-newer --json` result into one GitHub issue per
+- `../../agents/drift-report.mjs` — turns a `probe --allow-newer --json` result into one GitHub issue per
   drifted agent (idempotent; opens or updates). Runs only in the non-blocking CI lane.
-- `.github/workflows/agent-conformance.yml` — daily/manual real-engine compression contract for
+- `../../.github/workflows/agent-conformance.yml` — daily/manual real-engine compression contract for
   all profiles plus one clean **pinned** upstream-binary probe per profile, and a separate
   **non-blocking `@latest` drift-report** lane that files drift issues.
 
@@ -100,4 +100,4 @@ convention** — `convert` skips the agent with an honest note, never guesses a 
 - `wire_protocol` must be one the proxy speaks natively (anthropic-messages · openai-chat ·
   openai-responses · gemini-generatecontent) — we don't translate protocols in the wrap path.
 
-See ../../CLAUDE.md (root) · ../cli/CLAUDE.md
+See ../../CLAUDE.md (root) · ../../packages/cli/CLAUDE.md

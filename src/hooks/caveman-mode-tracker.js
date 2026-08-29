@@ -190,7 +190,8 @@ function handle(raw) {
         if (sinceIdx !== -1 && tailArgs[sinceIdx + 1]) {
           argv.push('--since', tailArgs[sinceIdx + 1]);
         }
-        // 2.5s, not 5s. This hook is registered with timeout: 5 and has
+        // 2.5s. Hook registration allows 30s for slow Windows process startup,
+        // while this child watchdog still bounds optional context loading.
         // already spent its own Node startup; giving the child the host's
         // entire budget means the host kills the hook before the child's own
         // timeout can fire and produce the fallback message. Windows process

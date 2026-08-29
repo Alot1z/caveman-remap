@@ -121,6 +121,58 @@ test("redirects are followed and re-resolved per hop", async () => {
   }
 });
 
+test("a direct NO_PROXY hop can redirect back through the proxy", async () => {
+  const origin = createServer((_request, response) => {
+    response.writeHead(302, { location: "http://example.test/final" });
+    response.end();
+  });
+  const originUrl = await listen(origin);
+  const proxy = await startCountingProxy((_request, response) => response.end("proxied final"));
+  try {
+    const proxyFetch = createProxyAwareFetch(fetch, { HTTP_PROXY: proxy.origin, NO_PROXY: "127.0.0.1" });
+    const response = await proxyFetch(`${originUrl}/start`);
+    assert.equal(await response.text(), "proxied final");
+    assert.deepEqual(proxy.seen, ["http://example.test/final"]);
+  } finally {
+    proxy.close();
+    origin.close();
+  }
+});
+
+test("cross-origin redirects do not forward credentials or dropped-body headers", async () => {
+  const seen = [];
+  const proxy = await startCountingProxy((request, response) => {
+    seen.push({ url: request.url, method: request.method, headers: request.headers });
+    if (request.url.includes("first.test")) {
+      response.writeHead(302, { location: "http://second.test/final" });
+      response.end();
+      return;
+    }
+    response.end("landed");
+  });
+  try {
+    const proxyFetch = createProxyAwareFetch(fetch, { HTTP_PROXY: proxy.origin });
+    const response = await proxyFetch("http://first.test/start", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer secret",
+        cookie: "session=secret",
+        "content-type": "application/json",
+      },
+      body: "{}",
+    });
+    assert.equal(await response.text(), "landed");
+    assert.equal(seen[0].headers.authorization, "Bearer secret");
+    assert.equal(seen[1].method, "GET");
+    assert.equal(seen[1].headers.authorization, undefined);
+    assert.equal(seen[1].headers.cookie, undefined);
+    assert.equal(seen[1].headers["content-type"], undefined);
+    assert.equal(seen[1].headers["content-length"], undefined);
+  } finally {
+    proxy.close();
+  }
+});
+
 test("a request body and method survive the proxy hop", async () => {
   let received = "";
   const proxy = await startCountingProxy((request, response) => {

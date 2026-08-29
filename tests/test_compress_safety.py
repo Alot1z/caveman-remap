@@ -235,7 +235,34 @@ class CompressSafetyTests(unittest.TestCase):
             compress_mod.is_sensitive_path(Path("C:/dev/CREDENTIALS/hetzner/webhosting.md"))
         )
         self.assertTrue(compress_mod.is_sensitive_path(Path("project/secrets/service-notes.md")))
+        self.assertTrue(compress_mod.is_sensitive_path(Path("project/secret/service-notes.md")))
+        self.assertTrue(compress_mod.is_sensitive_path(Path("project/api-keys/service-notes.md")))
+        self.assertTrue(compress_mod.is_sensitive_path(Path("project/private_keys/service-notes.md")))
         self.assertFalse(compress_mod.is_sensitive_path(Path("project/docs/service-notes.md")))
+
+    def test_code_blocks_are_masked_before_model_and_restored_byte_exact(self):
+        original = (
+            "# Tree\n\nProse before.\n\n"
+            "```text\nroot\n├── src\n│   └── app.py\n```\n\n"
+            "    indented()\n    code()\n\nProse after.\n"
+        )
+        masked, blocks = compress_mod.mask_code_blocks(original)
+        self.assertNotIn("├── src", masked)
+        self.assertNotIn("indented()", masked)
+        self.assertEqual(len(blocks), 2)
+        self.assertEqual(compress_mod.restore_code_blocks(masked, blocks), original)
+        compressed = masked.replace("Prose before.", "Before.").replace("Prose after.", "After.")
+        restored = compress_mod.restore_code_blocks(compressed, blocks)
+        self.assertIn("```text\nroot\n├── src\n│   └── app.py\n```", restored)
+        self.assertIn("    indented()\n    code()", restored)
+
+    def test_missing_or_duplicated_code_marker_fails_closed(self):
+        masked, blocks = compress_mod.mask_code_blocks("```sh\necho safe\n```\n")
+        marker = blocks[0][0]
+        with self.assertRaisesRegex(ValueError, "changed preserved code marker"):
+            compress_mod.restore_code_blocks(masked.replace(marker, ""), blocks)
+        with self.assertRaisesRegex(ValueError, "changed preserved code marker"):
+            compress_mod.restore_code_blocks(masked + marker, blocks)
 
     def test_crlf_line_endings_survive_the_round_trip(self):
         """Reading with universal newlines and writing back "\n" rewrote every

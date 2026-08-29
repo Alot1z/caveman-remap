@@ -618,6 +618,12 @@ func runLearn(logger *slog.Logger, args []string) {
 			return
 		}
 		printJSON(map[string]any{"report": out, "sidecar": sidecar, "cave_score": plan.CaveScore.Score, "basis": plan.Basis, "sinks": len(plan.Sinks)})
+	case "savings":
+		savings, err := spend.BuildLearnSavings(cwd, sources, since)
+		if err != nil {
+			fatalJSON(logger, err)
+		}
+		printJSON(savings)
 	case "apply":
 		sinkID := firstPositional(args)
 		if sinkID == "" {

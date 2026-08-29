@@ -27,14 +27,15 @@ type skillInfo struct {
 
 // configScan is the measured config-tax picture used by the detectors.
 type configScan struct {
-	Snapshots       []ConfigSnapshot
-	ClaudeMDUser    *ConfigSnapshot
-	ClaudeMDProject *ConfigSnapshot
-	CodexAgents     *ConfigSnapshot
-	Skills          []skillInfo
-	SkillDescTokens int // per-turn skill catalog tax (name+description only)
-	TokenBasis      string
-	HookCount       int
+	Snapshots        []ConfigSnapshot
+	ClaudeMDUser     *ConfigSnapshot
+	ClaudeMDProject  *ConfigSnapshot
+	ClaudeMDProjects []*ConfigSnapshot
+	CodexAgents      *ConfigSnapshot
+	Skills           []skillInfo
+	SkillDescTokens  int // per-turn skill catalog tax (name+description only)
+	TokenBasis       string
+	HookCount        int
 	// PerTurnHooks labels hooks configured on events that fire every turn. They
 	// are cache-churn CANDIDATES, not identified causes: config is visible here,
 	// hook output is not.
@@ -169,8 +170,19 @@ func scanConfig(cwd string) configScan {
 	}
 
 	if cwd != "" {
-		sc.ClaudeMDProject = readMarkdownConfig("project", filepath.Join(cwd, "CLAUDE.md"), "claude_md")
-		add(sc.ClaudeMDProject)
+		for dir := filepath.Clean(cwd); ; dir = filepath.Dir(dir) {
+			if snap := readMarkdownConfig("project", filepath.Join(dir, "CLAUDE.md"), "claude_md"); snap != nil {
+				sc.ClaudeMDProjects = append(sc.ClaudeMDProjects, snap)
+				if sc.ClaudeMDProject == nil {
+					sc.ClaudeMDProject = snap
+				}
+				add(snap)
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+		}
 	}
 
 	croot2 := codexRoot()
@@ -266,7 +278,11 @@ func (sc configScan) configTaxPerTurn() int {
 	if sc.ClaudeMDUser != nil {
 		total += sc.ClaudeMDUser.Tokens
 	}
-	if sc.ClaudeMDProject != nil {
+	if len(sc.ClaudeMDProjects) > 0 {
+		for _, snap := range sc.ClaudeMDProjects {
+			total += snap.Tokens
+		}
+	} else if sc.ClaudeMDProject != nil {
 		total += sc.ClaudeMDProject.Tokens
 	}
 	return total
@@ -303,6 +319,10 @@ func scanSkills(skillsDir string) []skillInfo {
 			continue
 		}
 		path := filepath.Join(skillsDir, e.Name(), "SKILL.md")
+		info, err := os.Stat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
 		name, desc := readSkillFrontmatter(path)
 		if name == "" {
 			name = e.Name()

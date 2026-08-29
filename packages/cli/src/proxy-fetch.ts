@@ -232,6 +232,29 @@ function nextMethod(status: number, method: string): string {
   return method;
 }
 
+function redirectedHeaders(
+  headers: OutgoingHttpHeaders,
+  from: URL,
+  to: URL,
+  bodyDropped: boolean,
+): OutgoingHttpHeaders {
+  const next = { ...headers };
+  if (from.origin !== to.origin) {
+    for (const name of ["authorization", "cookie", "cookie2", "proxy-authorization"]) delete next[name];
+  }
+  if (bodyDropped) {
+    for (const name of [
+      "content-encoding",
+      "content-language",
+      "content-length",
+      "content-location",
+      "content-type",
+      "transfer-encoding",
+    ]) delete next[name];
+  }
+  return next;
+}
+
 /**
  * Wraps a fetch implementation so proxied targets go through the proxy and
  * everything else keeps its existing path.
@@ -243,8 +266,6 @@ export function createProxyAwareFetch(baseFetch: typeof fetch, env: NodeJS.Proce
   return async function proxyAwareFetch(input, init) {
     const request = new Request(input as RequestInfo, init);
     const target = new URL(request.url);
-    const proxy = resolveProxyUrl(target, env);
-    if (!proxy) return baseFetch(input as RequestInfo, init);
 
     const headers: OutgoingHttpHeaders = {};
     request.headers.forEach((value, name) => {
@@ -267,7 +288,7 @@ export function createProxyAwareFetch(baseFetch: typeof fetch, env: NodeJS.Proce
         headers: current.headers as HeadersInit,
         body: asBodyInit(current.body),
         signal: current.signal,
-        redirect: "follow",
+        redirect: "manual",
       });
 
       const location = response.headers.get("location");
@@ -278,12 +299,13 @@ export function createProxyAwareFetch(baseFetch: typeof fetch, env: NodeJS.Proce
 
       const next = new URL(location, current.url);
       const method = nextMethod(response.status, current.method);
+      const bodyDropped = method !== current.method;
       void response.body?.cancel();
       current = {
         method,
         url: next,
-        headers: current.headers,
-        body: method === current.method ? current.body : null,
+        headers: redirectedHeaders(current.headers, current.url, next, bodyDropped),
+        body: bodyDropped ? null : current.body,
         signal: current.signal,
       };
       hop = resolveProxyUrl(next, env);

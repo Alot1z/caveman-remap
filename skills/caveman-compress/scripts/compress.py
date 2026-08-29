@@ -18,7 +18,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 
 _IS_WINDOWS = os.name == "nt" or sys.platform == "win32"
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # unix-only; refuses to open through a pre-placed symlink at the lock path
@@ -81,7 +81,7 @@ SENSITIVE_BASENAME_REGEX = re.compile(
 
 SENSITIVE_PATH_COMPONENTS = frozenset({
     ".ssh", ".aws", ".gnupg", ".kube", ".docker",
-    "credentials", "secrets",
+    "credential", "credentials", "secret", "secrets",
 })
 
 SENSITIVE_NAME_TOKENS = (
@@ -199,12 +199,18 @@ def is_sensitive_path(filepath: Path) -> bool:
     name = filepath.name
     if SENSITIVE_BASENAME_REGEX.match(name):
         return True
-    lowered_parts = {p.lower() for p in filepath.parts}
-    if lowered_parts & SENSITIVE_PATH_COMPONENTS:
+    # Normalize every component, not only basename: directories named
+    # `api-keys`, `private_keys`, or singular `secret` are equally sensitive.
+    normalized_parts = {
+        re.sub(r"[_\-\s.]", "", part.lower()) for part in filepath.parts
+    }
+    if normalized_parts & SENSITIVE_PATH_COMPONENTS:
         return True
-    # Normalize separators so "api-key" and "api_key" both match "apikey".
-    lower = re.sub(r"[_\-\s.]", "", name.lower())
-    return any(tok in lower for tok in SENSITIVE_NAME_TOKENS)
+    return any(
+        token in part
+        for part in normalized_parts
+        for token in SENSITIVE_NAME_TOKENS
+    )
 
 
 def strip_llm_wrapper(text: str) -> str:
@@ -401,7 +407,13 @@ def call_claude(prompt: str) -> str:
     claude_bin = shutil.which("claude") or "claude"
     try:
         result = subprocess.run(
-            [claude_bin, "--print"],
+            [
+                claude_bin,
+                "--print",
+                "--setting-sources",
+                "",
+                "--strict-mcp-config",
+            ],
             input=prompt,
             text=True,
             capture_output=True,
@@ -467,6 +479,80 @@ COMPRESSED (fix this):
 
 Return ONLY the fixed compressed file. No explanation.
 """
+
+
+CODE_MARKER_PREFIX = "@@CAVEMAN_PRESERVED_CODE_"
+FENCE_OPEN_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(?:[^\r\n]*)$")
+
+
+def mask_code_blocks(text: str) -> Tuple[str, List[Tuple[str, str]]]:
+    """Replace fenced and four-space-indented code with opaque line markers."""
+    if CODE_MARKER_PREFIX in text:
+        raise ValueError("Input contains reserved Caveman code-preservation marker")
+    lines = text.splitlines(keepends=True)
+    out: List[str] = []
+    blocks: List[Tuple[str, str]] = []
+    i = 0
+    while i < len(lines):
+        line_without_newline = lines[i].rstrip("\r\n")
+        fence = FENCE_OPEN_RE.match(line_without_newline)
+        indented = bool(line_without_newline) and (
+            line_without_newline.startswith("    ") or line_without_newline.startswith("\t")
+        )
+        if not fence and not indented:
+            out.append(lines[i])
+            i += 1
+            continue
+
+        start = i
+        if fence:
+            fence_run = fence.group(1)
+            close_re = re.compile(
+                rf"^[ ]{{0,3}}{re.escape(fence_run[0])}{{{len(fence_run)},}}[ \t]*$"
+            )
+            i += 1
+            while i < len(lines):
+                if close_re.match(lines[i].rstrip("\r\n")):
+                    i += 1
+                    break
+                i += 1
+        else:
+            i += 1
+            while i < len(lines):
+                candidate = lines[i].rstrip("\r\n")
+                if not candidate or candidate.startswith("    ") or candidate.startswith("\t"):
+                    i += 1
+                    continue
+                break
+
+        block = "".join(lines[start:i])
+        marker = f"{CODE_MARKER_PREFIX}{len(blocks)}_{hashlib.sha256(block.encode('utf-8')).hexdigest()[:16]}@@"
+        blocks.append((marker, block))
+        newline = "\r\n" if block.endswith("\r\n") else "\n" if block.endswith("\n") else ""
+        out.append(marker + newline)
+    return "".join(out), blocks
+
+
+def restore_code_blocks(text: str, blocks: List[Tuple[str, str]]) -> str:
+    """Restore markers exactly; fail closed if model removed, copied, or altered one."""
+    restored = text
+    for marker, block in blocks:
+        if restored.count(marker) != 1:
+            raise ValueError(
+                f"Claude changed preserved code marker {marker}; refusing to write"
+            )
+        # Masking gives marker its own transport newline. Consume that wrapper
+        # when present so restoring a block that already ended in newline does
+        # not silently add another blank line.
+        if marker + "\r\n" in restored:
+            restored = restored.replace(marker + "\r\n", block, 1)
+        elif marker + "\n" in restored:
+            restored = restored.replace(marker + "\n", block, 1)
+        else:
+            restored = restored.replace(marker, block, 1)
+    if CODE_MARKER_PREFIX in restored:
+        raise ValueError("Claude returned an unknown Caveman code-preservation marker")
+    return restored
 
 
 # ---------- Core Logic ----------
@@ -538,7 +624,14 @@ def _compress_file_locked(filepath: Path) -> bool:
 
     # Step 1: Compress (body only, frontmatter excluded)
     print("Compressing with Claude...")
-    compressed_body = call_claude(build_compress_prompt(body))
+    masked_body, code_blocks = mask_code_blocks(body)
+    masked_compressed = call_claude(build_compress_prompt(masked_body))
+    try:
+        compressed_body = restore_code_blocks(masked_compressed, code_blocks)
+    except ValueError as error:
+        print(f"❌ Compression aborted: {error}")
+        print("   Original file is untouched (no backup created).")
+        return False
 
     if compressed_body is None or not compressed_body.strip():
         print("❌ Compression aborted: Claude returned an empty response.")

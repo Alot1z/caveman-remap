@@ -5,6 +5,7 @@ traffic can use local metering and recoverable context compression:
 
 ```sh
 caveman claude        # shorthand for `caveman wrap claude`; bootstraps signed runtime on first TTY run
+caveman kilo          # Kilo Code CLI; `caveman kilocode` works too
 caveman learn         # interactive local Setup Score + grouped top moves
 caveman setup         # show which companion binaries are installed
 caveman stats         # local spend, savings labeled `inferred`

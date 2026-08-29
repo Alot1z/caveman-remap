@@ -20,7 +20,7 @@
 <p align="center">
   <a href="https://github.com/JuliusBrussee/caveman/stargazers"><img src="https://img.shields.io/github/stars/JuliusBrussee/caveman?style=flat&color=yellow" alt="Stars"></a>
   <a href="./INSTALL.md"><img src="https://img.shields.io/badge/skill_works_with-30%2B_agents-orange?style=flat" alt="30+ agents"></a>
-  <a href="#wrap-any-agent"><img src="https://img.shields.io/badge/wrap-8_native_agents-blue?style=flat" alt="8 native wrap profiles"></a>
+  <a href="#wrap-any-agent"><img src="https://img.shields.io/badge/wrap-9_native_agents-blue?style=flat" alt="9 native wrap profiles"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT_%2B_BSL-green?style=flat" alt="License"></a>
   <a href="https://skills.sh/JuliusBrussee/caveman"><img src="https://skills.sh/b/JuliusBrussee/caveman"></a>
 </p>
@@ -67,7 +67,7 @@ Two products. Pick one or both.
 
 ```bash
 npm install -g @caveman-ai/cli && caveman setup --install
-caveman claude        # or codex · gemini · aider · opencode · hermes · openclaw
+caveman claude        # or codex · gemini · aider · kilo · opencode · hermes · openclaw · pi
 ```
 
 **2 · Save output** — the skill, the original. Your agent *answers* in tight caveman-speak while code, commands, and errors stay exact. MIT, 30+ agents.
@@ -228,7 +228,7 @@ One install also brings the small tools:
 
 ## Wrap any agent
 
-`caveman <agent>` wraps eight agents natively. Adding one is a data change, a single JSON profile in [`agents/profiles/`](./agents/profiles/), no code.
+`caveman <agent>` wraps nine agents natively. Adding one is normally a data change: one JSON profile in [`agents/profiles/`](./agents/profiles/).
 
 | Agent | Vendor | How it's wrapped |
 |---|---|---|
@@ -236,12 +236,13 @@ One install also brings the small tools:
 | **OpenAI Codex CLI** | OpenAI | env vars (API key) · ephemeral `CODEX_HOME` (ChatGPT login) |
 | **Gemini CLI** | Google | env vars |
 | **Aider** | OpenAI/Anthropic | env vars |
+| **Kilo Code** | Kilo Code | `KILO_CONFIG_CONTENT`, your `kilo.json` untouched |
 | **opencode** | sst | inline config via env, your `opencode.json` untouched |
 | **Hermes Agent** | Nous Research | `--provider custom` + env |
 | **OpenClaw** | OpenClaw | ephemeral merged config, your config read-only |
 | **Pi** | pi.dev | bundled native extension, your `~/.pi` config untouched |
 
-Wrap never edits your own config files. Real sessions round-trip in record mode, tested against **Hermes v0.18.0**, **OpenClaw 2026.6.11**, and **Pi 0.84.2**.
+Wrap never edits your own config files. Kilo Code **7.5.6** passed a pinned real-CLI route and streaming-response smoke; its profile also runs through the same real-proxy compression and telemetry matrix as every other agent. This wraps Kilo's CLI (`kilo` or `kilocode`), not an already-running editor extension.
 
 Not on the list? Point any provider SDK or framework (Vercel AI SDK, LangChain, LiteLLM, OpenAI Agents, CrewAI, PydanticAI) at the local proxy with a `baseURL` swap: [`integrations/recipes/`](./integrations/recipes/).
 

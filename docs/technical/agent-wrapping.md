@@ -13,8 +13,10 @@ still owns its model calls, user interface, permissions, and project workflow.
 | Codex | OpenAI Responses | Environment | Command hook, skills |
 | Gemini CLI | Gemini GenerateContent | Environment | Before-tool hook |
 | Hermes Agent | OpenAI Chat Completions | Environment | Plugin |
+| Kilo Code | OpenAI Chat Completions | Inline configuration via environment | None |
 | OpenClaw | OpenAI Chat Completions | Configuration file | Plugin |
 | OpenCode | OpenAI Chat Completions | Configuration plus environment | Plugin |
+| Pi | OpenAI Chat Completions | Native extension | Native extension, skills |
 
 Profiles record tested upstream versions, but upstream CLIs change independently.
 Run `caveman setup` to inspect installed support before relying on a profile.
@@ -27,9 +29,15 @@ caveman codex
 caveman gemini
 caveman aider
 caveman hermes
+caveman kilo
 caveman openclaw
 caveman opencode
+caveman pi
 ```
+
+`caveman kilocode` is an alias for the second binary published by Kilo's CLI
+package. Both launch the same `kilo` profile. CLI wrapping does not reconfigure
+an already-running Kilo editor extension.
 
 Arguments after the shortcut are passed through:
 

@@ -21,10 +21,11 @@ for accepted flags.
 | `caveman cloud` | Open the connected-service namespace | Yes |
 
 Supported agent shortcuts are `aider`, `claude`, `codex`, `gemini`, `hermes`,
-`openclaw`, and `opencode`.
+`kilo` (`kilocode` alias), `openclaw`, `opencode`, and `pi`.
 
 ```bash
 caveman claude
+caveman kilo run "review this repository"
 caveman codex --full-auto
 caveman run -- my-agent --project .
 ```

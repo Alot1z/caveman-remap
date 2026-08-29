@@ -23,7 +23,7 @@ children inherit; each agent reads only its own subset, and the profile's inject
 top.
 
 ## Layout
-- `profiles/*.json` — one profile per agent (`claude`, `codex`, `gemini`, `aider`, `opencode`, `hermes`, `openclaw`).
+- `profiles/*.json` — one profile per agent (`claude`, `codex`, `gemini`, `aider`, `kilo`, `opencode`, `hermes`, `openclaw`, `pi`).
 - `profiles/schema.json` — the profile contract (JSON Schema, draft-07).
 - `reserved-verbs.json` — command tokens no profile id or binary name may shadow;
   compiled into the CLI and tested against dispatcher reality.
@@ -58,8 +58,9 @@ locally grounded pin; other pins remain unchanged until equivalent proof exists.
   safe path such as `/openai/v1`; secret keys cannot.
 - `config-env-content` — render a mode-selected inline JSON config (`config_content.local` for
   BYOK `caveman start`; `config_content.managed` when `CAVE_GATEWAY_URL` is off-loopback) and set
-  it as one env var. This is how **opencode** is wrapped (`OPENCODE_CONFIG_CONTENT`) without ever
-  touching the user's `opencode.json`. An agent's own `{env:VAR}` tokens are left untouched.
+  it as one env var. This is how **opencode** (`OPENCODE_CONFIG_CONTENT`) and **Kilo Code**
+  (`KILO_CONFIG_CONTENT`) are wrapped without touching user config. An agent's own `{env:VAR}`
+  tokens are left untouched.
 - `config-file` — merge a mode-selected config overlay into a temp copy of the agent's own
   config file on disk (how **openclaw** is wrapped, without mutating the user's real config).
 

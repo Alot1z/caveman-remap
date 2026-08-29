@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { spawn } from "node:child_process";
 import { createServer } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
+import { connect as netConnect } from "node:net";
 import { once } from "node:events";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   createProxyAwareFetch,
   installProxyAwareFetch,
@@ -10,10 +16,45 @@ import {
 } from "../dist/proxy-fetch.js";
 
 const PROXY = "http://proxy.internal:912";
+const PROXY_FETCH_MODULE = new URL("../dist/proxy-fetch.js", import.meta.url).href;
+const TLS_KEY = `-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgtdhLQlNEuoXVg7x+
+pxbfijFC2nhlv3iy7t5xBOCGfaKhRANCAASg5AJ7gSIXNAXA0zvb4qIbXkBfaLhR
+35KNMapSFSjz0CmfpKyBtbZsxZ2uTsEdET9sTt1dJ+s6XUTJGrN3QEXR
+-----END PRIVATE KEY-----`;
+const TLS_CERT = `-----BEGIN CERTIFICATE-----
+MIIBjTCCATSgAwIBAgIUWj/iLMHYBgf6eS03UlVTAiJ5S/owCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJMTI3LjAuMC4xMB4XDTI2MDgyOTIwMTk0NFoXDTM2MDgyNjIw
+MTk0NFowFDESMBAGA1UEAwwJMTI3LjAuMC4xMFkwEwYHKoZIzj0CAQYIKoZIzj0D
+AQcDQgAEoOQCe4EiFzQFwNM72+KiG15AX2i4Ud+SjTGqUhUo89Apn6SsgbW2bMWd
+rk7BHRE/bE7dXSfrOl1EyRqzd0BF0aNkMGIwHQYDVR0OBBYEFA60M/ydjGvkF2tF
+b8rMQ5/gzireMB8GA1UdIwQYMBaAFA60M/ydjGvkF2tFb8rMQ5/gzireMA8GA1Ud
+EQQIMAaHBH8AAAEwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNHADBEAiAN
+iyq9QYU5xMwETw2dRI6gf/LY+MRjugcJbYXhDXgG4gIgHQXeBNM32fb2DmwCGk8N
+jjJqLa1BpFaHD/np3GvjRxs=
+-----END CERTIFICATE-----`;
 
-function listen(server) {
+function listen(server, scheme = "http") {
   server.listen(0, "127.0.0.1");
-  return once(server, "listening").then(() => `http://127.0.0.1:${server.address().port}`);
+  return once(server, "listening").then(() => `${scheme}://127.0.0.1:${server.address().port}`);
+}
+
+function runNodeModule(source, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", source], {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`child exited ${code}: ${stderr}`));
+    });
+  });
 }
 
 /** Proxy that serves absolute-form requests itself and counts what it saw. */
@@ -85,6 +126,48 @@ test("proxied requests reach the origin through the proxy", async () => {
   } finally {
     proxy.close();
   }
+});
+
+test("HTTPS targets use TLS for both an HTTPS proxy and the CONNECT tunnel", async () => {
+  const target = createHttpsServer({ key: TLS_KEY, cert: TLS_CERT }, (_request, response) => response.end("secure target"));
+  const targetUrl = await listen(target, "https");
+  let connects = 0;
+  const proxy = createHttpsServer({ key: TLS_KEY, cert: TLS_CERT });
+  proxy.on("connect", (request, client, head) => {
+    connects += 1;
+    const [host, rawPort] = (request.url ?? "").split(":");
+    const upstream = netConnect({ host, port: Number(rawPort) });
+    upstream.once("connect", () => {
+      client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head.length > 0) upstream.write(head);
+      client.pipe(upstream);
+      upstream.pipe(client);
+    });
+    upstream.once("error", () => client.destroy());
+  });
+  const proxyUrl = await listen(proxy, "https");
+  const certDir = mkdtempSync(join(tmpdir(), "cave-proxy-ca-"));
+  const certPath = join(certDir, "ca.pem");
+  writeFileSync(certPath, TLS_CERT);
+  try {
+    const source = `
+      const { createProxyAwareFetch } = await import(${JSON.stringify(PROXY_FETCH_MODULE)});
+      const response = await createProxyAwareFetch(fetch, { HTTPS_PROXY: ${JSON.stringify(proxyUrl)} })(${JSON.stringify(targetUrl)});
+      process.stdout.write(await response.text());
+    `;
+    const output = await runNodeModule(source, { ...process.env, NODE_EXTRA_CA_CERTS: certPath });
+    assert.equal(output, "secure target");
+    assert.equal(connects, 1);
+  } finally {
+    rmSync(certDir, { recursive: true, force: true });
+    proxy.close();
+    target.close();
+  }
+});
+
+test("unsupported proxy schemes reject before opening a connection", async () => {
+  const proxyFetch = createProxyAwareFetch(fetch, { HTTP_PROXY: "socks5://127.0.0.1:9" });
+  await assert.rejects(proxyFetch("http://example.test"), /unsupported proxy protocol: socks5:/);
 });
 
 test("bypassed targets skip the proxy entirely", async () => {
@@ -200,6 +283,39 @@ test("a request body and method survive the proxy hop", async () => {
   }
 });
 
+test("caller proxy authorization never enters destination headers", async () => {
+  let received;
+  const proxy = await startCountingProxy((request, response) => {
+    received = request.headers["proxy-authorization"];
+    response.end("ok");
+  });
+  try {
+    const proxyFetch = createProxyAwareFetch(fetch, { HTTP_PROXY: proxy.origin });
+    await proxyFetch("http://example.test/asset.bin", {
+      headers: { "proxy-authorization": "Basic caller-secret" },
+    });
+    assert.equal(received, undefined);
+  } finally {
+    proxy.close();
+  }
+});
+
+test("proxy URL credentials stay on the proxy hop", async () => {
+  let received;
+  const proxy = await startCountingProxy((request, response) => {
+    received = request.headers["proxy-authorization"];
+    response.end("ok");
+  });
+  try {
+    const credentialed = proxy.origin.replace("http://", "http://proxy-user:proxy-pass@");
+    const proxyFetch = createProxyAwareFetch(fetch, { HTTP_PROXY: credentialed });
+    await proxyFetch("http://example.test/asset.bin");
+    assert.equal(received, `Basic ${Buffer.from("proxy-user:proxy-pass").toString("base64")}`);
+  } finally {
+    proxy.close();
+  }
+});
+
 test("an aborted request rejects instead of hanging", async () => {
   const proxy = await startCountingProxy(() => {
     /* never responds */
@@ -207,6 +323,43 @@ test("an aborted request rejects instead of hanging", async () => {
   try {
     const proxyFetch = createProxyAwareFetch(fetch, { HTTP_PROXY: proxy.origin });
     await assert.rejects(proxyFetch("http://example.test/slow", { signal: AbortSignal.timeout(50) }));
+  } finally {
+    proxy.close();
+  }
+});
+
+test("a request aborted before fetch starts never reaches the proxy", async () => {
+  const proxy = await startCountingProxy((_request, response) => response.end("unexpected"));
+  const controller = new AbortController();
+  controller.abort();
+  try {
+    const proxyFetch = createProxyAwareFetch(fetch, { HTTP_PROXY: proxy.origin });
+    await assert.rejects(proxyFetch("http://example.test/expired", { signal: controller.signal }), { name: "AbortError" });
+    assert.deepEqual(proxy.seen, []);
+  } finally {
+    proxy.close();
+  }
+});
+
+test("abort while buffering a non-GET body never reaches the proxy", async () => {
+  const proxy = await startCountingProxy((_request, response) => response.end("unexpected"));
+  const controller = new AbortController();
+  const body = new ReadableStream({
+    start(stream) {
+      stream.enqueue(new TextEncoder().encode("partial"));
+    },
+  });
+  try {
+    const proxyFetch = createProxyAwareFetch(fetch, { HTTP_PROXY: proxy.origin });
+    const pending = proxyFetch("http://example.test/upload", {
+      method: "POST",
+      body,
+      duplex: "half",
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 20);
+    await assert.rejects(pending, { name: "AbortError" });
+    assert.deepEqual(proxy.seen, []);
   } finally {
     proxy.close();
   }

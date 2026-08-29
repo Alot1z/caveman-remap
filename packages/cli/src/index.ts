@@ -6189,11 +6189,87 @@ function hookEntryCommand(entry: Record<string, unknown>): string | undefined {
   return typeof hooks[0].command === "string" ? hooks[0].command : undefined;
 }
 
+function hookCommandTokens(command: string): string[] | undefined {
+  const tokens: string[] = [];
+  let token = "";
+  let started = false;
+  let quote: "'" | '"' | undefined;
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+    if (quote) {
+      if (char === quote) {
+        if (quote === "'" && command[index + 1] === "'") {
+          token += "'";
+          index += 1;
+        } else {
+          quote = undefined;
+        }
+      } else if (quote === '"' && char === "\\" && index + 1 < command.length) {
+        token += command[++index]!;
+      } else {
+        token += char;
+      }
+      started = true;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (started) {
+        tokens.push(token);
+        token = "";
+        started = false;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      started = true;
+      continue;
+    }
+    if (char === "\\" && index + 1 < command.length) {
+      token += command[++index]!;
+      started = true;
+      continue;
+    }
+    if (/[|;<>\n\r`]/.test(char) || (char === "&" && (started || tokens.length > 0))) return undefined;
+    token += char;
+    started = true;
+  }
+  if (quote) return undefined;
+  if (started) tokens.push(token);
+  if (tokens[0] === "&") tokens.shift();
+  return tokens.length > 0 ? tokens : undefined;
+}
+
+function hookCommandBasename(token: string): string {
+  return basename(token.replace(/\\/g, "/")).toLowerCase().replace(/\.(?:exe|cmd|bat)$/i, "");
+}
+
+function isCavemanCliInvocation(tokens: string[]): boolean {
+  const executable = hookCommandBasename(tokens[0] ?? "");
+  if (executable === "caveman" || executable === "cave") return true;
+  return executable === "node" && hookCommandBasename(tokens[1] ?? "") === "index.js";
+}
+
 function managedHookIdentity(command: string): string | undefined {
-  const native = command.match(/(?:^|\s)native-hook\s+(claude|codex|gemini)(?:\s|$)/);
-  if (native) return `native-hook:${native[1]}`;
-  if (/(?:^|\s)shrink-hook\s*$/.test(command)) return "shrink-hook";
-  if (/(?:^|\s)mem\s+recall-hook\s*$/.test(command)) return "mem:recall-hook";
+  const tokens = hookCommandTokens(command);
+  if (!tokens) return undefined;
+
+  const executable = hookCommandBasename(tokens[0] ?? "");
+  const nodeScript = executable === "node" ? hookCommandBasename(tokens[1] ?? "") : undefined;
+  const argsStart = executable === "node" ? 2 : 1;
+  const args = tokens.slice(argsStart);
+  const agent = args[1];
+  const nativeAgent = agent === "claude" || agent === "codex" || agent === "gemini";
+  const supportedNative =
+    (executable === "caveman-proxy" && args.length === 4 && args[0] === "native-hook" && nativeAgent && args[2] === "--adapter")
+    || ((executable === "caveman" || executable === "cave") && args.length === 2 && args[0] === "native-hook" && nativeAgent)
+    || (nodeScript !== undefined && ["index.js", "native-hook-fast.js"].includes(nodeScript) && args.length === 2 && args[0] === "native-hook" && nativeAgent);
+  if (supportedNative) return `native-hook:${agent}`;
+
+  if (isCavemanCliInvocation(tokens)) {
+    if (args.length === 1 && args[0] === "shrink-hook") return "shrink-hook";
+    if (args.length === 2 && args[0] === "mem" && args[1] === "recall-hook") return "mem:recall-hook";
+  }
   return undefined;
 }
 

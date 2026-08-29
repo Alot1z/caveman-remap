@@ -386,7 +386,7 @@ test("doctor requires exact native hook entries, not matching text", async () =>
   assert.equal((await run(["enable", "claude"], fx.env)).code, 0);
   const path = join(fx.home, ".claude", "settings.json");
   const settings = JSON.parse(readFileSync(path, "utf8"));
-  settings.hooks.SessionStart = [{ hooks: [{ type: "command", command: "echo native-hook claude" }] }];
+  settings.hooks.SessionStart = [{ hooks: [{ type: "command", command: "echo native-hook claude", timeout: 30 }] }];
   writeFileSync(path, JSON.stringify(settings, null, 2) + "\n");
   const out = await run(["doctor", "claude"], fx.env);
   assert.notEqual(out.code, 0);
@@ -404,7 +404,11 @@ test("doctor and disable tolerate executable path drift with unchanged hook sema
     for (const entry of entries) {
       const hook = entry.hooks?.[0];
       if (typeof hook?.command === "string" && /native-hook claude|shrink-hook|mem recall-hook/.test(hook.command)) {
-        hook.command = hook.command.replace(/^.*?(?=native-hook claude|shrink-hook|mem recall-hook)/, "'/new/fnm/node' '/new/caveman/index.js' ");
+        hook.command = hook.command.includes("native-hook claude")
+          ? hook.command
+              .replace(/^.*?(?=native-hook claude)/, "'/new/caveman/bin/caveman-proxy' ")
+              .replace(/--adapter\s+.*$/, "--adapter '/new/caveman/native-hook-fast.js'")
+          : hook.command.replace(/^.*?(?=shrink-hook|mem recall-hook)/, "'/new/fnm/node' '/new/caveman/index.js' ");
       }
     }
   }

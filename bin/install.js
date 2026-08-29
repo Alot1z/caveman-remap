@@ -1470,8 +1470,19 @@ function uninstall(ctx) {
     if (opts.dryRun) {
       note(`  would remove ${sessionsDir}`);
     } else {
-      try { fs.rmSync(sessionsDir, { recursive: true, force: true }); } catch (_) {}
-      note(`  removed ${sessionsDir}`);
+      try {
+        const sessionsState = fs.lstatSync(sessionsDir);
+        if (sessionsState.isDirectory() && !sessionsState.isSymbolicLink()) {
+          fs.rmSync(sessionsDir, { recursive: true, force: true });
+        } else {
+          // Never recurse through a path swapped for a link or special file.
+          fs.unlinkSync(sessionsDir);
+        }
+        note(`  removed ${sessionsDir}`);
+      } catch (error) {
+        cleanupFailed = true;
+        warn(`  could not remove ${sessionsDir}: ${error.message}`);
+      }
     }
   }
   const historyPath = path.join(configDir, '.caveman-history.jsonl');

@@ -114,6 +114,12 @@ function abortError(): Error {
   return new DOMException("This operation was aborted", "AbortError") as unknown as Error;
 }
 
+function proxyRequest(proxy: URL): typeof httpsRequest {
+  if (proxy.protocol === "http:") return httpRequest;
+  if (proxy.protocol === "https:") return httpsRequest;
+  throw new TypeError(`unsupported proxy protocol: ${proxy.protocol}`);
+}
+
 /**
  * Opens a CONNECT tunnel so TLS is negotiated with the target, not the proxy.
  *
@@ -122,7 +128,23 @@ function abortError(): Error {
  */
 function openTunnel(target: URL, proxy: URL, signal: AbortSignal | null): Promise<Socket> {
   return new Promise((resolve, reject) => {
-    const request = httpRequest({
+    if (signal?.aborted) {
+      reject(abortError());
+      return;
+    }
+
+    let settled = false;
+    const finish = (error?: Error, socket?: Socket) => {
+      if (settled) {
+        socket?.destroy();
+        return;
+      }
+      settled = true;
+      signal?.removeEventListener("abort", onAbort);
+      if (error) reject(error);
+      else resolve(socket!);
+    };
+    const request = proxyRequest(proxy)({
       host: proxy.hostname,
       port: portOf(proxy),
       method: "CONNECT",
@@ -132,22 +154,20 @@ function openTunnel(target: URL, proxy: URL, signal: AbortSignal | null): Promis
 
     const onAbort = () => {
       request.destroy(abortError());
-      reject(abortError());
+      finish(abortError());
     };
     signal?.addEventListener("abort", onAbort, { once: true });
 
     request.once("connect", (response, socket) => {
-      signal?.removeEventListener("abort", onAbort);
       if (response.statusCode !== 200) {
         socket.destroy();
-        reject(new Error(`proxy refused CONNECT to ${target.host}: ${response.statusCode} ${response.statusMessage ?? ""}`.trim()));
+        finish(new Error(`proxy refused CONNECT to ${target.host}: ${response.statusCode} ${response.statusMessage ?? ""}`.trim()));
         return;
       }
-      resolve(socket);
+      finish(undefined, socket);
     });
     request.once("error", (error) => {
-      signal?.removeEventListener("abort", onAbort);
-      reject(error);
+      finish(error);
     });
     request.end();
   });
@@ -165,7 +185,17 @@ function sendThroughProxy(request: ProxiedRequest, proxy: URL): Promise<Response
   const { method, url, headers, body, signal } = request;
 
   return new Promise<Response>((resolve, reject) => {
-    const finish = async (options: RequestOptions, send: typeof httpsRequest) => {
+    if (signal?.aborted) {
+      reject(abortError());
+      return;
+    }
+
+    const sendToProxy = proxyRequest(proxy);
+    const finish = (options: RequestOptions, send: typeof httpsRequest) => {
+      if (signal?.aborted) {
+        reject(abortError());
+        return;
+      }
       const outbound = send(options, (response) => {
         const status = response.statusCode ?? 502;
         const empty = status === 204 || status === 304 || method === "HEAD";
@@ -199,14 +229,18 @@ function sendThroughProxy(request: ProxiedRequest, proxy: URL): Promise<Response
           path: url.toString(),
           headers: { ...headers, host: url.host, ...proxyAuthHeader(proxy) },
         },
-        httpRequest,
+        sendToProxy,
       );
       return;
     }
 
     openTunnel(url, proxy, signal)
-      .then((socket) =>
-        finish(
+      .then((socket) => {
+        if (signal?.aborted) {
+          socket.destroy();
+          throw abortError();
+        }
+        return finish(
           {
             method,
             path: `${url.pathname}${url.search}`,
@@ -214,10 +248,26 @@ function sendThroughProxy(request: ProxiedRequest, proxy: URL): Promise<Response
             createConnection: () => tlsConnect({ socket, servername: url.hostname }),
           },
           httpsRequest,
-        ),
-      )
+        );
+      })
       .catch(reject);
   });
+}
+
+async function bufferedRequestBody(request: Request): Promise<Uint8Array | null> {
+  if (["GET", "HEAD"].includes(request.method)) return null;
+  if (request.signal.aborted) throw abortError();
+
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(abortError());
+    request.signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return new Uint8Array(await Promise.race([request.arrayBuffer(), aborted]));
+  } finally {
+    if (onAbort) request.signal.removeEventListener("abort", onAbort);
+  }
 }
 
 /** `BodyInit` in the bundled DOM types predates byte-array request bodies. */
@@ -265,13 +315,17 @@ function redirectedHeaders(
 export function createProxyAwareFetch(baseFetch: typeof fetch, env: NodeJS.ProcessEnv = process.env): typeof fetch {
   return async function proxyAwareFetch(input, init) {
     const request = new Request(input as RequestInfo, init);
+    if (request.signal.aborted) throw abortError();
     const target = new URL(request.url);
 
     const headers: OutgoingHttpHeaders = {};
     request.headers.forEach((value, name) => {
+      // Proxy credentials belong only on the proxy hop. Callers cannot inject
+      // this header into direct requests or the tunneled destination request.
+      if (name === "proxy-authorization") return;
       headers[name] = value;
     });
-    const buffered = ["GET", "HEAD"].includes(request.method) ? null : new Uint8Array(await request.arrayBuffer());
+    const buffered = await bufferedRequestBody(request);
 
     let current: ProxiedRequest = {
       method: request.method,

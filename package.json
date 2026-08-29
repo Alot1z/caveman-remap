@@ -13,7 +13,7 @@
     "url": "https://github.com/JuliusBrussee/caveman/issues"
   },
   "bin": {
-    "caveman": "./bin/install.js"
+    "caveman-install": "./bin/install.js"
   },
   "engines": {
     "node": ">=18"

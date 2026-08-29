@@ -206,7 +206,7 @@ try {
 // back to the default (#691 through the timeout door). An unknown source
 // preserves a valid existing flag. The deadline sits well below the host's 5s
 // budget but far enough above a cold Windows/AV start to be reached rarely.
-const PAYLOAD_WATCHDOG_MS = 3000;
+const PAYLOAD_WATCHDOG_MS = 2000;
 
 // Sources that re-derive the configured default instead of reading what this
 // session already stored.

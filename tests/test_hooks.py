@@ -31,6 +31,7 @@ class HookScriptTests(unittest.TestCase):
             cwd=REPO_ROOT,
             env=env,
             text=True,
+            encoding="utf-8",
             stdin=subprocess.DEVNULL,
             capture_output=True,
             check=True,
@@ -274,6 +275,7 @@ class SessionStartSourceTests(unittest.TestCase):
             env=env,
             input="" if payload is None else json.dumps(payload),
             text=True,
+            encoding="utf-8",
             capture_output=True,
             check=True,
             timeout=timeout,
@@ -357,7 +359,7 @@ class SessionStartSourceTests(unittest.TestCase):
         r = subprocess.run(
             ["node", self.ACTIVATE],
             cwd=REPO_ROOT, env=env, input="not json {{{",
-            text=True, capture_output=True, check=True, timeout=30,
+            text=True, encoding="utf-8", capture_output=True, check=True, timeout=30,
         )
         self.assertIn("CAVEMAN MODE ACTIVE", r.stdout)
 
@@ -410,6 +412,7 @@ class SessionStartSourceTests(unittest.TestCase):
                 stdin=read_fd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=15,  # TimeoutExpired => the hook hangs => test fails
             )
             self.assertEqual(r.returncode, 0)

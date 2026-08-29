@@ -18,7 +18,7 @@
 set -euo pipefail
 
 REPO="JuliusBrussee/caveman"
-PINNED_REF="${CAVEMAN_REF:-v2.3.1}"
+PINNED_REF="${CAVEMAN_REF:-v2.4.0}"
 
 # Require Node ≥18. nvm is a common path; print a hint if missing.
 if ! command -v node >/dev/null 2>&1; then

@@ -8561,6 +8561,14 @@ export function buildWrapEnv(agent?: AgentProfile, gw = gatewayURL(), mcpMode: M
       process.stderr.write(`caveman: ${agent.id} config-file injection failed; using generic env wrap (${(e as Error).message})\n`);
     }
   }
+  // Qwen 0.22 discovers MCP servers in the background by default. Its first
+  // request can therefore omit caveman_retrieve even though our durable marker
+  // says recovery is installed. Proxy compression must never outrun recovery,
+  // so marker-backed Qwen wraps use Qwen's compatibility switch to finish MCP
+  // discovery before the first model request.
+  if (agent.id === "qwen" && mcpInstalled(agent.id)) {
+    env.QWEN_CODE_LEGACY_MCP_BLOCKING = "1";
+  }
   if (agent.id === "hermes") applyHermesAuthEnv(env, renderedGw, gw);
   if (agent.id === "claude" && wrapMode(gw) === "local" && env[CLAUDE_ASSUME_FIRST_PARTY_ENV] === undefined && proxyAnthropicUpstreamIsFirstParty()) {
     // Keep Claude Code's first-party capability set (1M context window /
@@ -10081,6 +10089,8 @@ function uninstallMcpForAgent(a: AgentProfile, serverName = "caveman"): boolean 
       return removeMcpJson(join(homedir(), ".config", "opencode", "opencode.json"), ["mcp", serverName]);
     case "kilo":
       return removeMcpKiloJson(serverName);
+    case "qwen":
+      return removeMcpQwenJson(serverName);
     case "gemini":
       return removeMcpJson(join(homedir(), ".gemini", "settings.json"), ["mcpServers", serverName]);
     case "hermes":
@@ -10181,7 +10191,7 @@ function kiloMcpEntryMatches(value: unknown, mcp: { command: string; args: strin
     && entry.command.every((arg, index) => typeof arg === "string" && arg === command[index]);
 }
 
-function readKiloMcpRoot(path: string): { root: Record<string, unknown>; exists: boolean } | null {
+function readStrictMcpJsonRoot(path: string): { root: Record<string, unknown>; exists: boolean } | null {
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
@@ -10215,7 +10225,7 @@ function kiloJsoncBlocksJsonCreation(path: string, exists: boolean): boolean {
 
 function installMcpKiloJson(mcp: { command: string; args: string[] }, serverName = "caveman"): boolean {
   const path = kiloConfigPath();
-  const loaded = readKiloMcpRoot(path);
+  const loaded = readStrictMcpJsonRoot(path);
   if (!loaded || kiloJsoncBlocksJsonCreation(path, loaded.exists)) return false;
   const { root } = loaded;
   if (root.mcp !== undefined && (!root.mcp || typeof root.mcp !== "object" || Array.isArray(root.mcp))) {
@@ -10250,7 +10260,7 @@ function installMcpKiloJson(mcp: { command: string; args: string[] }, serverName
 
 function removeMcpKiloJson(serverName = "caveman"): boolean {
   const path = kiloConfigPath();
-  const loaded = readKiloMcpRoot(path);
+  const loaded = readStrictMcpJsonRoot(path);
   if (!loaded || kiloJsoncBlocksJsonCreation(path, loaded.exists)) return false;
   if (!loaded.exists) return true;
   const { root } = loaded;
@@ -10272,6 +10282,93 @@ function removeMcpKiloJson(serverName = "caveman"): boolean {
   }
   delete servers![serverName];
   if (Object.keys(servers!).length === 0) delete root.mcp;
+  try {
+    atomicWriteFile(path, Buffer.from(JSON.stringify(root, null, 2) + "\n"));
+    return true;
+  } catch (e) {
+    console.error(`${mark("warn")} cannot write ${path}: ${(e as Error).message}`);
+    return false;
+  }
+}
+
+function qwenConfigPath(): string {
+  return join(homedir(), ".qwen", "settings.json");
+}
+
+function qwenMcpEntry(mcp: { command: string; args: string[] }): Record<string, unknown> {
+  return { command: mcp.command, args: mcp.args };
+}
+
+function qwenMcpEntryMatches(value: unknown, mcp: { command: string; args: string[] }): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entry = value as Record<string, unknown>;
+  const keys = Object.keys(entry).sort();
+  if (keys.length !== 2 || keys[0] !== "args" || keys[1] !== "command") return false;
+  return entry.command === mcp.command
+    && Array.isArray(entry.args)
+    && entry.args.length === mcp.args.length
+    && entry.args.every((arg, index) => typeof arg === "string" && arg === mcp.args[index]);
+}
+
+function installMcpQwenJson(mcp: { command: string; args: string[] }, serverName = "caveman"): boolean {
+  const path = qwenConfigPath();
+  const loaded = readStrictMcpJsonRoot(path);
+  if (!loaded) return false;
+  const { root } = loaded;
+  if (root.mcpServers !== undefined && (!root.mcpServers || typeof root.mcpServers !== "object" || Array.isArray(root.mcpServers))) {
+    console.error(`${mark("warn")} ${path} mcpServers must be a JSON object; not modifying it`);
+    return false;
+  }
+  const servers = root.mcpServers as Record<string, unknown> | undefined;
+  const current = servers?.[serverName];
+  const marker = readMcpServerMarker("qwen", serverName);
+  if (current !== undefined) {
+    if (!marker) {
+      console.error(`${mark("warn")} ${path} mcpServers.${serverName} exists but is not Caveman-journaled; refusing overwrite`);
+      return false;
+    }
+    if (!qwenMcpEntryMatches(current, marker)) {
+      console.error(`${mark("warn")} ${path} mcpServers.${serverName} changed since Caveman installed it; refusing overwrite`);
+      return false;
+    }
+    if (qwenMcpEntryMatches(current, mcp)) return true;
+  }
+  const nextServers = servers ?? {};
+  nextServers[serverName] = qwenMcpEntry(mcp);
+  root.mcpServers = nextServers;
+  try {
+    atomicWriteFile(path, Buffer.from(JSON.stringify(root, null, 2) + "\n"));
+    return true;
+  } catch (e) {
+    console.error(`${mark("warn")} cannot write ${path}: ${(e as Error).message}`);
+    return false;
+  }
+}
+
+function removeMcpQwenJson(serverName = "caveman"): boolean {
+  const path = qwenConfigPath();
+  const loaded = readStrictMcpJsonRoot(path);
+  if (!loaded) return false;
+  if (!loaded.exists) return true;
+  const { root } = loaded;
+  if (root.mcpServers !== undefined && (!root.mcpServers || typeof root.mcpServers !== "object" || Array.isArray(root.mcpServers))) {
+    console.error(`${mark("warn")} ${path} mcpServers must be a JSON object; not modifying it`);
+    return false;
+  }
+  const servers = root.mcpServers as Record<string, unknown> | undefined;
+  const current = servers?.[serverName];
+  if (current === undefined) return true;
+  const marker = readMcpServerMarker("qwen", serverName);
+  if (!marker) {
+    console.error(`${mark("warn")} ${path} mcpServers.${serverName} exists but is not Caveman-journaled; refusing removal`);
+    return false;
+  }
+  if (!qwenMcpEntryMatches(current, marker)) {
+    console.error(`${mark("warn")} ${path} mcpServers.${serverName} changed since Caveman installed it; refusing removal`);
+    return false;
+  }
+  delete servers![serverName];
+  if (Object.keys(servers!).length === 0) delete root.mcpServers;
   try {
     atomicWriteFile(path, Buffer.from(JSON.stringify(root, null, 2) + "\n"));
     return true;
@@ -10368,6 +10465,8 @@ function installMcpForAgent(a: AgentProfile, mcp: { command: string; args: strin
       });
     case "kilo":
       return installMcpKiloJson(mcp, serverName);
+    case "qwen":
+      return installMcpQwenJson(mcp, serverName);
     case "gemini":
       return installMcpJson(join(homedir(), ".gemini", "settings.json"), ["mcpServers", serverName], {
         command: mcp.command,

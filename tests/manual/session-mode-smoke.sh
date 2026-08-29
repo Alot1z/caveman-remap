@@ -127,7 +127,7 @@ check "legacy flag still written" "full" "$(legacy)"
 
 echo
 echo "12. The hook cannot wedge on a stdin that never closes"
-# The payload watchdog in caveman-activate.js is 3000ms, well inside the host's
+# The payload watchdog in caveman-activate.js is 2000ms, well inside the host's
 # 5s budget: with a write end held open forever the hook must still activate on
 # the watchdog and exit, not sit until the host kills it (#729/#833).
 ELAPSED=$(node -e '

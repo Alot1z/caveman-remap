@@ -35,6 +35,19 @@ test("bare caveman and --help render byte-equal compact fixture", async () => {
   }
 });
 
+test("--version matches the version command", async () => {
+  const isolated = isolatedCliEnv();
+  try {
+    const command = await runCli(["version"], { env: isolated.env });
+    const flag = await runCli(["--version"], { env: isolated.env });
+    assert.equal(command.code, 0, command.stderr);
+    assert.equal(flag.code, 0, flag.stderr);
+    assert.equal(flag.stdout, command.stdout);
+  } finally {
+    isolated.cleanup();
+  }
+});
+
 test("missing required binary adds only setup install pointer", async () => {
   const isolated = isolatedCliEnv({ CAVEMAN_PROXY_BIN: "/definitely/missing/caveman-proxy" });
   try {

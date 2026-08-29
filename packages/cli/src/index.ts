@@ -383,6 +383,7 @@ function printDiscovery(group: CommandGroup, all = false): void {
 function resolveInvocation(raw: string[]): ResolvedInvocation {
   const top = raw[0] ?? "help";
   if (top === "--help") return { verb: "help", argv: [], handler: help };
+  if (top === "--version") return { verb: "version", argv: [], handler: LEGACY_HANDLERS.version! };
   if ((top === "tools" || top === "cloud") && raw.length === 1) {
     return { verb: top, argv: [], group: top, handler: () => printDiscovery(top) };
   }

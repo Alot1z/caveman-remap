@@ -1,12 +1,22 @@
 import { test } from "node:test";
 import assert from "node:assert";
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { isolatedCliEnv, runCli } from "./_cli.mjs";
+
+const AGENTS = JSON.parse(
+  readFileSync(new URL("../../../agents/agents.json", import.meta.url), "utf8"),
+).agents;
+const visibleAgents = AGENTS.slice(0, 8).map((agent) => agent.id);
+const hiddenAgentCount = AGENTS.length - visibleAgents.length;
+const renderedAgentList = `${visibleAgents.join(" | ")}${
+  hiddenAgentCount > 0 ? ` | +${hiddenAgentCount} more — caveman run` : ""
+}`;
 
 const HELP = `caveman
 
 run
-  caveman <agent>        run an agent on the layer  (aider | claude | codex | gemini | hermes | openclaw | opencode | pi)
+  caveman <agent>        run an agent on the layer  (${renderedAgentList})
   caveman run -- <cmd>   run anything else on the layer
 
 understand

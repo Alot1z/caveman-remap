@@ -17,16 +17,12 @@ const packageParent = join(cliDir, "..");
 const publicRoot = existsSync(join(packageParent, "agents")) ? packageParent : join(packageParent, "..");
 const registry = JSON.parse(readFileSync(join(publicRoot, "agents", "agents.json"), "utf8"));
 const profiles = registry.agents;
-const expectedProfiles = ["aider", "claude", "codex", "gemini", "hermes", "openclaw", "opencode", "pi"];
+const expectedProfiles = profiles.map((profile) => profile.id).sort();
 const protocolCapabilities = {
-  aider: { recovery: "server" },
-  claude: { recovery: "server" },
-  codex: { recovery: "server" },
-  gemini: { recovery: "server" },
-  hermes: { recovery: "server" },
-  openclaw: { recovery: "server" },
-  opencode: { recovery: "server" },
-  pi: { recovery: "server" },
+  "anthropic-messages": { recovery: "server" },
+  "openai-chat": { recovery: "server" },
+  "openai-responses": { recovery: "server" },
+  "gemini-generatecontent": { recovery: "server" },
 };
 const responseSentinel = "CAVEMAN_CONFORMANCE_OK";
 const payloadMarker = "CAVEMAN_CONFORMANCE_PAYLOAD";
@@ -153,66 +149,94 @@ async function conformanceUpstream() {
   return { baseURL: `http://127.0.0.1:${port}`, requests, close: () => close(server) };
 }
 
-function writeAgentStub(binDir, id) {
-  const path = join(binDir, id);
+function writeAgentStub(binDir, profile) {
+  const path = join(binDir, profile.binary_names[0]);
   writeFileSync(path, `#!/usr/bin/env node
 import { readFileSync } from "node:fs";
-const id = ${JSON.stringify(id)};
+const profile = ${JSON.stringify(profile)};
+const id = profile.id;
 const prompt = "agent=" + id + "\\n" + ${JSON.stringify(longPrompt)};
+
+function routedURL(value) {
+  if (typeof value === "string") return value.includes("/w/" + id) ? value : "";
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = routedURL(item);
+      if (found) return found;
+    }
+    return "";
+  }
+  if (value && typeof value === "object") {
+    for (const item of Object.values(value)) {
+      const found = routedURL(item);
+      if (found) return found;
+    }
+  }
+  return "";
+}
+
+function declarativeBaseURL() {
+  const injection = profile.injection;
+  if (injection.method === "env") {
+    return routedURL(Object.keys(injection.env).map((name) => process.env[name]));
+  }
+  if (injection.method === "config-env-content") {
+    return routedURL(JSON.parse(process.env[injection.env_var] || "{}"));
+  }
+  if (injection.method === "config-file") {
+    const configPath = process.env[injection.env_var];
+    return configPath ? routedURL(JSON.parse(readFileSync(configPath, "utf8"))) : "";
+  }
+  return "";
+}
+
 let baseURL = "";
 let path = "";
 let body;
 let responseKind = "chat";
-if (id === "claude") {
-  baseURL = process.env.ANTHROPIC_BASE_URL || "";
-  path = "/v1/messages";
-  responseKind = "anthropic";
-  body = { model: "claude-sonnet-4-6", max_tokens: 32, stream: false, messages: [{ role: "user", content: prompt }] };
-} else if (id === "codex") {
+if (profile.injection_completeness === "code-only") {
+  if (id !== "codex") {
+    process.stderr.write(id + ": no conformance adapter for code-only injection\\n");
+    process.exit(2);
+  }
   const config = readFileSync(process.env.CODEX_HOME + "/config.toml", "utf8");
   baseURL = config.match(/^base_url\\s*=\\s*"([^"]+)"/m)?.[1] || "";
-  path = "/v1/responses";
-  responseKind = "responses";
-  body = { model: "gpt-5.5", stream: false, input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }] };
-} else if (id === "gemini") {
-  baseURL = process.env.GEMINI_BASE_URL || process.env.GOOGLE_GEMINI_BASE_URL || "";
-  path = "/v1beta/models/gemini-2.5-flash:generateContent";
-  responseKind = "gemini";
-  body = { contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 32 } };
-} else if (id === "hermes") {
-  baseURL = process.env.CUSTOM_BASE_URL || "";
-  path = "/v1/chat/completions";
-  body = { model: "gpt-4o-mini", stream: false, messages: [{ role: "user", content: prompt }] };
-} else if (id === "opencode") {
-  const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || "{}");
-  baseURL = config?.provider?.openai?.options?.baseURL || "";
-  path = "/chat/completions";
-  body = { model: "gpt-4o-mini", stream: false, messages: [{ role: "user", content: prompt }] };
-} else if (id === "openclaw") {
-  const config = JSON.parse(readFileSync(process.env.OPENCLAW_CONFIG_PATH, "utf8"));
-  baseURL = config?.models?.providers?.caveman?.baseUrl || "";
-  path = "/chat/completions";
-  body = { model: "gpt-4o-mini", stream: false, messages: [{ role: "user", content: prompt }] };
-} else if (id === "aider") {
-  baseURL = process.env.OPENAI_API_BASE || "";
-  path = "/chat/completions";
-  body = { model: "gpt-4o-mini", stream: false, messages: [{ role: "user", content: prompt }] };
-} else if (id === "pi") {
+} else if (profile.injection.method === "native-extension") {
+  if (id !== "pi") {
+    process.stderr.write(id + ": no conformance adapter for native-extension injection\\n");
+    process.exit(2);
+  }
   // Simulates the routed Pi extension. Wrap must actually have passed the
   // extension asset and stamped the hook env — a fail-open direct launch here
   // must fail the conformance run, not silently pretend to route.
   if (!process.argv.includes("--extension")) { process.stderr.write("pi: wrap did not pass --extension\\n"); process.exit(2); }
   if (!process.env.CAVEMAN_PI_HOOK_CMD) { process.stderr.write("pi: wrap did not stamp CAVEMAN_PI_HOOK_CMD\\n"); process.exit(2); }
   baseURL = (process.env.CAVE_GATEWAY_URL || "") + "/w/pi/openai/v1";
-  path = "/chat/completions";
-  body = { model: "gpt-4o-mini", stream: false, messages: [{ role: "user", content: prompt }] };
 } else {
-  baseURL = process.env.OPENAI_API_BASE || "";
-  path = "/v1/chat/completions";
-  body = { model: "gpt-4o-mini", stream: false, messages: [{ role: "user", content: prompt }] };
+  baseURL = declarativeBaseURL();
 }
 if (!baseURL) {
   process.stderr.write(id + ": missing injected gateway base URL\\n");
+  process.exit(2);
+}
+
+if (profile.wire_protocol === "anthropic-messages") {
+  path = "/v1/messages";
+  responseKind = "anthropic";
+  body = { model: "claude-sonnet-4-6", max_tokens: 32, stream: false, messages: [{ role: "user", content: prompt }] };
+} else if (profile.wire_protocol === "openai-responses") {
+  path = "/v1/responses";
+  responseKind = "responses";
+  body = { model: "gpt-5.5", stream: false, input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }] };
+} else if (profile.wire_protocol === "gemini-generatecontent") {
+  path = "/v1beta/models/gemini-2.5-flash:generateContent";
+  responseKind = "gemini";
+  body = { contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 32 } };
+} else if (profile.wire_protocol === "openai-chat") {
+  path = new URL(baseURL).pathname.replace(/\\/+$/, "").endsWith("/v1") ? "/chat/completions" : "/v1/chat/completions";
+  body = { model: "gpt-4o-mini", stream: false, messages: [{ role: "user", content: prompt }] };
+} else {
+  process.stderr.write(id + ": unsupported wire protocol " + profile.wire_protocol + "\\n");
   process.exit(2);
 }
 const headers = { "content-type": "application/json", authorization: "Bearer sk-conformance-openai" };
@@ -272,8 +296,9 @@ function writeHomeConfig(home, id) {
 
 test("every shipped agent profile preserves protocol-correct recovery behavior through the real compression engine", { timeout: 90_000 }, async (t) => {
   if (!process.env.CAVEMAN_TEST_PROXY_BIN && !goToolchainAvailable) return t.skip("go toolchain not found");
-  assert.deepEqual(profiles.map((profile) => profile.id).sort(), expectedProfiles, "new profiles must join the conformance matrix");
-  assert.deepEqual(Object.keys(protocolCapabilities).sort(), expectedProfiles, "every profile needs an explicit recovery capability");
+  for (const profile of profiles) {
+    assert.ok(protocolCapabilities[profile.wire_protocol], `${profile.id} needs an explicit protocol recovery capability`);
+  }
   const upstream = await conformanceUpstream();
   const suiteDir = mkdtempSync(join(tmpdir(), "cave-agent-compression-"));
   const caveHome = join(suiteDir, "cave-home");
@@ -283,7 +308,7 @@ test("every shipped agent profile preserves protocol-correct recovery behavior t
   try {
     mkdirSync(caveHome, { recursive: true });
     mkdirSync(binDir, { recursive: true });
-    for (const id of expectedProfiles) writeAgentStub(binDir, id);
+    for (const profile of profiles) writeAgentStub(binDir, profile);
     if (process.env.CAVEMAN_TEST_PROXY_BIN) {
       copyFileSync(process.env.CAVEMAN_TEST_PROXY_BIN, proxyBin);
       chmodSync(proxyBin, 0o755);
@@ -324,6 +349,8 @@ test("every shipped agent profile preserves protocol-correct recovery behavior t
     await waitForPort(proxyPort);
 
     for (const id of expectedProfiles) {
+      const profile = profiles.find((candidate) => candidate.id === id);
+      assert.ok(profile, `profile ${id} disappeared from registry`);
       const home = join(suiteDir, `home-${id}`);
       writeHomeConfig(home, id);
       const env = {
@@ -346,7 +373,7 @@ test("every shipped agent profile preserves protocol-correct recovery behavior t
       const request = upstream.requests.at(-1);
       assert.ok(request, `${id} sent no upstream request`);
       const originalPrompt = `agent=${id}\n${longPrompt}`;
-      if (protocolCapabilities[id].recovery === "server") {
+      if (protocolCapabilities[profile.wire_protocol].recovery === "server") {
         assert.notEqual(requestPrompt(request), originalPrompt, `${id} sent original long prompt uncompressed`);
         assert.match(request.raw, /<<ccr:/, `${id} upstream body lacks recovery handle`);
       } else {
@@ -366,7 +393,9 @@ test("every shipped agent profile preserves protocol-correct recovery behavior t
       assert.equal(rows.length, expectedProfiles.length);
       assert.deepEqual(rows.map((row) => row.agent_slug), expectedProfiles);
       for (const row of rows) {
-        if (protocolCapabilities[row.agent_slug].recovery === "server") {
+        const profile = profiles.find((candidate) => candidate.id === row.agent_slug);
+        assert.ok(profile, `database recorded unknown profile ${row.agent_slug}`);
+        if (protocolCapabilities[profile.wire_protocol].recovery === "server") {
           assert.ok(Number(row.compression_tokens_before) > Number(row.compression_tokens_after), `${row.agent_slug} recorded no token reduction`);
           assert.match(String(row.recovery_handle), /^ccr_/, `${row.agent_slug} recorded no CCR handle`);
           assert.notEqual(row.raw_request_sha256, row.transformed_request_sha256, `${row.agent_slug} hashes claim no transform`);

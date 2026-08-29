@@ -172,14 +172,24 @@ function bareModelId(id) {
   return id.replace(/^[a-z0-9][a-z0-9-]*\//, "");
 }
 const CATALOG_MODEL_IDS = loadCatalogModelIds(catalogFile);
-// Collect model ids from a profile's injection config: values of a `model` key and the
-// keys of a `models` map (the opencode/openai-compatible convention).
+// Collect model ids from every supported profile shape: values of a `model` key,
+// keys of a `models` map (AI SDK/OpenCode), and entries in a `modelProviders`
+// array (Qwen Code). Missing one shape would let routed traffic bypass catalog
+// pricing validation and later book at an unpriced zero.
 function collectInjectionModelIds(node, out) {
   if (Array.isArray(node)) { for (const v of node) collectInjectionModelIds(v, out); return; }
   if (node && typeof node === "object") {
     for (const [k, v] of Object.entries(node)) {
       if (k === "model" && typeof v === "string" && v) out.add(bareModelId(v));
       if (k === "models" && v && typeof v === "object" && !Array.isArray(v)) for (const mk of Object.keys(v)) out.add(bareModelId(mk));
+      if (k === "modelProviders" && v && typeof v === "object" && !Array.isArray(v)) {
+        for (const models of Object.values(v)) {
+          if (!Array.isArray(models)) continue;
+          for (const model of models) {
+            if (model && typeof model === "object" && typeof model.id === "string" && model.id) out.add(bareModelId(model.id));
+          }
+        }
+      }
       collectInjectionModelIds(v, out);
     }
   }

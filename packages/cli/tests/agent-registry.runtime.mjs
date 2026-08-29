@@ -98,6 +98,17 @@ rejects("another profile's platform config default", (profile) => {
   };
 }, /platform_default must belong to the profile id/);
 
+rejects("unpriced model in a modelProviders array", (profile) => {
+  profile.injection = {
+    method: "config-file",
+    env_var: "CLAUDE_CONFIG_PATH",
+    base_config: { path: "~/.claude/settings.json" },
+    config_overlay: {
+      local: { modelProviders: { openai: [{ id: "definitely-unpriced-model" }] } },
+    },
+  };
+}, /model "definitely-unpriced-model" which is not priced/);
+
 test("shipped profiles compile unchanged and generated artifacts are deterministic", () => {
   const first = spawnSync(process.execPath, [compiler], { encoding: "utf8" });
   assert.equal(first.status, 0, first.stderr);

@@ -23,7 +23,7 @@ import {
 } from "node:fs";
 import { chmod, mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir, hostname, tmpdir } from "node:os";
-import { basename, delimiter, dirname, extname, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, extname, isAbsolute, join, resolve, win32 } from "node:path";
 import { connect as netConnect, createServer as netCreateServer, isIP, type AddressInfo } from "node:net";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -5783,11 +5783,30 @@ export function deepMerge(base: unknown, overlay: unknown): unknown {
 
 type ConfigFileInjection = Extract<AgentProfile["injection"], { method: "config-file" }>;
 
+export function platformDefaultConfigPath(
+  kind: NonNullable<NonNullable<ConfigFileInjection["base_config"]>["platform_default"]>,
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  if (kind !== "qwen-system-settings") return undefined;
+  if (platform === "darwin") return "/Library/Application Support/QwenCode/settings.json";
+  if (platform === "win32") {
+    const programData = env.ProgramData || env.PROGRAMDATA || "C:\\ProgramData";
+    return win32.join(programData, "qwen-code", "settings.json");
+  }
+  if (platform === "linux") return "/etc/qwen-code/settings.json";
+  return undefined;
+}
+
 function baseConfigPath(base: NonNullable<ConfigFileInjection["base_config"]>): string {
   const envPath = base.env_var ? process.env[base.env_var] : undefined;
   if (envPath && envPath.trim()) return expandTilde(envPath);
   const stateDir = base.state_dir?.env_var ? process.env[base.state_dir.env_var] : undefined;
   if (stateDir && stateDir.trim()) return join(expandTilde(stateDir), base.state_dir!.filename);
+  const platformDefault = base.platform_default
+    ? platformDefaultConfigPath(base.platform_default)
+    : undefined;
+  if (platformDefault) return platformDefault;
   return expandTilde(base.path);
 }
 

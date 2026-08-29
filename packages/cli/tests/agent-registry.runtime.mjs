@@ -80,6 +80,24 @@ rejects("literal nested gateway URL", (profile) => {
   };
 }, /baseURL must route through a cave template token/);
 
+rejects("unknown platform config default", (profile) => {
+  profile.injection = {
+    method: "config-file",
+    env_var: "CLAUDE_CONFIG_PATH",
+    base_config: { path: "~/.claude/settings.json", platform_default: "unknown-system-settings" },
+    config_overlay: { local: {} },
+  };
+}, /platform_default "unknown-system-settings" is not allowlisted/);
+
+rejects("another profile's platform config default", (profile) => {
+  profile.injection = {
+    method: "config-file",
+    env_var: "CLAUDE_CONFIG_PATH",
+    base_config: { path: "~/.claude/settings.json", platform_default: "qwen-system-settings" },
+    config_overlay: { local: {} },
+  };
+}, /platform_default must belong to the profile id/);
+
 test("shipped profiles compile unchanged and generated artifacts are deterministic", () => {
   const first = spawnSync(process.execPath, [compiler], { encoding: "utf8" });
   assert.equal(first.status, 0, first.stderr);

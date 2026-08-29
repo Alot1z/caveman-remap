@@ -36,6 +36,7 @@ const INJECTION_METHODS = new Set(["env", "config-env-content", "config-file", "
 const NATIVE_EXTENSION_HOSTS = new Set(["pi"]);
 const NATIVE_EXTENSION_ASSETS = new Set(["caveman-pi-extension"]);
 const NATIVE_EXTENSION_LOADER_FLAGS = new Set(["--extension"]);
+const PLATFORM_CONFIG_DEFAULTS = new Set(["qwen-system-settings"]);
 const COMMAND_HOOK_METHODS = new Set(["claude-pretooluse", "codex-pretooluse", "gemini-beforetool", "opencode-plugin", "hermes-plugin", "openclaw-plugin", "pi-extension", "instruction-note"]);
 const MEMORY_HOOK_METHODS = new Set(["claude-userpromptsubmit"]);
 const SKILL_FORMATS = new Set(["skill-md"]);
@@ -274,6 +275,10 @@ function validate(p, file) {
         validateEnvVariableName(inj.base_config.state_dir.env_var, need, "injection.base_config.state_dir.env_var");
         need(typeof inj.base_config.state_dir.filename === "string" && inj.base_config.state_dir.filename.length > 0, "injection.base_config.state_dir.filename must be a non-empty string");
       }
+      if (inj.base_config.platform_default !== undefined) {
+        need(PLATFORM_CONFIG_DEFAULTS.has(inj.base_config.platform_default), `injection.base_config.platform_default "${inj.base_config.platform_default}" is not allowlisted`);
+        need(inj.base_config.platform_default === `${p.id}-system-settings`, "injection.base_config.platform_default must belong to the profile id");
+      }
     }
     need(inj.config_overlay && typeof inj.config_overlay === "object" && !Array.isArray(inj.config_overlay), "injection.config_overlay must be an object");
     need(Object.prototype.hasOwnProperty.call(inj.config_overlay, "local"), "injection.config_overlay.local is required");
@@ -422,7 +427,7 @@ export type WireProtocol = "anthropic-messages" | "openai-chat" | "openai-respon
 export type Injection =
   | { method: "env"; env: Record<string, string> }
   | { method: "config-env-content"; env_var: string; config_content: { local: unknown; managed?: unknown } }
-  | { method: "config-file"; env_var: string; base_config?: { path: string; env_var?: string; state_dir?: { env_var: string; filename: string } }; config_overlay: { local: unknown; managed?: unknown } }
+  | { method: "config-file"; env_var: string; base_config?: { path: string; env_var?: string; state_dir?: { env_var: string; filename: string }; platform_default?: "qwen-system-settings" }; config_overlay: { local: unknown; managed?: unknown } }
   | { method: "native-extension"; host: string; asset: string; loader_flag: string };
 
 export type CommandHook =

@@ -87,6 +87,10 @@
                     "env_var": { "type": "string", "description": "if set and env_var is absent, read filename from this state directory" },
                     "filename": { "type": "string", "description": "config filename inside state_dir env_var" }
                   }
+                },
+                "platform_default": {
+                  "enum": ["qwen-system-settings"],
+                  "description": "closed resolver for a vendor's OS-default settings file, used only when env_var and state_dir do not select a path"
                 }
               }
             },

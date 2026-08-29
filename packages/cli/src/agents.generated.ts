@@ -6,7 +6,7 @@ export type WireProtocol = "anthropic-messages" | "openai-chat" | "openai-respon
 export type Injection =
   | { method: "env"; env: Record<string, string> }
   | { method: "config-env-content"; env_var: string; config_content: { local: unknown; managed?: unknown } }
-  | { method: "config-file"; env_var: string; base_config?: { path: string; env_var?: string; state_dir?: { env_var: string; filename: string } }; config_overlay: { local: unknown; managed?: unknown } }
+  | { method: "config-file"; env_var: string; base_config?: { path: string; env_var?: string; state_dir?: { env_var: string; filename: string }; platform_default?: "qwen-system-settings" }; config_overlay: { local: unknown; managed?: unknown } }
   | { method: "native-extension"; host: string; asset: string; loader_flag: string };
 
 export type CommandHook =

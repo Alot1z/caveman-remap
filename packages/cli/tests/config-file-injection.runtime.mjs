@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cliModule = await import(pathToFileURL(join(here, "..", "dist", "index.js")).href);
-const { readJson5Lenient, deepMerge, buildWrapEnv, overlayBuilders } = cliModule;
+const { readJson5Lenient, deepMerge, buildWrapEnv, overlayBuilders, platformDefaultConfigPath } = cliModule;
 const { PROFILES } = await import(pathToFileURL(join(here, "..", "dist", "agents.generated.js")).href);
 
 function attributed(gw, id) {
@@ -114,6 +114,19 @@ test("deepMerge recursively merges plain objects and replaces arrays and scalars
     ),
     { obj: { keep: 1, replace: 9, add: 3 }, arr: [2], scalar: { now: "object" }, keepRoot: true, nil: null },
   );
+});
+
+test("platform config defaults resolve only closed vendor settings paths", () => {
+  assert.equal(platformDefaultConfigPath("qwen-system-settings", "linux", {}), "/etc/qwen-code/settings.json");
+  assert.equal(
+    platformDefaultConfigPath("qwen-system-settings", "darwin", {}),
+    "/Library/Application Support/QwenCode/settings.json",
+  );
+  assert.equal(
+    platformDefaultConfigPath("qwen-system-settings", "win32", { ProgramData: "D:\\ManagedData" }),
+    "D:\\ManagedData\\qwen-code\\settings.json",
+  );
+  assert.equal(platformDefaultConfigPath("qwen-system-settings", "freebsd", {}), undefined);
 });
 
 test("config-file injection merges a rendered overlay over a temp base config", () => withEnv({

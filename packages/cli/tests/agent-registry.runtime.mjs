@@ -52,6 +52,10 @@ rejects("reserved profile id", (profile) => {
   profile.id = "status";
 }, /id "status" collides with a reserved command/);
 
+rejects("profile id beyond the proxy slug limit", (profile) => {
+  profile.id = "a".repeat(65);
+}, /id must fit the proxy's 64-byte agent slug limit/);
+
 rejects("reserved binary name", (profile) => {
   profile.binary_names = ["run"];
 }, /binary name "run" collides with a reserved command/);

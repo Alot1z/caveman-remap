@@ -22,7 +22,7 @@
   "required": ["schema_version", "id", "display_name", "vendor", "homepage", "binary_names", "install", "wire_protocol", "injection"],
   "properties": {
     "schema_version": { "const": "1" },
-    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$", "description": "kebab-case, globally unique; the `caveman wrap <id>` selector" },
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$", "maxLength": 64, "description": "kebab-case, globally unique; the `caveman wrap <id>` selector and `/w/<id>` proxy slug" },
     "display_name": { "type": "string" },
     "vendor": { "type": "string" },
     "homepage": { "type": "string", "format": "uri" },

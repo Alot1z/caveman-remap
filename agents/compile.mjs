@@ -238,6 +238,7 @@ function validate(p, file) {
   for (const key of Object.keys(p)) need(schemaProperties.has(key), `unknown top-level key "${key}"`);
   need(p.schema_version === "1", `schema_version must be "1"`);
   need(typeof p.id === "string" && /^[a-z0-9][a-z0-9-]*$/.test(p.id), "id must be kebab-case");
+  need(p.id.length <= 64, "id must fit the proxy's 64-byte agent slug limit");
   need(!reservedVerbs.includes(p.id), `id "${p.id}" collides with a reserved command`);
   for (const k of ["display_name", "vendor", "homepage", "install"]) {
     need(typeof p[k] === "string" && p[k].length > 0, `${k} must be a non-empty string`);

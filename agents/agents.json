@@ -437,6 +437,113 @@
       "verified_by": "local pinned-binary probe (pi 0.84.2, extension API types read from the installed package)",
       "fallback": "none",
       "maintainer": null
+    },
+    {
+      "schema_version": "1",
+      "id": "qwen",
+      "display_name": "Qwen Code",
+      "vendor": "QwenLM",
+      "homepage": "https://github.com/QwenLM/qwen-code",
+      "binary_names": [
+        "qwen"
+      ],
+      "args": [],
+      "install": "npm i -g @qwen-code/qwen-code",
+      "wire_protocol": "openai-chat",
+      "injection": {
+        "method": "config-file",
+        "env_var": "QWEN_CODE_SYSTEM_SETTINGS_PATH",
+        "base_config": {
+          "path": "~/.qwen/system-settings.json",
+          "env_var": "QWEN_CODE_SYSTEM_SETTINGS_PATH",
+          "platform_default": "qwen-system-settings"
+        },
+        "config_overlay": {
+          "local": {
+            "modelProviders": {
+              "openai": [
+                {
+                  "id": "gpt-5.5",
+                  "name": "GPT-5.5 (via Caveman)",
+                  "envKey": "OPENAI_API_KEY",
+                  "baseUrl": "{{cave_base_url}}/v1",
+                  "generationConfig": {
+                    "customHeaders": {
+                      "X-Cave-Agent": "qwen"
+                    }
+                  }
+                },
+                {
+                  "id": "gpt-5.4-mini",
+                  "name": "GPT-5.4 mini (via Caveman)",
+                  "envKey": "OPENAI_API_KEY",
+                  "baseUrl": "{{cave_base_url}}/v1",
+                  "generationConfig": {
+                    "customHeaders": {
+                      "X-Cave-Agent": "qwen"
+                    }
+                  }
+                }
+              ]
+            },
+            "security": {
+              "auth": {
+                "selectedType": "openai"
+              }
+            },
+            "model": {
+              "name": "gpt-5.5"
+            }
+          },
+          "managed": {
+            "modelProviders": {
+              "openai": [
+                {
+                  "id": "gpt-5.5",
+                  "name": "GPT-5.5 (via Caveman)",
+                  "envKey": "CAVE_API_KEY",
+                  "baseUrl": "{{cave_base_url}}/v1",
+                  "generationConfig": {
+                    "customHeaders": {
+                      "x-cave-upstream-key": "$OPENAI_API_KEY",
+                      "X-Cave-Agent": "qwen"
+                    }
+                  }
+                },
+                {
+                  "id": "gpt-5.4-mini",
+                  "name": "GPT-5.4 mini (via Caveman)",
+                  "envKey": "CAVE_API_KEY",
+                  "baseUrl": "{{cave_base_url}}/v1",
+                  "generationConfig": {
+                    "customHeaders": {
+                      "x-cave-upstream-key": "$OPENAI_API_KEY",
+                      "X-Cave-Agent": "qwen"
+                    }
+                  }
+                }
+              ]
+            },
+            "security": {
+              "auth": {
+                "selectedType": "openai"
+              }
+            },
+            "model": {
+              "name": "gpt-5.5"
+            }
+          }
+        }
+      },
+      "attribution": {
+        "header": "X-Cave-Agent"
+      },
+      "tested_agent_version": "0.22.3",
+      "injection_completeness": "declarative",
+      "last_verified_at": "2026-08-30",
+      "verified_by": "local pinned-binary route probe (@qwen-code/qwen-code 0.22.3)",
+      "fallback": "generic-env",
+      "maintainer": null
     }
   ]
 }

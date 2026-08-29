@@ -23,7 +23,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "24.16.0"
-      - name: Reject mixed profile and product changes
+      - name: Reject mixed profile and product commits
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -32,21 +32,32 @@ jobs:
             echo "profile registry absent at base (initial import); skipping lane-scope gate"
             exit 0
           fi
-          git diff --name-only "$BASE_SHA" "$HEAD_SHA" > /tmp/changed-files
           profile_touched=false
-          while IFS= read -r file; do
-            case "$file" in
-              agents/profiles/*)
-                profile_touched=true
-                ;;
-              agents/agents.json|packages/cli/src/agents.generated.ts|packages/cli/src/reserved-verbs.generated.ts)
-                ;;
-              *)
-                echo "profile lane rejects out-of-scope path: $file"
-                exit 1
-                ;;
-            esac
-          done < /tmp/changed-files
+          while IFS= read -r commit; do
+            mapfile -t changed_files < <(git diff-tree --no-commit-id --name-only -r "$commit")
+            commit_touches_profile=false
+            for file in "${changed_files[@]}"; do
+              case "$file" in
+                agents/profiles/*)
+                  commit_touches_profile=true
+                  profile_touched=true
+                  ;;
+              esac
+            done
+            if [[ "$commit_touches_profile" != "true" ]]; then
+              continue
+            fi
+            for file in "${changed_files[@]}"; do
+              case "$file" in
+                agents/profiles/*|agents/agents.json|packages/cli/src/agents.generated.ts|packages/cli/src/reserved-verbs.generated.ts)
+                  ;;
+                *)
+                  echo "profile lane rejects out-of-scope path in commit $commit: $file"
+                  exit 1
+                  ;;
+              esac
+            done
+          done < <(git rev-list --reverse "$BASE_SHA..$HEAD_SHA")
           if [[ "$profile_touched" != "true" ]]; then
             echo "profile lane requires one agents/profiles change"
             exit 1

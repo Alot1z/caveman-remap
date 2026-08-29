@@ -167,6 +167,13 @@ test('priceForModel matches by prefix across point releases', () => {
   assert.strictEqual(priceForModel('claude-sonnet-4-7-20260315'), 15.00);
   assert.strictEqual(priceForModel('claude-haiku-4-5'), 5.00);
   assert.strictEqual(priceForModel('claude-3-5-sonnet-20241022'), 15.00);
+  assert.strictEqual(priceForModel('claude-opus-5'), 25.00);
+  assert.strictEqual(priceForModel('claude-sonnet-5'), 10.00);
+  assert.strictEqual(priceForModel('claude-fable-5'), 50.00);
+  assert.strictEqual(priceForModel('claude-mythos-5'), 50.00);
+  assert.strictEqual(priceForModel('claude-opus-5[1m]'), 25.00);
+  assert.strictEqual(priceForModel('claude-sonnet-5[1m]'), 10.00);
+  assert.strictEqual(priceForModel('claude-haiku-5'), null);
   assert.strictEqual(priceForModel(null), null);
   assert.strictEqual(priceForModel('gpt-4'), null);
 });
@@ -427,6 +434,95 @@ test('statusline strips control bytes from suffix', (tmp) => {
   // Escape byte stripped; "[31mEVIL" remains, but the leading \x1b is gone so
   // the user's terminal won't be hijacked.
   assert.doesNotMatch(out, /\x1b\[31m/);
+});
+
+// ── statusline: per-session badge ──────────────────────────────────────────
+//
+// Claude Code pipes session JSON (including session_id) to the statusline
+// command. These drive the script the same way, so the badge is proven to
+// reflect the window it belongs to rather than a machine-wide flag.
+
+function statusline(claudeDir, stdin) {
+  return execFileSync('bash', [path.join(ROOT, 'src', 'hooks', 'caveman-statusline.sh')], {
+    encoding: 'utf8',
+    input: stdin === undefined ? '' : stdin,
+    env: { ...process.env, CLAUDE_CONFIG_DIR: claudeDir, CAVEMAN_STATUSLINE_SAVINGS: '0' },
+  });
+}
+
+function seedSessions(claudeDir, modes) {
+  const dir = path.join(claudeDir, '.caveman-sessions');
+  fs.mkdirSync(dir, { recursive: true });
+  for (const [sid, mode] of Object.entries(modes)) {
+    fs.writeFileSync(path.join(dir, `${sid}.mode`), mode);
+  }
+}
+
+test('statusline.sh renders the session mode, not the shared flag', (tmp) => {
+  if (process.platform === 'win32') return;
+  const claudeDir = path.join(tmp, '.claude');
+  fs.mkdirSync(claudeDir, { recursive: true });
+  fs.writeFileSync(path.join(claudeDir, '.caveman-active'), 'full');
+  seedSessions(claudeDir, { sessA: 'ultra', sessB: 'lite' });
+
+  assert.match(statusline(claudeDir, '{"session_id":"sessA"}'), /\[CAVEMAN:ULTRA\]/);
+  assert.match(statusline(claudeDir, '{"session_id":"sessB"}'), /\[CAVEMAN:LITE\]/);
+});
+
+test('statusline.sh renders nothing for a durable off session', (tmp) => {
+  if (process.platform === 'win32') return;
+  const claudeDir = path.join(tmp, '.claude');
+  fs.mkdirSync(claudeDir, { recursive: true });
+  // Another window is still on 'full' — this one must stay silent anyway.
+  fs.writeFileSync(path.join(claudeDir, '.caveman-active'), 'full');
+  seedSessions(claudeDir, { sessOff: 'off' });
+
+  const out = statusline(claudeDir, '{"session_id":"sessOff"}');
+  assert.strictEqual(out, '', `expected empty badge, got ${JSON.stringify(out)}`);
+  assert.doesNotMatch(out, /OFF/, 'must never render [CAVEMAN:OFF]');
+});
+
+test('statusline.sh falls back to the legacy flag without a usable session id', (tmp) => {
+  if (process.platform === 'win32') return;
+  const claudeDir = path.join(tmp, '.claude');
+  fs.mkdirSync(claudeDir, { recursive: true });
+  fs.writeFileSync(path.join(claudeDir, '.caveman-active'), 'wenyan');
+  seedSessions(claudeDir, { sessA: 'ultra' });
+
+  for (const stdin of [
+    '{"session_id":"unknown-session"}',   // valid id, no state file yet
+    '{"model":{"id":"x"}}',               // payload without session_id
+    '{"session_id":"../../etc/passwd"}',  // traversal attempt
+    'not json at all',
+    '',                                   // no payload
+  ]) {
+    assert.match(statusline(claudeDir, stdin), /\[CAVEMAN:WENYAN\]/, `stdin: ${stdin}`);
+  }
+});
+
+test('statusline.sh never reads a session file outside the sessions dir', (tmp) => {
+  if (process.platform === 'win32') return;
+  const claudeDir = path.join(tmp, '.claude');
+  fs.mkdirSync(claudeDir, { recursive: true });
+  fs.writeFileSync(path.join(claudeDir, '.caveman-active'), 'full');
+  // Plant a file the traversal would reach if the id were interpolated raw.
+  fs.mkdirSync(path.join(claudeDir, '.caveman-sessions'), { recursive: true });
+  fs.writeFileSync(path.join(claudeDir, 'escaped.mode'), 'ultra');
+
+  const out = statusline(claudeDir, '{"session_id":"../escaped"}');
+  assert.match(out, /\[CAVEMAN\]/, 'must fall back to the legacy full badge');
+  assert.doesNotMatch(out, /ULTRA/, 'traversal must not reach the planted file');
+});
+
+test('statusline.sh tolerates multiline and whitespace-padded JSON', (tmp) => {
+  if (process.platform === 'win32') return;
+  const claudeDir = path.join(tmp, '.claude');
+  fs.mkdirSync(claudeDir, { recursive: true });
+  fs.writeFileSync(path.join(claudeDir, '.caveman-active'), 'full');
+  seedSessions(claudeDir, { sessA: 'ultra' });
+
+  const pretty = '{\n  "model": { "id": "x" },\n  "session_id" : "sessA"\n}\n';
+  assert.match(statusline(claudeDir, pretty), /\[CAVEMAN:ULTRA\]/);
 });
 
 test('appendFlag is symlink-safe (refuses symlinked target)', (tmp) => {

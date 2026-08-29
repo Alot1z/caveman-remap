@@ -80,7 +80,9 @@ func (s *Server) chatgpt(w http.ResponseWriter, r *http.Request) {
 	var comp *compressionOutcome
 	adapter := openai.New(s.chatGPTUpstream)
 	compressEligible := r.Method == http.MethodPost && rc.RuntimeMode == "compress" && suffix == "/responses" &&
-		s.compressor != nil && s.liveZoneCompressionAllowed(adapter) && compiledPlanAllowed
+		// nil body: this route exists only for subscription wrap, which proves
+		// recovery out of band before starting its dedicated proxy.
+		s.compressor != nil && s.liveZoneCompressionAllowed(adapter, nil) && compiledPlanAllowed
 	if compressEligible {
 		captured, readErr := io.ReadAll(io.LimitReader(r.Body, chatGPTCaptureLimit+1))
 		if readErr == nil && len(captured) <= chatGPTCaptureLimit {

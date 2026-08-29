@@ -154,7 +154,7 @@ CAVEMAN_SETTINGS="$SETTINGS" CAVEMAN_HOOKS_DIR="$HOOKS_DIR" node -e "
       hooks: [{
         type: 'command',
         command: 'node \"' + hooksDir + '/caveman-activate.js\"',
-        timeout: 5,
+        timeout: 30,
         statusMessage: 'Loading caveman mode...'
       }]
     });
@@ -170,7 +170,7 @@ CAVEMAN_SETTINGS="$SETTINGS" CAVEMAN_HOOKS_DIR="$HOOKS_DIR" node -e "
       hooks: [{
         type: 'command',
         command: 'node \"' + hooksDir + '/caveman-mode-tracker.js\"',
-        timeout: 5,
+        timeout: 30,
         statusMessage: 'Tracking caveman mode...'
       }]
     });

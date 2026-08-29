@@ -108,7 +108,7 @@ test("enable/disable claude is idempotent and preserves unrelated later edits", 
   assert.match(installedBytes, /shrink-hook/);
   assert.match(JSON.stringify(settings.hooks.PreToolUse), /native-hook claude/);
   assert.match(JSON.stringify(settings.hooks.PostToolUseFailure), /native-hook claude/);
-  assert.match(JSON.stringify(settings.hooks.PostCompact), /native-hook claude/);
+  assert.equal(settings.hooks.PostCompact, undefined, "Claude compact context is delivered by SessionStart source=compact");
   assert.equal(JSON.parse(readFileSync(mcpPath, "utf8")).mcpServers.other.command, "other-mcp");
   assert.match(readFileSync(mcpPath, "utf8"), /caveman-mcp/);
   assert.ok(existsSync(join(fx.home, ".caveman", "integrations", "claude.json")));
@@ -386,13 +386,40 @@ test("doctor requires exact native hook entries, not matching text", async () =>
   assert.equal((await run(["enable", "claude"], fx.env)).code, 0);
   const path = join(fx.home, ".claude", "settings.json");
   const settings = JSON.parse(readFileSync(path, "utf8"));
-  settings.hooks.SessionStart = [{ hooks: [{ type: "command", command: "echo native-hook claude" }] }];
+  settings.hooks.SessionStart = [{ hooks: [{ type: "command", command: "echo native-hook claude", timeout: 30 }] }];
   writeFileSync(path, JSON.stringify(settings, null, 2) + "\n");
   const out = await run(["doctor", "claude"], fx.env);
   assert.notEqual(out.code, 0);
   const result = JSON.parse(out.stdout);
   assert.equal(result.state, "degraded");
   assert.equal(result.components.lifecycle_hooks, false);
+});
+
+test("doctor and disable tolerate executable path drift with unchanged hook semantics", async () => {
+  const fx = fixture();
+  assert.equal((await run(["enable", "claude"], fx.env)).code, 0);
+  const path = join(fx.home, ".claude", "settings.json");
+  const settings = JSON.parse(readFileSync(path, "utf8"));
+  for (const entries of Object.values(settings.hooks)) {
+    for (const entry of entries) {
+      const hook = entry.hooks?.[0];
+      if (typeof hook?.command === "string" && /native-hook claude|shrink-hook|mem recall-hook/.test(hook.command)) {
+        hook.command = hook.command.includes("native-hook claude")
+          ? hook.command
+              .replace(/^.*?(?=native-hook claude)/, "'/new/caveman/bin/caveman-proxy' ")
+              .replace(/--adapter\s+.*$/, "--adapter '/new/caveman/native-hook-fast.js'")
+          : hook.command.replace(/^.*?(?=shrink-hook|mem recall-hook)/, "'/new/fnm/node' '/new/caveman/index.js' ");
+      }
+    }
+  }
+  writeFileSync(path, JSON.stringify(settings, null, 2) + "\n");
+
+  const doctor = await run(["doctor", "claude"], fx.env);
+  assert.equal(doctor.code, 0, doctor.stderr);
+  assert.equal(JSON.parse(doctor.stdout).state, "installed");
+  const disabled = await run(["disable", "claude"], fx.env);
+  assert.equal(disabled.code, 0, disabled.stderr);
+  assert.doesNotMatch(readFileSync(path, "utf8"), /native-hook claude|shrink-hook|mem recall-hook/);
 });
 
 test("doctor --fix transactionally repairs missing owned hooks and preserves unrelated edits", async () => {

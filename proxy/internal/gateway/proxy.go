@@ -82,13 +82,6 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 	}
 	credential := s.creds.Resolve(adapter.Name(), r)
 	authMode := ClassifyResolvedAuthMode(r.Header, credential)
-	// Local compression is not account-gated, so both non-PAYG
-	// classifications reach the live zone on the same purely technical conditions:
-	// the operator off-switch, an adapter with cache-floor reasoning, and the MCP
-	// recovery + byte-stable prefix machinery that makes the rewrite recoverable
-	// and maintainable.
-	nonPAYGLiveZone := (authMode == AuthModeSubscription || authMode == AuthModeOAuth) && s.liveZoneCompressionAllowed(adapter)
-	subscriptionPassthrough := authMode == AuthModeSubscription && !nonPAYGLiveZone
 	// Attribute the row to the wrapped agent (e.g. `caveman wrap opencode` sets
 	// x-cave-agent: opencode). Default to "unlabeled-agent" so the dimension is
 	// always present. Telemetry-only: it never gates routing or transforms.
@@ -108,6 +101,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rawHash := sha256.Sum256(body)
+	// Decide after reading: standalone clients prove recovery with their request's
+	// namespaced caveman retrieve tool; wrap may prove it out of band.
+	nonPAYGLiveZone := (authMode == AuthModeSubscription || authMode == AuthModeOAuth) && s.liveZoneCompressionAllowed(adapter, body)
+	subscriptionPassthrough := authMode == AuthModeSubscription && !nonPAYGLiveZone
 	evidence := requestEvidenceFromHeaders(r.Header)
 	if correlatedSessionID != "" {
 		evidence.SessionID = correlatedSessionID
@@ -229,7 +226,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		// PAYG keeps its pre-existing MCP-recovery rule; subscription and OAuth go
 		// exclusively through the live-zone predicate above (which itself requires MCP
 		// recovery), so neither can ever compress with no way back to the elided bytes.
-		markerOnlyAllowed := (s.recoveryViaMCP && authMode != AuthModeOAuth && authMode != AuthModeSubscription) || nonPAYGLiveZone
+		markerOnlyAllowed := (s.mcpRecoveryAvailable(body) && authMode != AuthModeOAuth && authMode != AuthModeSubscription) || nonPAYGLiveZone
 		if (markerOnlyAllowed || serverRetrieveAllowed) && epochAllows() {
 			// The request reached the compression path as a candidate. It is eligible
 			// whether or not compressRequest ultimately shrinks any bytes — the
@@ -259,7 +256,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		// rewrite admissible here. It runs last so its byte offsets are computed on
 		// the bytes actually going upstream, and it is skipped under a compiled
 		// Cave Build, whose transform set is locked to what evals approved.
-		if len(lockedRoutes) == 0 && s.toolSchemaStripAllowed(adapter, evidence.SessionID) && epochAllows() {
+		if len(lockedRoutes) == 0 && s.toolSchemaStripAllowed(adapter, body, evidence.SessionID) && epochAllows() {
 			if stripped, handle, ok := s.stripToolSchema(transform.Body, meta, requestID); ok {
 				transform.Body = stripped
 				transform.OptimizerIDs = append(transform.OptimizerIDs, toolSchemaStripOptimizerID)

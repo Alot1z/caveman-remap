@@ -32,7 +32,7 @@ jobs:
           if node -e 'process.exit(process.versions.node.split(".")[0] >= 20 ? 0 : 1)'; then
             npm test
           else
-            node --test tests/installer/*.test.mjs
+            node --test tests/installer/*.test.mjs tests/hooks/*.test.mjs
           fi
       - name: Standalone hook/tool tests
         run: |

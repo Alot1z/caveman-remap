@@ -364,7 +364,7 @@ type Server struct {
 // This is a LOCAL-wrap-only capability. The managed gateway's lossless+stealth
 // rule for non-PAYG traffic is unchanged. Subscription rows it produces are
 // tokens-only: the row's dollar fields stay zero (see record()).
-func (s *Server) liveZoneCompressionAllowed(adapter providers.Adapter) bool {
+func (s *Server) liveZoneCompressionAllowed(adapter providers.Adapter, body []byte) bool {
 	switch s.subscriptionCompress {
 	case "", "live_zone":
 	default:
@@ -373,10 +373,16 @@ func (s *Server) liveZoneCompressionAllowed(adapter providers.Adapter) bool {
 	if adapter == nil {
 		return false
 	}
-	if !s.recoveryViaMCP {
+	if !s.mcpRecoveryAvailable(body) {
 		return false
 	}
 	return s.prefixStabilized(adapter)
+}
+
+// mcpRecoveryAvailable binds recoverability to caller: either wrap verified it
+// out of band, or request itself carries namespaced Caveman MCP retrieve tool.
+func (s *Server) mcpRecoveryAvailable(body []byte) bool {
+	return s.recoveryViaMCP || hasMcpRetrieveTool(body)
 }
 
 // prefixStabilized reports whether this server + adapter pair can keep a

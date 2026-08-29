@@ -148,7 +148,7 @@ if (!hasStart) {
     hooks: [{
       type: 'command',
       command: 'node "' + hooksDir + '/caveman-activate.js"',
-      timeout: 5,
+      timeout: 30,
       statusMessage: 'Loading caveman mode...'
     }]
   });
@@ -164,7 +164,7 @@ if (!hasPrompt) {
     hooks: [{
       type: 'command',
       command: 'node "' + hooksDir + '/caveman-mode-tracker.js"',
-      timeout: 5,
+      timeout: 30,
       statusMessage: 'Tracking caveman mode...'
     }]
   });

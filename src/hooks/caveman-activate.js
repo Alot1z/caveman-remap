@@ -2,9 +2,13 @@
 // caveman — Claude Code SessionStart activation hook
 //
 // Runs on every session start:
-//   1. Writes flag file at $CLAUDE_CONFIG_DIR/.caveman-active (statusline reads this)
+//   1. Resolves THIS session's mode and persists it (statusline reads it)
 //   2. Emits caveman ruleset as hidden SessionStart context
 //   3. Detects missing statusline config and emits setup nudge
+//
+// Mode state is per session, not per machine — see the "Per-session mode state"
+// block in caveman-config.js. The payload's session_id scopes every read and
+// write below; an absent or malformed one degrades to the old machine-wide flag.
 
 const fs = require('fs');
 const path = require('path');
@@ -139,15 +143,34 @@ const claudeDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.cla
 const flagPath = path.join(claudeDir, '.caveman-active');
 const settingsPath = path.join(claudeDir, 'settings.json');
 
-function removeFlag(path) {
+function removeFlag(target) {
   try {
-    fs.unlinkSync(path);
+    fs.unlinkSync(target);
   } catch (error) {
     if (process.env.CAVEMAN_DEBUG === '1' && error.code !== 'ENOENT') {
-      console.error(`caveman: failed to remove flag ${path}: ${error.message}`);
+      console.error(`caveman: failed to remove flag ${target}: ${error.message}`);
     }
   }
 }
+
+// The per-session helpers are resolved INDIVIDUALLY rather than folded into the
+// requireSibling shape check above. A caveman-config.js from before per-session
+// state loads fine and exports everything that check demands, so failing the
+// whole module over the newer exports would trade "machine-wide mode, as it
+// always worked" for "no flag write at all" — a strictly worse degrade on the
+// exact plugin-cache-drift scenario #848 is about. Each stub below reproduces
+// the pre-per-session behavior instead.
+const cfg = cavemanConfig || {};
+const validateSessionId = cfg.validateSessionId || (() => null);
+const gcSessionStore = cfg.gcSessionStore || (() => 0);
+// Literal read of THIS session's state, 'off' included. Degrades to the legacy
+// flag, which is exactly what the pre-per-session hook read.
+const readSessionModeRaw = cfg.readSessionModeRaw || (() => readFlag(flagPath));
+const writeSessionMode = cfg.writeSessionMode || ((dir, sid, modeOrNull) => {
+  if (!modeOrNull || modeOrNull === 'off') removeFlag(flagPath);
+  else safeWriteFlag(flagPath, modeOrNull);
+});
+const legacyFlagPath = cfg.legacyFlagPath || (() => flagPath);
 
 // Apply per-agent model overrides from env vars before emitting rules.
 // Best-effort: any error is swallowed so SessionStart is never blocked.
@@ -159,8 +182,14 @@ try {
 // SessionStart re-fires mid-conversation (resume, /clear, context compaction),
 // not just at true session start. Re-firing must not clobber a mode the user
 // switched to mid-session (#691): branch on the hook payload's `source` field —
-// only a real `startup` resets to the configured default; resume/clear/compact
-// preserve a valid existing flag.
+// only a real `startup` (or an explicit /clear, see RESET_SOURCES) resets to the
+// configured default; resume/compact/fork preserve this session's stored mode.
+//
+// With per-session storage the branch also has to preserve a durable `off`.
+// #691 could not: it read the legacy flag, where "off" is spelled "no file", so
+// a deactivated session found nothing stored and fell straight back to
+// getDefaultMode() — the "stop caveman, then /compact" hole. The continuation
+// branch below therefore reads the LITERAL stored value, not the collapsed one.
 // Payload arrival is EVENT-DRIVEN, and activation runs on the first COMPLETE
 // JSON object rather than at EOF. The host writes one object and closes, but
 // under the Windows pipe implementation that close can lag arbitrarily
@@ -177,25 +206,42 @@ try {
 // back to the default (#691 through the timeout door). An unknown source
 // preserves a valid existing flag. The deadline sits well below the host's 5s
 // budget but far enough above a cold Windows/AV start to be reached rarely.
-const PAYLOAD_WATCHDOG_MS = 3000;
+const PAYLOAD_WATCHDOG_MS = 2000;
+
+// Sources that re-derive the configured default instead of reading what this
+// session already stored.
+//
+// `startup` is a genuinely new session. `clear` is here — unlike in #691's
+// flag-only world — because /clear is an explicit user reset of the
+// conversation, and per-session storage makes that distinction cheap: nothing
+// else in the session survives /clear, so neither should a "stop caveman" from
+// before it. Everything else (compact, resume, fork, an unrecognized source,
+// and the watchdog's 'unknown') reads instead of re-deriving.
+const RESET_SOURCES = new Set(['startup', 'clear']);
 
 function activate(payload, timedOut) {
   // Unknown, not startup: we never saw the payload, so we cannot claim to know
-  // what kind of session event this was.
+  // what kind of session event this was — and 'unknown' must not reset, or a
+  // slow payload on a compact would drop a mid-session ultra (#691 through the
+  // timeout door) and re-arm a session the user turned off.
   let source = timedOut ? 'unknown' : 'startup';
   // The session's cwd, which is not necessarily this hook process's cwd. The
   // repo-local config walk must start there or a checked-in .caveman.json
   // (including `defaultMode: "off"`, a project opting out) is missed — the same
   // #634 bug already fixed in caveman-mode-tracker.js.
   let sessionCwd;
+  // Scopes every mode read/write to this window. null when absent or malformed,
+  // in which case the config helpers fall back to the legacy machine-wide flag.
+  let sessionId = null;
   try {
     if (payload) {
       const data = JSON.parse(payload);
       if (data && typeof data.source === 'string') source = data.source;
       if (data && typeof data.cwd === 'string') sessionCwd = data.cwd;
+      if (data) sessionId = validateSessionId(data.session_id);
     }
   } catch (e) { /* no/bad stdin → treat as startup */ }
-  run(source, sessionCwd);
+  run(source, sessionCwd, sessionId);
 }
 
 if (process.stdin.isTTY) {
@@ -235,24 +281,46 @@ if (process.stdin.isTTY) {
   process.stdin.on('end', () => finish());
 }
 
-function run(source, sessionCwd) {
-let mode = getDefaultMode(sessionCwd);
-if (source !== 'startup') {
-  const existing = readFlag(flagPath);
-  if (existing && VALID_MODES.includes(existing)) mode = existing;
+function run(source, sessionCwd, sessionId) {
+let mode;
+if (RESET_SOURCES.has(source)) {
+  mode = getDefaultMode(sessionCwd);
+  // Sweep stale per-session files only when a session genuinely begins, not on
+  // every compaction — those are frequent in a long session and this walks a
+  // directory inside a 5s hook budget.
+  gcSessionStore(claudeDir);
+} else {
+  // Continuation: read, never re-derive. The LITERAL value, so a stored 'off'
+  // is distinguishable from "nothing stored yet".
+  let stored = readSessionModeRaw(claudeDir, sessionId);
+  // Upgrade path: a session that began before per-session state exists only in
+  // the legacy mirror. Falling through to the default there would re-derive on
+  // the very compaction #691 fixed. The mirror never holds the literal 'off',
+  // so this can only ever supply a real mode.
+  if (stored === null) stored = readFlag(legacyFlagPath(claudeDir));
+  if (stored && VALID_MODES.includes(stored)) {
+    mode = stored;
+  } else {
+    // resume/fork can carry a session id we have never seen (a fork gets a new
+    // one). With nothing stored anywhere, fall back to the configured default.
+    mode = getDefaultMode(sessionCwd);
+  }
 }
 
-// "off" mode — skip activation entirely, don't write flag or emit rules
+// "off" mode — skip activation entirely, don't emit rules. The state is still
+// written so the choice survives this session's later compactions: that write
+// is what closes the "stop caveman → /compact re-arms caveman" hole, because
+// the next SessionStart finds a durable 'off' instead of an absent file.
 if (mode === 'off') {
-  recordModeChange(claudeDir, null); // #601: timestamped transition log
-  removeFlag(flagPath);
+  recordModeChange(claudeDir, null, sessionId); // #601: timestamped transition log
+  writeSessionMode(claudeDir, sessionId, null);
   process.stdout.write('OK');
   process.exit(0);
 }
 
-// 1. Write flag file (symlink-safe)
-recordModeChange(claudeDir, mode); // #601
-safeWriteFlag(flagPath, mode);
+// 1. Persist this session's mode (symlink-safe, mirrored to the legacy flag)
+recordModeChange(claudeDir, mode, sessionId); // #601
+writeSessionMode(claudeDir, sessionId, mode);
 
 // 2. Emit full caveman ruleset, filtered to the active intensity level.
 //    The old 2-sentence summary was too weak — models drifted back to verbose

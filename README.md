@@ -82,13 +82,13 @@ npx skills add JuliusBrussee/caveman
 The full installer also wires the Claude Code hooks and statusline, finds every supported agent on your machine, and is safe to rerun (Node.js 18+):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/JuliusBrussee/caveman/v2.3.1/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/JuliusBrussee/caveman/v2.4.0/install.sh | bash
 ```
 
 Windows (PowerShell 5.1+):
 
 ```powershell
-irm https://raw.githubusercontent.com/JuliusBrussee/caveman/v2.3.1/install.ps1 | iex
+irm https://raw.githubusercontent.com/JuliusBrussee/caveman/v2.4.0/install.ps1 | iex
 ```
 
 One agent only:
@@ -228,7 +228,7 @@ One install also brings the small tools:
 
 ## Wrap any agent
 
-`caveman <agent>` wraps eight agents natively. Adding one is a data change, a single JSON profile in [`agents/profiles/`](./agents/profiles/), no code.
+`caveman <agent>` persistently enables supported native integration, then launches agent. `caveman wrap <agent>` runs ephemeral session. Adding one is a data change, a single JSON profile in [`agents/profiles/`](./agents/profiles/), no code.
 
 | Agent | Vendor | How it's wrapped |
 |---|---|---|
@@ -241,7 +241,7 @@ One install also brings the small tools:
 | **OpenClaw** | OpenClaw | ephemeral merged config, your config read-only |
 | **Pi** | pi.dev | bundled native extension, your `~/.pi` config untouched |
 
-Wrap never edits your own config files. Real sessions round-trip in record mode, tested against **Hermes v0.18.0**, **OpenClaw 2026.6.11**, and **Pi 0.84.2**.
+`caveman wrap` never edits host config files. Persistent shortcut writes are journaled and reversible with `caveman disable <agent>`. Real sessions round-trip in record mode, tested against **Hermes v0.18.0**, **OpenClaw 2026.6.11**, and **Pi 0.84.2**.
 
 Not on the list? Point any provider SDK or framework (Vercel AI SDK, LangChain, LiteLLM, OpenAI Agents, CrewAI, PydanticAI) at the local proxy with a `baseURL` swap: [`integrations/recipes/`](./integrations/recipes/).
 

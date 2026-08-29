@@ -36,7 +36,7 @@ const REPO = 'JuliusBrussee/caveman';
 // the new tag on every release (CI release step) AFTER regenerating
 // src/hooks/checksums.sha256 so the integrity manifest matches the ref.
 // Overridable via CAVEMAN_REF for testing against a branch.
-const PINNED_REF = process.env.CAVEMAN_REF || 'v2.3.1';
+const PINNED_REF = process.env.CAVEMAN_REF || 'v2.4.0';
 const OPENCLAW_SKILL_VERSION = /^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(PINNED_REF)
   ? PINNED_REF.replace(/^v/, '')
   : undefined;
@@ -1076,14 +1076,14 @@ async function installHooks(ctx) {
   SETTINGS.addCommandHook(settings, 'SessionStart', {
     command: PLATFORM_PATHS.hookCommand(node, [activate]),
     marker: 'caveman-activate',
-    timeout: 5,
+    timeout: 30,
     statusMessage: 'Loading caveman mode...',
   });
 
   SETTINGS.addCommandHook(settings, 'UserPromptSubmit', {
     command: PLATFORM_PATHS.hookCommand(node, [tracker]),
     marker: 'caveman-mode-tracker',
-    timeout: 5,
+    timeout: 30,
     statusMessage: 'Tracking caveman mode...',
   });
 
@@ -1461,6 +1461,28 @@ function uninstall(ctx) {
     } else {
       try { fs.unlinkSync(statePath); } catch (_) {}
       note(`  removed ${statePath}`);
+    }
+  }
+  // Per-session mode files (one <session_id>.mode / .prev per window). Keep in
+  // sync with the uninstall blocks in src/hooks/uninstall.sh and uninstall.ps1.
+  const sessionsDir = path.join(configDir, '.caveman-sessions');
+  if (fs.existsSync(sessionsDir)) {
+    if (opts.dryRun) {
+      note(`  would remove ${sessionsDir}`);
+    } else {
+      try {
+        const sessionsState = fs.lstatSync(sessionsDir);
+        if (sessionsState.isDirectory() && !sessionsState.isSymbolicLink()) {
+          fs.rmSync(sessionsDir, { recursive: true, force: true });
+        } else {
+          // Never recurse through a path swapped for a link or special file.
+          fs.unlinkSync(sessionsDir);
+        }
+        note(`  removed ${sessionsDir}`);
+      } catch (error) {
+        cleanupFailed = true;
+        warn(`  could not remove ${sessionsDir}: ${error.message}`);
+      }
     }
   }
   const historyPath = path.join(configDir, '.caveman-history.jsonl');

@@ -203,9 +203,9 @@ func responsesZones(body []byte, root jsonSpan, liveOnly bool) ([]zoneCandidate,
 		typ, _ := objectStringField(body, item, "type")
 		role, _ := objectStringField(body, item, "role")
 		switch {
-		case typ == "function_call_output":
+		case typ == "function_call_output" || typ == "custom_tool_call_output":
 			latestTool = i
-		case typ == "function_call":
+		case typ == "function_call" || typ == "custom_tool_call":
 			name, _ := objectStringField(body, item, "name")
 			if providers.IsRecoveryToolName(name) {
 				if id, ok := objectStringField(body, item, "call_id"); ok && id != "" {
@@ -229,7 +229,7 @@ func responsesZones(body []byte, root jsonSpan, liveOnly bool) ([]zoneCandidate,
 		role, _ := objectStringField(body, item, "role")
 		var candidates []spliceCandidate
 		switch {
-		case typ == "function_call_output":
+		case typ == "function_call_output" || typ == "custom_tool_call_output":
 			// Recovered bytes are never a compression candidate — see
 			// providers.IsRecoveryToolName.
 			if id, ok := objectStringField(body, item, "call_id"); ok && recovered[id] {
@@ -247,7 +247,7 @@ func responsesZones(body []byte, root jsonSpan, liveOnly bool) ([]zoneCandidate,
 		}
 		for _, c := range candidates {
 			kind := "history"
-			if typ == "function_call_output" {
+			if typ == "function_call_output" || typ == "custom_tool_call_output" {
 				kind = "tool_result"
 			}
 			out = append(out, zoneCandidate{spliceCandidate: c, live: live, kind: kind})

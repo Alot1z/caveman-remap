@@ -223,6 +223,24 @@ func TestLearnV2ConfigSnapshotsUseO200kAndNameBasis(t *testing.T) {
 	}
 }
 
+func TestConfigTaxMarksPluginTokensUnmeasured(t *testing.T) {
+	sinks := configSinks(configScan{
+		SkillDescTokens: 10,
+		PluginCount:     2,
+		TokenBasis:      "o200k",
+	}, 1)
+	if len(sinks) == 0 {
+		t.Fatal("missing config-tax sink")
+	}
+	evidence := sinks[0].Evidence
+	if value, exists := evidence["plugin_desc_tokens"]; !exists || value != nil {
+		t.Fatalf("plugin token value = %#v, want explicit null", value)
+	}
+	if evidence["plugin_token_measurement"] != "unavailable" || evidence["config_tax_coverage"] != "partial" {
+		t.Fatalf("plugin measurement evidence = %+v", evidence)
+	}
+}
+
 func TestScanSkillsSkipsMissingAndDanglingSkillFiles(t *testing.T) {
 	root := t.TempDir()
 	valid := filepath.Join(root, "valid")

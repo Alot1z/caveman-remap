@@ -463,6 +463,16 @@ func configSinksWithBehavior(cfg configScan, beh behaviorScan, turnsPerDay float
 			"plugin_count":             cfg.PluginCount,
 			"token_basis":              cfg.TokenBasis,
 		}
+		if cfg.PluginCount > 0 {
+			// A plugin count is not a zero-token measurement. Plugin caches and
+			// enablement schemas vary by host/version, so keep this explicitly
+			// unmeasured until the effective catalog can be resolved truthfully.
+			evidence["plugin_desc_tokens"] = nil
+			evidence["plugin_token_measurement"] = "unavailable"
+			evidence["config_tax_coverage"] = "partial"
+		} else {
+			evidence["config_tax_coverage"] = "static_sources"
+		}
 		if prefix, sessions := beh.measuredPrefix(); prefix > 0 && sessions > 0 {
 			evidence["measured_prefix_tokens"] = prefix
 			evidence["measured_prefix_sessions"] = sessions
@@ -471,7 +481,7 @@ func configSinksWithBehavior(cfg configScan, beh behaviorScan, turnsPerDay float
 		}
 		sinks = append(sinks, Sink{
 			SinkID:           "config_tax:baseline",
-			Title:            fmt.Sprintf("Your agent config loads ~%d tokens into every turn", tax),
+			Title:            fmt.Sprintf("Measured agent config loads ~%d tokens into every turn", tax),
 			Class:            classLoadBearing,
 			Basis:            observedLocal,
 			TokensPerTurn:    int64(tax),

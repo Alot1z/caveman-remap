@@ -270,9 +270,10 @@ func parseMCPServerNames(raw []byte, cwd string, includeProject bool) []string {
 	return out
 }
 
-// configTaxPerTurn is the token tax loaded on every turn: CLAUDE.md (user +
-// project) + the skill catalog. Hooks/plugins are reported as counts, not folded
-// into the token figure, because their context cost can't be measured statically.
+// configTaxPerTurn is the statically measured token tax loaded on every turn:
+// CLAUDE.md (user + project) + the user skill catalog. Hooks/plugins are
+// reported as counts, not folded into the token figure, because this scanner
+// does not resolve their effective context contribution.
 func (sc configScan) configTaxPerTurn() int {
 	total := sc.SkillDescTokens
 	if sc.ClaudeMDUser != nil {

@@ -10060,6 +10060,8 @@ function uninstallMcpForAgent(a: AgentProfile, serverName = "caveman"): boolean 
       return removeMcpCodexToml(serverName);
     case "opencode":
       return removeMcpJson(join(homedir(), ".config", "opencode", "opencode.json"), ["mcp", serverName]);
+    case "kilo":
+      return removeMcpKiloJson(serverName);
     case "gemini":
       return removeMcpJson(join(homedir(), ".gemini", "settings.json"), ["mcpServers", serverName]);
     case "hermes":
@@ -10124,6 +10126,135 @@ function removeMcpJson(path: string, keyPath: string[]): boolean {
   delete cur[keyPath[keyPath.length - 1]!];
   try {
     writeFileSync(path, JSON.stringify(root, null, 2) + "\n");
+    return true;
+  } catch (e) {
+    console.error(`${mark("warn")} cannot write ${path}: ${(e as Error).message}`);
+    return false;
+  }
+}
+
+function kiloConfigPath(): string {
+  return join(homedir(), ".config", "kilo", "kilo.json");
+}
+
+function kiloJsoncPath(): string {
+  return join(homedir(), ".config", "kilo", "kilo.jsonc");
+}
+
+function kiloMcpEntry(mcp: { command: string; args: string[] }): Record<string, unknown> {
+  return {
+    type: "local",
+    command: [mcp.command, ...mcp.args],
+    enabled: true,
+  };
+}
+
+function kiloMcpEntryMatches(value: unknown, mcp: { command: string; args: string[] }): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const entry = value as Record<string, unknown>;
+  const keys = Object.keys(entry).sort();
+  const command = [mcp.command, ...mcp.args];
+  if (keys.length !== 3 || keys[0] !== "command" || keys[1] !== "enabled" || keys[2] !== "type") return false;
+  return entry.type === "local"
+    && entry.enabled === true
+    && Array.isArray(entry.command)
+    && entry.command.length === command.length
+    && entry.command.every((arg, index) => typeof arg === "string" && arg === command[index]);
+}
+
+function readKiloMcpRoot(path: string): { root: Record<string, unknown>; exists: boolean } | null {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { root: {}, exists: false };
+    console.error(`${mark("warn")} cannot read ${path}: ${(e as Error).message}; not modifying it`);
+    return null;
+  }
+  try {
+    if (!raw.trim()) {
+      console.error(`${mark("warn")} ${path} is empty; not modifying it`);
+      return null;
+    }
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      console.error(`${mark("warn")} ${path} is not a JSON object; not modifying it`);
+      return null;
+    }
+    return { root: parsed as Record<string, unknown>, exists: true };
+  } catch (e) {
+    console.error(`${mark("warn")} cannot read ${path}: ${(e as Error).message}; not modifying it`);
+    return null;
+  }
+}
+
+function kiloJsoncBlocksJsonCreation(path: string, exists: boolean): boolean {
+  if (exists || !existsSync(kiloJsoncPath())) return false;
+  console.error(`${mark("warn")} ${kiloJsoncPath()} exists while ${path} does not; refusing to create a second Kilo config or rewrite JSONC`);
+  return true;
+}
+
+function installMcpKiloJson(mcp: { command: string; args: string[] }, serverName = "caveman"): boolean {
+  const path = kiloConfigPath();
+  const loaded = readKiloMcpRoot(path);
+  if (!loaded || kiloJsoncBlocksJsonCreation(path, loaded.exists)) return false;
+  const { root } = loaded;
+  if (root.mcp !== undefined && (!root.mcp || typeof root.mcp !== "object" || Array.isArray(root.mcp))) {
+    console.error(`${mark("warn")} ${path} mcp must be a JSON object; not modifying it`);
+    return false;
+  }
+  const servers = root.mcp as Record<string, unknown> | undefined;
+  const current = servers?.[serverName];
+  const marker = readMcpServerMarker("kilo", serverName);
+  if (current !== undefined) {
+    if (!marker) {
+      console.error(`${mark("warn")} ${path} mcp.${serverName} exists but is not Caveman-journaled; refusing overwrite`);
+      return false;
+    }
+    if (!kiloMcpEntryMatches(current, marker)) {
+      console.error(`${mark("warn")} ${path} mcp.${serverName} changed since Caveman installed it; refusing overwrite`);
+      return false;
+    }
+    if (kiloMcpEntryMatches(current, mcp)) return true;
+  }
+  const nextServers = servers ?? {};
+  nextServers[serverName] = kiloMcpEntry(mcp);
+  root.mcp = nextServers;
+  try {
+    atomicWriteFile(path, Buffer.from(JSON.stringify(root, null, 2) + "\n"));
+    return true;
+  } catch (e) {
+    console.error(`${mark("warn")} cannot write ${path}: ${(e as Error).message}`);
+    return false;
+  }
+}
+
+function removeMcpKiloJson(serverName = "caveman"): boolean {
+  const path = kiloConfigPath();
+  const loaded = readKiloMcpRoot(path);
+  if (!loaded || kiloJsoncBlocksJsonCreation(path, loaded.exists)) return false;
+  if (!loaded.exists) return true;
+  const { root } = loaded;
+  if (root.mcp !== undefined && (!root.mcp || typeof root.mcp !== "object" || Array.isArray(root.mcp))) {
+    console.error(`${mark("warn")} ${path} mcp must be a JSON object; not modifying it`);
+    return false;
+  }
+  const servers = root.mcp as Record<string, unknown> | undefined;
+  const current = servers?.[serverName];
+  if (current === undefined) return true;
+  const marker = readMcpServerMarker("kilo", serverName);
+  if (!marker) {
+    console.error(`${mark("warn")} ${path} mcp.${serverName} exists but is not Caveman-journaled; refusing removal`);
+    return false;
+  }
+  if (!kiloMcpEntryMatches(current, marker)) {
+    console.error(`${mark("warn")} ${path} mcp.${serverName} changed since Caveman installed it; refusing removal`);
+    return false;
+  }
+  delete servers![serverName];
+  if (Object.keys(servers!).length === 0) delete root.mcp;
+  try {
+    atomicWriteFile(path, Buffer.from(JSON.stringify(root, null, 2) + "\n"));
     return true;
   } catch (e) {
     console.error(`${mark("warn")} cannot write ${path}: ${(e as Error).message}`);
@@ -10216,6 +10347,8 @@ function installMcpForAgent(a: AgentProfile, mcp: { command: string; args: strin
         command: [mcp.command, ...mcp.args],
         enabled: true,
       });
+    case "kilo":
+      return installMcpKiloJson(mcp, serverName);
     case "gemini":
       return installMcpJson(join(homedir(), ".gemini", "settings.json"), ["mcpServers", serverName], {
         command: mcp.command,

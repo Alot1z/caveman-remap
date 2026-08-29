@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -13,6 +13,47 @@ const { buildWrapEnv } = await import(`${pathToFileURL(cli).href}?kilo-wrap`);
 const kilo = PROFILES.find((profile) => profile.id === "kilo");
 
 assert.ok(kilo, "compiled registry must contain Kilo Code");
+
+function runCli(args, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cli, ...args], { env });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("error", reject);
+    child.on("exit", (code, signal) => resolve({ code, signal, stdout, stderr }));
+  });
+}
+
+function kiloMcpFixture() {
+  const root = mkdtempSync(join(tmpdir(), "cave-kilo-mcp-"));
+  const home = join(root, "home");
+  const cavemanHome = join(root, "caveman-home");
+  const configPath = join(home, ".config", "kilo", "kilo.json");
+  const jsoncPath = join(home, ".config", "kilo", "kilo.jsonc");
+  const markerPath = join(cavemanHome, "mcp", "kilo.json");
+  const mcpV1 = join(root, "caveman-mcp-v1");
+  const mcpV2 = join(root, "caveman-mcp-v2");
+  mkdirSync(dirname(configPath), { recursive: true });
+  const env = {
+    ...process.env,
+    HOME: home,
+    CAVEMAN_HOME: cavemanHome,
+    CAVEMAN_MCP_BIN: mcpV1,
+    NO_COLOR: "1",
+  };
+  return {
+    root,
+    configPath,
+    jsoncPath,
+    markerPath,
+    mcpV1,
+    mcpV2,
+    env,
+    cleanup: () => rmSync(root, { recursive: true, force: true }),
+  };
+}
 
 function runKiloAlias(invokedAs, installedBinary) {
   const root = mkdtempSync(join(tmpdir(), `cave-${invokedAs}-`));
@@ -113,5 +154,162 @@ test("managed Kilo config keeps gateway and upstream credentials separate", () =
     else process.env.CAVE_API_KEY = previousCaveKey;
     if (previousOpenAIKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = previousOpenAIKey;
+  }
+});
+
+test("Kilo MCP install is idempotent, marker-owned, upgradeable, and reversible", async () => {
+  const fx = kiloMcpFixture();
+  try {
+    const sibling = { type: "remote", url: "https://mcp.example.test" };
+    writeFileSync(fx.configPath, JSON.stringify({ theme: "dark", mcp: { sibling } }, null, 2) + "\n");
+
+    const installed = await runCli(["mcp", "install", "kilo"], fx.env);
+    assert.equal(installed.code, 0, installed.stderr);
+    const firstBytes = readFileSync(fx.configPath, "utf8");
+    const first = JSON.parse(firstBytes);
+    assert.equal(first.theme, "dark");
+    assert.deepEqual(first.mcp.sibling, sibling);
+    assert.deepEqual(first.mcp.caveman, { type: "local", command: [fx.mcpV1], enabled: true });
+    assert.deepEqual(JSON.parse(readFileSync(fx.markerPath, "utf8")), {
+      tool: "caveman_retrieve",
+      command: fx.mcpV1,
+      args: [],
+    });
+
+    const repeated = await runCli(["mcp", "install", "kilo"], fx.env);
+    assert.equal(repeated.code, 0, repeated.stderr);
+    assert.equal(readFileSync(fx.configPath, "utf8"), firstBytes);
+
+    const upgraded = await runCli(["mcp", "install", "kilo"], { ...fx.env, CAVEMAN_MCP_BIN: fx.mcpV2 });
+    assert.equal(upgraded.code, 0, upgraded.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(fx.configPath, "utf8")).mcp.caveman, {
+      type: "local",
+      command: [fx.mcpV2],
+      enabled: true,
+    });
+    assert.equal(JSON.parse(readFileSync(fx.markerPath, "utf8")).command, fx.mcpV2);
+
+    const removed = await runCli(["mcp", "uninstall", "kilo"], fx.env);
+    assert.equal(removed.code, 0, removed.stderr);
+    const final = JSON.parse(readFileSync(fx.configPath, "utf8"));
+    assert.equal(final.theme, "dark");
+    assert.deepEqual(final.mcp, { sibling });
+    assert.equal(existsSync(fx.markerPath), false);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("Kilo MCP refuses conflicting unowned entries", async () => {
+  const fx = kiloMcpFixture();
+  try {
+    const source = JSON.stringify({
+      theme: "dark",
+      mcp: { caveman: { type: "local", command: ["user-owned-mcp"], enabled: true } },
+    }, null, 2) + "\n";
+    writeFileSync(fx.configPath, source);
+
+    const installed = await runCli(["mcp", "install", "kilo"], fx.env);
+    assert.equal(installed.code, 0, installed.stderr);
+    assert.match(installed.stderr, /not Caveman-journaled; refusing overwrite/);
+    assert.equal(readFileSync(fx.configPath, "utf8"), source);
+    assert.equal(existsSync(fx.markerPath), false);
+
+    const removed = await runCli(["mcp", "uninstall", "kilo"], fx.env);
+    assert.equal(removed.code, 0, removed.stderr);
+    assert.match(removed.stderr, /not Caveman-journaled; refusing removal/);
+    assert.equal(readFileSync(fx.configPath, "utf8"), source);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("Kilo MCP refuses user-modified owned entries and keeps marker", async () => {
+  const fx = kiloMcpFixture();
+  try {
+    const installed = await runCli(["mcp", "install", "kilo"], fx.env);
+    assert.equal(installed.code, 0, installed.stderr);
+    const config = JSON.parse(readFileSync(fx.configPath, "utf8"));
+    config.mcp.caveman.command = ["user-modified-mcp"];
+    const modified = JSON.stringify(config, null, 2) + "\n";
+    writeFileSync(fx.configPath, modified);
+
+    const removed = await runCli(["mcp", "uninstall", "kilo"], fx.env);
+    assert.equal(removed.code, 0, removed.stderr);
+    assert.match(removed.stderr, /changed since Caveman installed it; refusing removal/);
+    assert.equal(readFileSync(fx.configPath, "utf8"), modified);
+    assert.equal(existsSync(fx.markerPath), true);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("Kilo MCP refuses malformed JSON and non-object mcp", async (t) => {
+  await t.test("empty existing file", async () => {
+    const fx = kiloMcpFixture();
+    try {
+      writeFileSync(fx.configPath, "");
+      const installed = await runCli(["mcp", "install", "kilo"], fx.env);
+      assert.equal(installed.code, 0, installed.stderr);
+      assert.match(installed.stderr, /kilo\.json is empty; not modifying it/);
+      assert.equal(readFileSync(fx.configPath, "utf8"), "");
+      assert.equal(existsSync(fx.markerPath), false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  await t.test("malformed JSON", async () => {
+    const fx = kiloMcpFixture();
+    try {
+      const source = "{not-json\n";
+      writeFileSync(fx.configPath, source);
+      const installed = await runCli(["mcp", "install", "kilo"], fx.env);
+      assert.equal(installed.code, 0, installed.stderr);
+      assert.match(installed.stderr, /cannot read .*kilo\.json/);
+      assert.equal(readFileSync(fx.configPath, "utf8"), source);
+      assert.equal(existsSync(fx.markerPath), false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  await t.test("non-object mcp", async () => {
+    const fx = kiloMcpFixture();
+    try {
+      const source = JSON.stringify({ theme: "dark", mcp: [] }, null, 2) + "\n";
+      writeFileSync(fx.configPath, source);
+      const installed = await runCli(["mcp", "install", "kilo"], fx.env);
+      assert.equal(installed.code, 0, installed.stderr);
+      assert.match(installed.stderr, /mcp must be a JSON object; not modifying it/);
+      assert.equal(readFileSync(fx.configPath, "utf8"), source);
+      assert.equal(existsSync(fx.markerPath), false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+test("Kilo MCP preserves JSONC when kilo.json is absent", async () => {
+  const fx = kiloMcpFixture();
+  try {
+    const source = "{\n  // user Kilo config\n  \"theme\": \"dark\"\n}\n";
+    writeFileSync(fx.jsoncPath, source);
+    const installed = await runCli(["mcp", "install", "kilo"], fx.env);
+    assert.equal(installed.code, 0, installed.stderr);
+    assert.match(installed.stderr, /refusing to create a second Kilo config or rewrite JSONC/);
+    assert.equal(existsSync(fx.configPath), false);
+    assert.equal(readFileSync(fx.jsoncPath, "utf8"), source);
+    assert.equal(existsSync(fx.markerPath), false);
+
+    mkdirSync(dirname(fx.markerPath), { recursive: true });
+    writeFileSync(fx.markerPath, JSON.stringify({ tool: "caveman_retrieve", command: fx.mcpV1, args: [] }) + "\n");
+    const removed = await runCli(["mcp", "uninstall", "kilo"], fx.env);
+    assert.equal(removed.code, 0, removed.stderr);
+    assert.match(removed.stderr, /refusing to create a second Kilo config or rewrite JSONC/);
+    assert.equal(readFileSync(fx.jsoncPath, "utf8"), source);
+    assert.equal(existsSync(fx.markerPath), true);
+  } finally {
+    fx.cleanup();
   }
 });

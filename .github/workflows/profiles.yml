@@ -38,7 +38,9 @@ jobs:
             commit_touches_profile=false
             for file in "${changed_files[@]}"; do
               case "$file" in
-                agents/profiles/*)
+                agents/profiles/schema.json)
+                  ;;
+                agents/profiles/*.json)
                   commit_touches_profile=true
                   profile_touched=true
                   ;;

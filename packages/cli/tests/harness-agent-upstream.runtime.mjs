@@ -131,11 +131,15 @@ test("real proxy wraps stub agent through stub upstream and records SQLite telem
 
     const db = new DatabaseSync(join(caveHome, "caveman.db"), { readOnly: true });
     try {
-      const rows = db
-        .prepare(
-          "SELECT provider, model, status_code, input_tokens, output_tokens, token_usage_basis FROM requests ORDER BY id",
-        )
-        .all();
+      const query = db.prepare(
+        "SELECT provider, model, status_code, input_tokens, output_tokens, token_usage_basis FROM requests ORDER BY id",
+      );
+      const deadline = Date.now() + 2_000;
+      let rows = query.all();
+      while (rows.length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        rows = query.all();
+      }
       assert.equal(rows.length, 1);
       const row = rows[0];
       assert.equal(row.provider, "anthropic");

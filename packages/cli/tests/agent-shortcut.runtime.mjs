@@ -253,8 +253,18 @@ test("process-directed SIGTERM reaches the child and re-raises on the launcher",
   child.kill("SIGTERM");
   const exit = await new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal })));
   assert.equal(exit.signal, "SIGTERM", `launcher must die by SIGTERM (code=${exit.code}, stderr=${stderr})`);
-  await new Promise((resolve) => setTimeout(resolve, 200));
-  assert.throws(() => process.kill(stubPid, 0), "forwarded SIGTERM must terminate the child");
+  const childDeadline = Date.now() + 2_000;
+  let childAlive = true;
+  while (childAlive && Date.now() < childDeadline) {
+    try {
+      process.kill(stubPid, 0);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    } catch (error) {
+      if (error?.code !== "ESRCH") throw error;
+      childAlive = false;
+    }
+  }
+  assert.equal(childAlive, false, "forwarded SIGTERM must terminate the child");
 });
 
 test("caveman claude --off keeps the session-only wrap door even when native binaries conform", async () => {

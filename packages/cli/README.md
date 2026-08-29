@@ -6,6 +6,7 @@ traffic can use local metering and recoverable context compression:
 ```sh
 caveman claude        # shorthand for `caveman wrap claude`; bootstraps signed runtime on first TTY run
 caveman kilo          # Kilo Code CLI; `caveman kilocode` works too
+caveman qwen          # Qwen Code CLI through a temporary system-settings overlay
 caveman learn         # interactive local Setup Score + grouped top moves
 caveman setup         # show which companion binaries are installed
 caveman stats         # local spend, savings labeled `inferred`
@@ -102,6 +103,35 @@ First interactive wrap downloads key-signed release artifacts, verifies the
 checksum manifest plus every SHA-256, installs atomically into
 `~/.caveman/bin`, then launches the agent. Manual install/repair is
 `caveman setup --install`.
+
+The npm CLI requires Node.js 22.13 or newer. Caveman exposes ten native agent
+shortcuts: `aider`, `claude`, `codex`, `gemini`, `hermes`, `kilo` (`kilocode`
+alias), `openclaw`, `opencode`, `pi`, and `qwen`.
+
+Install Qwen Code separately, then launch it through Caveman:
+
+```sh
+npm i -g @qwen-code/qwen-code
+caveman qwen
+```
+
+Qwen wrapping deep-merges the local or managed OpenAI-compatible route into a
+temporary system-settings file selected through
+`QWEN_CODE_SYSTEM_SETTINGS_PATH`. An explicit existing system-settings path
+wins; otherwise Caveman starts from Qwen's macOS, Linux, or Windows enterprise
+platform default. It preserves unrelated policy and provider keys and never
+rewrites that source or `~/.qwen/settings.json`. Pinned real-CLI smokes cover
+Qwen Code 0.22.3 in local and managed modes.
+
+Install agent-side recovery into Qwen's user settings separately:
+
+```sh
+caveman tools mcp install qwen --server caveman
+caveman tools mcp uninstall qwen --server caveman
+```
+
+The MCP lifecycle preserves sibling entries, journals Caveman ownership, and
+refuses to overwrite or remove a user-owned or subsequently changed entry.
 
 Contributors may still build from source with
 `./scripts/install-local-cli.sh` on macOS/Linux or

@@ -17,6 +17,7 @@ still owns its model calls, user interface, permissions, and project workflow.
 | OpenClaw | OpenAI Chat Completions | Configuration file | Plugin |
 | OpenCode | OpenAI Chat Completions | Configuration plus environment | Plugin |
 | Pi | OpenAI Chat Completions | Native extension | Native extension, skills |
+| Qwen Code | OpenAI Chat Completions | Temporary system-settings overlay | None |
 
 Profiles record tested upstream versions, but upstream CLIs change independently.
 Run `caveman setup` to inspect installed support before relying on a profile.
@@ -30,6 +31,7 @@ caveman gemini
 caveman aider
 caveman hermes
 caveman kilo
+caveman qwen
 caveman openclaw
 caveman opencode
 caveman pi
@@ -38,6 +40,24 @@ caveman pi
 `caveman kilocode` is an alias for the second binary published by Kilo's CLI
 package. Both launch the same `kilo` profile. CLI wrapping does not reconfigure
 an already-running Kilo editor extension.
+
+Install Qwen Code's CLI before using its shortcut:
+
+```bash
+npm i -g @qwen-code/qwen-code
+caveman qwen
+```
+
+The Qwen profile reads the existing system-settings source named by
+`QWEN_CODE_SYSTEM_SETTINGS_PATH`, or the platform enterprise default when the
+variable is unset: `/Library/Application Support/QwenCode/settings.json` on
+macOS, `/etc/qwen-code/settings.json` on Linux, and
+`%ProgramData%\qwen-code\settings.json` on Windows. It deep-merges the selected
+local or managed OpenAI-compatible route into a temporary file and points Qwen
+at that overlay. Enterprise policy and unrelated provider settings survive the
+merge; the source system settings and `~/.qwen/settings.json` are not rewritten.
+The pinned real-CLI route smoke covers Qwen Code 0.22.3 in both local and
+managed modes.
 
 Arguments after the shortcut are passed through:
 
@@ -133,6 +153,18 @@ Operators can retrieve the same source from a terminal:
 ```bash
 caveman tools retrieve <handle>
 ```
+
+Install or remove the recovery MCP registration for Qwen with:
+
+```bash
+caveman tools mcp install qwen --server caveman
+caveman tools mcp uninstall qwen --server caveman
+```
+
+The installer preserves sibling entries and refuses to overwrite or remove a
+Qwen MCP entry it does not own. Wrapped Qwen 0.22 sessions with that owned
+registration use blocking MCP discovery so recovery is available before the
+first request.
 
 Recovery is local by default. A handle is useful only while its backing store is
 available.

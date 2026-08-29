@@ -20,7 +20,7 @@
 <p align="center">
   <a href="https://github.com/JuliusBrussee/caveman/stargazers"><img src="https://img.shields.io/github/stars/JuliusBrussee/caveman?style=flat&color=yellow" alt="Stars"></a>
   <a href="./INSTALL.md"><img src="https://img.shields.io/badge/skill_works_with-30%2B_agents-orange?style=flat" alt="30+ agents"></a>
-  <a href="#wrap-any-agent"><img src="https://img.shields.io/badge/wrap-9_native_agents-blue?style=flat" alt="9 native wrap profiles"></a>
+  <a href="#wrap-any-agent"><img src="https://img.shields.io/badge/wrap-10_native_agents-blue?style=flat" alt="10 native wrap profiles"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT_%2B_BSL-green?style=flat" alt="License"></a>
   <a href="https://skills.sh/JuliusBrussee/caveman"><img src="https://skills.sh/b/JuliusBrussee/caveman"></a>
 </p>
@@ -67,7 +67,7 @@ Two products. Pick one or both.
 
 ```bash
 npm install -g @caveman-ai/cli && caveman setup --install
-caveman claude        # or codex · gemini · aider · kilo · opencode · hermes · openclaw · pi
+caveman claude        # or codex · gemini · aider · kilo · qwen · opencode · hermes · openclaw · pi
 ```
 
 **2 · Save output** — the skill, the original. Your agent *answers* in tight caveman-speak while code, commands, and errors stay exact. MIT, 30+ agents.
@@ -79,7 +79,7 @@ npx skills add JuliusBrussee/caveman
 <details>
 <summary><strong>Other ways in</strong> — full installer with hooks, Windows, one agent only</summary>
 
-The full installer also wires the Claude Code hooks and statusline, finds every supported agent on your machine, and is safe to rerun (Node.js 18+):
+The full installer also wires the Claude Code hooks and statusline, finds every supported agent on your machine, and is safe to rerun (Node.js 22.13+):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JuliusBrussee/caveman/v2.3.1/install.sh | bash
@@ -94,6 +94,10 @@ irm https://raw.githubusercontent.com/JuliusBrussee/caveman/v2.3.1/install.ps1 |
 One agent only:
 
 ```bash
+# Qwen Code CLI, then its Caveman wrapper
+npm i -g @qwen-code/qwen-code
+caveman qwen
+
 # Claude Code
 claude plugin marketplace add JuliusBrussee/caveman && claude plugin install caveman@caveman
 
@@ -228,7 +232,7 @@ One install also brings the small tools:
 
 ## Wrap any agent
 
-`caveman <agent>` wraps nine agents natively. Adding one is normally a data change: one JSON profile in [`agents/profiles/`](./agents/profiles/).
+`caveman <agent>` wraps ten agents natively. Adding one is normally a data change: one JSON profile in [`agents/profiles/`](./agents/profiles/).
 
 | Agent | Vendor | How it's wrapped |
 |---|---|---|
@@ -237,12 +241,15 @@ One install also brings the small tools:
 | **Gemini CLI** | Google | env vars |
 | **Aider** | OpenAI/Anthropic | env vars |
 | **Kilo Code** | Kilo Code | `KILO_CONFIG_CONTENT`, your `kilo.json` untouched |
+| **Qwen Code** | QwenLM | ephemeral system-settings overlay, source settings untouched |
 | **opencode** | sst | inline config via env, your `opencode.json` untouched |
 | **Hermes Agent** | Nous Research | `--provider custom` + env |
 | **OpenClaw** | OpenClaw | ephemeral merged config, your config read-only |
 | **Pi** | pi.dev | bundled native extension, your `~/.pi` config untouched |
 
 Wrap never edits your own config files. Kilo Code **7.5.6** passed a pinned real-CLI route and streaming-response smoke; its profile also runs through the same real-proxy compression and telemetry matrix as every other agent. This wraps Kilo's CLI (`kilo` or `kilocode`), not an already-running editor extension.
+
+Qwen Code **0.22.3** passed pinned real-CLI local and managed OpenAI-compatible route smokes. Caveman deep-merges its route into a temporary system-settings overlay, preserves enterprise platform defaults, and leaves the source system and user settings unchanged. Install agent-side recovery with `caveman tools mcp install qwen --server caveman`; remove only Caveman's owned entry with the matching `uninstall` command.
 
 Not on the list? Point any provider SDK or framework (Vercel AI SDK, LangChain, LiteLLM, OpenAI Agents, CrewAI, PydanticAI) at the local proxy with a `baseURL` swap: [`integrations/recipes/`](./integrations/recipes/).
 

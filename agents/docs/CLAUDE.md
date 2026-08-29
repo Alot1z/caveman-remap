@@ -7,7 +7,7 @@ most agents, adding one is a **data change** (one JSON file here) and the CLI's 
 scale** (`injection_completeness`), because several agents genuinely need code:
 
 - **declarative** — the profile's `injection` block alone routes it (claude's default env, gemini,
-  aider, opencode). A true data-only add.
+  aider, opencode, qwen). A true data-only add.
 - **builder-assisted** — the profile is the base, but the CLI augments it in code: an
   `overlayBuilders.<id>` config-overlay builder (openclaw), or an auth/bedrock short-circuit
   (`applyClaudeBedrockWrap` for claude, `applyHermesAuthEnv` for hermes).
@@ -23,7 +23,7 @@ children inherit; each agent reads only its own subset, and the profile's inject
 top.
 
 ## Layout
-- `profiles/*.json` — one profile per agent (`claude`, `codex`, `gemini`, `aider`, `kilo`, `opencode`, `hermes`, `openclaw`, `pi`).
+- `profiles/*.json` — one profile per agent (`claude`, `codex`, `gemini`, `aider`, `kilo`, `qwen`, `opencode`, `hermes`, `openclaw`, `pi`).
 - `profiles/schema.json` — the profile contract (JSON Schema, draft-07).
 - `reserved-verbs.json` — command tokens no profile id or binary name may shadow;
   compiled into the CLI and tested against dispatcher reality.
@@ -48,7 +48,8 @@ top.
 `tested_agent_version` is evidence, not compatibility theater. Doctor compares
 installed version, downgrades unknown/newer/older hosts to safe inactive subsets,
 and reports binary-present-but-unlaunchable separately. Claude 2.1.226 is current
-locally grounded pin; other pins remain unchanged until equivalent proof exists.
+locally grounded pin. Qwen Code 0.22.3 has pinned real-CLI local and managed
+OpenAI-compatible route proof; other pins remain unchanged until equivalent proof exists.
 
 ## How a profile points an agent at the gateway
 `injection.method` is one of:
@@ -61,8 +62,11 @@ locally grounded pin; other pins remain unchanged until equivalent proof exists.
   it as one env var. This is how **opencode** (`OPENCODE_CONFIG_CONTENT`) and **Kilo Code**
   (`KILO_CONFIG_CONTENT`) are wrapped without touching user config. An agent's own `{env:VAR}`
   tokens are left untouched.
-- `config-file` — merge a mode-selected config overlay into a temp copy of the agent's own
-  config file on disk (how **openclaw** is wrapped, without mutating the user's real config).
+- `config-file` — merge a mode-selected config overlay into a temporary file and point the agent
+  at it through the declared environment variable. **OpenClaw** uses a builder-assisted overlay.
+  **Qwen Code** is declarative: `QWEN_CODE_SYSTEM_SETTINGS_PATH` selects an explicit source first,
+  otherwise the CLI reads Qwen's macOS/Linux/Windows enterprise platform default, deep-merges the
+  route, and preserves the source policy, sibling providers, and `~/.qwen/settings.json`.
 
 ## How a profile auto-shrinks command output (`command_hook`, optional)
 `command_hook` declares how `caveman wrap`/`caveman hooks` route the agent's noisy

@@ -416,9 +416,11 @@ class ExtractTextTests(unittest.TestCase):
         self.assertEqual(compress_mod.extract_text({"type": "thinking", "text": "skip me"}), "")
         self.assertEqual(compress_mod.extract_text(mock.Mock(type="image_url", url="x")), "")
 
-    def test_call_claude_raises_loudly_when_model_returns_no_compressible_text(self):
-        # A tool_use-only reply through the SDK must fail loudly (RuntimeError),
-        # not silently return "" which the caller would drop with no signal.
+    def test_call_claude_returns_empty_consistently_when_no_text(self):
+        # A tool_use-only reply through the SDK returns "", the SAME contract as
+        # the CLI arm, so the caller's existing graceful "empty response"
+        # message applies — never an unhandled RuntimeError traceback from the
+        # paid-SDK path.
         import types
 
         fake_msg = types.SimpleNamespace(content=[mock.Mock(type="tool_use")])
@@ -427,8 +429,7 @@ class ExtractTextTests(unittest.TestCase):
         anthropic_stub = types.SimpleNamespace(Anthropic=mock.Mock(return_value=fake_client))
         with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
              mock.patch.dict(sys.modules, {"anthropic": anthropic_stub}):
-            with self.assertRaisesRegex(RuntimeError, "no compressible text"):
-                compress_mod.call_claude("prompt")
+            self.assertEqual(compress_mod.call_claude("prompt"), "")
 
     def test_call_claude_returns_the_skipped_text_block(self):
         # End-to-end through the SDK path with a tool_use FIRST block: the paid

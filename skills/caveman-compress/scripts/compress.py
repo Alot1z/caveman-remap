@@ -469,16 +469,13 @@ def call_claude(prompt: str) -> str:
                 messages=[{"role": "user", "content": prompt}],
             )
             text = extract_text(msg.content).strip()
-            if not text:
-                # No compressible text (only tool_use/thinking blocks, or an
-                # empty reply). Returning "" makes the caller quietly skip the
-                # section and leaves it permanently uncompressed with no signal;
-                # fail loudly instead so a wrongly-shaped prompt is diagnosed,
-                # not silently dropped after a paid call.
-                raise RuntimeError(
-                    "Claude returned no compressible text (only tool_use/thinking "
-                    "blocks or an empty response). Retry the compression."
-                )
+            # No text block (only tool_use/thinking/image, or an empty reply).
+            # Return "" rather than raising: every caller already turns an empty
+            # result into an explicit "Claude returned an empty response"
+            # abort/retry message (the CLI arm has the same behavior), so this
+            # keeps both arms consistent — and a raise here would only replace
+            # that clean message with an unhandled traceback, since call_claude
+            # is invoked without a caller-level try/except.
             return strip_llm_wrapper(text)
         except ImportError:
             pass  # anthropic not installed, fall back to CLI

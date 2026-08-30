@@ -328,6 +328,121 @@ test("managed Qwen follows workspace trust for project credential sources", asyn
   }
 });
 
+test("managed Qwen migrates legacy folder trust before reading project credentials", async (t) => {
+  for (const source of ["project dotenv", "workspace settings env"]) {
+    await t.test(source, () => {
+      const fx = qwenFixture();
+      const workspace = join(fx.root, "workspace");
+      const workspaceConfigDir = join(workspace, ".qwen");
+      const secret = `sk-legacy-trust-${source.replaceAll(" ", "-")}`;
+      try {
+        mkdirSync(workspaceConfigDir, { recursive: true });
+        const system = JSON.parse(fx.systemBytes);
+        delete system.security;
+        system.folderTrust = true;
+        writeFileSync(fx.systemConfig, JSON.stringify(system));
+        writeFileSync(
+          join(dirname(fx.userConfig), "trustedFolders.json"),
+          JSON.stringify({ [workspace]: "DO_NOT_TRUST" }),
+        );
+        if (source === "project dotenv") {
+          writeFileSync(join(workspaceConfigDir, ".env"), `OPENAI_API_KEY=${secret}\n`);
+        } else {
+          writeFileSync(join(workspaceConfigDir, "settings.json"), JSON.stringify({ env: { OPENAI_API_KEY: secret } }));
+        }
+        withEnv({
+          HOME: fx.env.HOME,
+          CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+          QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfig,
+          CAVE_API_KEY: "cave-managed-secret",
+          OPENAI_API_KEY: undefined,
+        }, () => withCwd(workspace, () => {
+          const injected = readInjected(buildWrapEnv(qwen, "https://gateway.example"));
+          for (const model of injected.config.modelProviders.openai) {
+            assert.equal(Object.hasOwn(model.generationConfig.customHeaders, "x-cave-upstream-key"), false);
+          }
+          assert.doesNotMatch(injected.raw, /\$OPENAI_API_KEY/);
+          assert.doesNotMatch(injected.raw, new RegExp(secret));
+        }));
+      } finally {
+        fx.cleanup();
+      }
+    });
+  }
+});
+
+test("managed Qwen applies effective excluded env policy only to plain project dotenv", async (t) => {
+  for (const legacy of [false, true]) {
+    for (const source of ["plain project dotenv", "scoped project dotenv", "workspace settings env"]) {
+      await t.test(`${legacy ? "legacy" : "current"}: ${source}`, () => {
+        const fx = qwenFixture();
+        const workspace = join(fx.root, "workspace");
+        const workspaceConfigDir = join(workspace, ".qwen");
+        const secret = `sk-excluded-${legacy}-${source.replaceAll(" ", "-")}`;
+        try {
+          mkdirSync(workspaceConfigDir, { recursive: true });
+          const system = JSON.parse(fx.systemBytes);
+          if (legacy) system.excludedProjectEnvVars = ["OPENAI_API_KEY"];
+          else system.advanced = { excludedEnvVars: ["OPENAI_API_KEY"] };
+          writeFileSync(fx.systemConfig, JSON.stringify(system));
+          if (source === "plain project dotenv") {
+            writeFileSync(join(workspace, ".env"), `OPENAI_API_KEY=${secret}\n`);
+          } else if (source === "scoped project dotenv") {
+            writeFileSync(join(workspaceConfigDir, ".env"), `OPENAI_API_KEY=${secret}\n`);
+          } else {
+            writeFileSync(join(workspaceConfigDir, "settings.json"), JSON.stringify({ env: { OPENAI_API_KEY: secret } }));
+          }
+          withEnv({
+            HOME: fx.env.HOME,
+            CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+            QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfig,
+            CAVE_API_KEY: "cave-managed-secret",
+            OPENAI_API_KEY: undefined,
+          }, () => withCwd(workspace, () => {
+            const injected = readInjected(buildWrapEnv(qwen, "https://gateway.example"));
+            for (const model of injected.config.modelProviders.openai) {
+              if (source === "plain project dotenv") {
+                assert.equal(Object.hasOwn(model.generationConfig.customHeaders, "x-cave-upstream-key"), false);
+              } else {
+                assert.equal(model.generationConfig.customHeaders["x-cave-upstream-key"], "$OPENAI_API_KEY");
+              }
+            }
+            assert.doesNotMatch(injected.raw, new RegExp(secret));
+            if (source === "plain project dotenv") assert.doesNotMatch(injected.raw, /\$OPENAI_API_KEY/);
+          }));
+        } finally {
+          fx.cleanup();
+        }
+      });
+    }
+  }
+});
+
+test("managed Qwen resolves settings env before deciding upstream key availability", () => {
+  const fx = qwenFixture();
+  try {
+    const user = JSON.parse(fx.userBytes);
+    user.env = { OPENAI_API_KEY: "$EMPTY_VAR" };
+    writeFileSync(fx.userConfig, JSON.stringify(user));
+    withEnv({
+      HOME: fx.env.HOME,
+      CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+      QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfig,
+      CAVE_API_KEY: "cave-managed-secret",
+      OPENAI_API_KEY: undefined,
+      EMPTY_VAR: "",
+    }, () => {
+      const injected = readInjected(buildWrapEnv(qwen, "https://gateway.example"));
+      for (const model of injected.config.modelProviders.openai) {
+        assert.equal(Object.hasOwn(model.generationConfig.customHeaders, "x-cave-upstream-key"), false);
+      }
+      assert.doesNotMatch(injected.raw, /\$OPENAI_API_KEY|\$EMPTY_VAR/);
+    });
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("managed Qwen fails closed when workspace trust state is malformed", () => {
   const fx = qwenFixture();
   const workspace = join(fx.root, "workspace");

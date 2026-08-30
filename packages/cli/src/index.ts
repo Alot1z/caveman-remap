@@ -10477,12 +10477,110 @@ function readOptionalJsonObject(path: string): JsonObject | null {
 function qwenResolvedSettingString(value: string, fallback: Record<string, string> = {}): string {
   return value.replace(/\$(?:(\w+)|{([^}]+)})/g, (match, bare: string | undefined, braced: string | undefined) => {
     const name = bare || braced || "";
-    if (typeof process.env[name] === "string") return process.env[name]!;
-    return typeof fallback[name] === "string" ? fallback[name]! : match;
+    if (typeof fallback[name] === "string") return fallback[name]!;
+    return typeof process.env[name] === "string" ? process.env[name]! : match;
   });
 }
 
 const qwenEnvReference = /\$(?:(\w+)|{([^}]+)})/;
+
+// Qwen 0.22.3 uses this complete indicator set to decide whether any legacy
+// V1 shape triggers migration for the whole settings scope. Keep detection
+// exact even though Caveman only materializes fields used by its safety gates.
+const qwenV1IndicatorKeys = [
+  "theme", "model", "autoAccept", "hideTips", "vimMode", "checkpointing",
+  "accessibility", "allowedTools", "allowMCPServers", "autoConfigureMaxOldSpaceSize",
+  "bugCommand", "chatCompression", "coreTools", "contextFileName", "customThemes",
+  "customWittyPhrases", "debugKeystrokeLogging", "dnsResolutionOrder", "enforcedAuthType",
+  "excludeTools", "excludeMCPServers", "excludedProjectEnvVars", "fileFiltering",
+  "folderTrustFeature", "folderTrust", "hasSeenIdeIntegrationNudge", "hideWindowTitle",
+  "showStatusInTitle", "showLineNumbers", "showCitations", "ideMode", "includeDirectories",
+  "loadMemoryFromIncludeDirectories", "maxSessionTurns", "mcpServerCommand",
+  "memoryImportFormat", "preferredEditor", "sandbox", "selectedAuthType",
+  "shouldUseNodePtyShell", "shellPager", "shellShowColor", "skipNextSpeakerCheck",
+  "toolDiscoveryCommand", "toolCallCommand", "usageStatisticsEnabled", "useExternalAuth",
+  "useRipgrep", "enableWelcomeBack", "approvalMode", "sessionTokenLimit", "contentGenerator",
+  "skipLoopDetection", "skipStartupContext", "enableOpenAILogging", "tavilyApiKey",
+  "disableAutoUpdate", "disableUpdateNag", "disableLoadingPhrases", "disableFuzzySearch",
+  "disableCacheControl",
+] as const;
+
+// Subset of V1 -> V2 relocations consumed by credential/trust/MCP gates below.
+// Migration still triggers from the complete upstream indicator set above.
+const qwenV1PolicyMigrationMap: Record<string, string> = {
+  allowMCPServers: "mcp.allowed",
+  coreTools: "tools.core",
+  excludeMCPServers: "mcp.excluded",
+  excludeTools: "tools.exclude",
+  excludedProjectEnvVars: "advanced.excludedEnvVars",
+  folderTrust: "security.folderTrust.enabled",
+};
+
+function qwenSetNestedPropertySafe(root: JsonObject, path: string, value: unknown): void {
+  const keys = path.split(".");
+  const last = keys.pop();
+  if (!last) return;
+  let current = root;
+  for (const key of keys) {
+    if (current[key] === undefined) current[key] = {};
+    const next = current[key];
+    if (!next || typeof next !== "object") return;
+    current = next as JsonObject;
+  }
+  current[last] = value;
+}
+
+// Mirror policy-relevant output of Qwen's per-scope V1 migration without
+// rewriting user files. Existing nested V2 content wins exactly as upstream's
+// parent-path carry step does.
+function qwenMigratePolicySettings(source: JsonObject): JsonObject {
+  const version = source["$version"];
+  if (typeof version === "number" && version >= 2) return cloneJsonValue(source);
+  const shouldMigrate = qwenV1IndicatorKeys.some((key) => {
+    if (!Object.hasOwn(source, key)) return false;
+    const value = source[key];
+    return !value || typeof value !== "object" || Array.isArray(value);
+  });
+  if (!shouldMigrate) return cloneJsonValue(source);
+
+  const result: JsonObject = {};
+  const processed = new Set<string>();
+  for (const [legacyKey, targetPath] of Object.entries(qwenV1PolicyMigrationMap)) {
+    if (!Object.hasOwn(source, legacyKey)) continue;
+    qwenSetNestedPropertySafe(result, targetPath, source[legacyKey]);
+    processed.add(legacyKey);
+  }
+  for (const [key, value] of Object.entries(source)) {
+    if (processed.has(key)) continue;
+    const parentOfMigratedPath = [...processed].some((legacyKey) =>
+      qwenV1PolicyMigrationMap[legacyKey]!.startsWith(`${key}.`));
+    if (!parentOfMigratedPath) {
+      result[key] = value;
+      continue;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      result[key] = value;
+      continue;
+    }
+    for (const [nestedKey, nestedValue] of Object.entries(value)) {
+      const nestedPath = `${key}.${nestedKey}`;
+      const alreadyMigrated = [...processed].some((legacyKey) =>
+        qwenV1PolicyMigrationMap[legacyKey] === nestedPath);
+      if (!alreadyMigrated) qwenSetNestedPropertySafe(result, nestedPath, nestedValue);
+    }
+  }
+  result["$version"] = 2;
+  return result;
+}
+
+function qwenResolveSettingValue(value: unknown, fallback: Record<string, string>): unknown {
+  if (typeof value === "string") return qwenResolvedSettingString(value, fallback);
+  if (Array.isArray(value)) return value.map((item) => qwenResolveSettingValue(item, fallback));
+  if (!value || typeof value !== "object") return value;
+  const resolved = { ...(value as JsonObject) };
+  for (const [key, child] of Object.entries(resolved)) resolved[key] = qwenResolveSettingValue(child, fallback);
+  return resolved;
+}
 
 function qwenStringList(root: JsonObject, path: string[], fallback: Record<string, string> | null): string[] | undefined | null {
   const value = jsonValueAt(root, path);
@@ -10654,11 +10752,14 @@ function qwenWorkspaceTrusted(settings: JsonObject, workspacePath: string): bool
 function qwenSettingsLayers(): JsonObject[] | null {
   const paths = qwenSettingsLayerPaths();
   if (!paths) return null;
+  const fallback = qwenHomeEnvFallback();
+  if (!fallback) return null;
   const layers: JsonObject[] = [];
   for (const path of paths) {
     const layer = readOptionalJsonObject(path);
     if (!layer) return null;
-    layers.push(layer);
+    const migrated = qwenMigratePolicySettings(layer);
+    layers.push(qwenResolveSettingValue(migrated, fallback) as JsonObject);
   }
   // Qwen decides workspace trust from System + User settings (User wins in
   // this initial check), then drops the entire workspace layer when untrusted.
@@ -10696,6 +10797,40 @@ function qwenSettingsPermitRecovery(marker: McpServerMarker, layers: JsonObject[
     if (disabledTools?.some(qwenCavemanToolDisabled)) return false;
   }
   return !allowedConfigured || allowed;
+}
+
+function qwenUserLevelEnvPaths(state: QwenHomeState = qwenHomeState()): Set<string> {
+  return new Set([
+    normalize(join(homedir(), ".env")),
+    normalize(join(state.root, ".env")),
+    normalize(join(homedir(), ".qwen", ".env")),
+  ]);
+}
+
+function qwenEnvFileIsQwenScoped(path: string, state: QwenHomeState): boolean {
+  const normalized = normalize(path);
+  return qwenUserLevelEnvPaths(state).has(normalized) || basename(dirname(normalized)) === ".qwen";
+}
+
+// advanced.excludedEnvVars uses Qwen's UNION merge strategy. Malformed final
+// state is ambiguous; fail closed instead of guessing which project env keys
+// the pinned binary will accept.
+function qwenExcludedEnvVars(layers: JsonObject[]): string[] | null {
+  let merged: unknown;
+  for (const layer of layers) {
+    const next = jsonValueAt(layer, ["advanced", "excludedEnvVars"]);
+    if (next === undefined) continue;
+    if (Array.isArray(merged)) {
+      const additions = Array.isArray(next) ? next : [next];
+      merged = [...new Set([...merged, ...additions])];
+    } else {
+      merged = next;
+    }
+  }
+  if (merged === undefined) return ["DEBUG", "DEBUG_MODE"];
+  return Array.isArray(merged) && merged.every((item) => typeof item === "string")
+    ? merged as string[]
+    : null;
 }
 
 function qwenEnvironmentFilePaths(layers: JsonObject[]): string[] | null {
@@ -10758,26 +10893,27 @@ function qwenEnvironmentFilePaths(layers: JsonObject[]): string[] | null {
 function qwenEffectiveEnvValue(layers: JsonObject[], key: string): string | undefined | null {
   const inherited = process.env[key];
   if (inherited) return inherited;
-  let value: string | undefined;
+  const state = qwenHomeState();
+  const excluded = qwenExcludedEnvVars(layers);
+  if (!excluded) return null;
   const envPaths = qwenEnvironmentFilePaths(layers);
   if (!envPaths) return null;
   for (const path of envPaths) {
     const parsed = qwenReadDotEnv(path);
     if (!parsed) return null;
-    if (parsed[key] !== undefined) value = parsed[key];
-    if (value) return value;
+    if (!qwenEnvFileIsQwenScoped(path, state) && excluded.includes(key)) continue;
+    const candidate = parsed[key];
+    if (candidate) return candidate;
   }
   // settings.env is the lowest environment tier; system settings win over
-  // workspace, user, and system defaults for each key.
-  for (const layer of layers) {
-    const env = jsonValueAt(layer, ["env"]);
-    if (env === undefined) continue;
-    if (!env || typeof env !== "object" || Array.isArray(env)) return null;
-    const candidate = (env as Record<string, unknown>)[key];
-    if (candidate !== undefined && typeof candidate !== "string") return null;
-    if (typeof candidate === "string") value = candidate;
-  }
-  return value;
+  // workspace, user, and system defaults for each key. Qwen's normal loader
+  // intentionally does not apply excludedEnvVars to settings.env.
+  const env = jsonValueAt(qwenMergedSettings(layers), ["env"]);
+  if (env === undefined) return undefined;
+  if (!env || typeof env !== "object" || Array.isArray(env)) return null;
+  const candidate = (env as Record<string, unknown>)[key];
+  if (candidate === undefined) return undefined;
+  return typeof candidate === "string" ? candidate : null;
 }
 
 // Qwen loads dotenv and settings.env before resolving model-provider header
@@ -10789,6 +10925,7 @@ function qwenEffectiveOpenAIKeyAvailable(): boolean | null {
   const value = qwenEffectiveEnvValue(layers, "OPENAI_API_KEY");
   if (value === null) return null;
   if (value === undefined || !value.trim()) return false;
+  if (qwenEnvReference.test(value)) return null;
   return /[\r\n]/.test(value) ? null : true;
 }
 

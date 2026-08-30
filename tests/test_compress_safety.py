@@ -334,47 +334,87 @@ class TestOuterWrapperStripping(unittest.TestCase):
         self.assertEqual(compress_mod.strip_llm_wrapper(text), "# Title\n\n```bash\nls\n```")
 
 
-class FirstTextBlockTests(unittest.TestCase):
-    """first_text_block extracts the first TEXT block from an Anthropic content
-    array. A tool_use block can order BEFORE the text on tool-heavy sessions,
-    and the old ``msg.content[0].text`` crashed after a paid call."""
+class ExtractTextTests(unittest.TestCase):
+    """extract_text returns the first REAL text from a provider message's
+    content whatever its shape — Anthropic blocks, OpenAI content strings/parts,
+    Gemini parts, nested content — and never crashes or returns a non-text block
+    (tool/thinking/image) as if it were content. A tool_use block can order
+    BEFORE the text on tool-heavy sessions, and the old ``content[0].text``
+    crashed after a paid call."""
 
     _tool_use = mock.Mock(type="tool_use", id="toolu_1", name="bash")
     _text = mock.Mock(type="text", text="  body  ")
 
     def test_skips_tool_use_first_block(self):
-        self.assertEqual(compress_mod.first_text_block([self._tool_use, self._text]), "  body  ")
+        self.assertEqual(compress_mod.extract_text([self._tool_use, self._text]), "  body  ")
 
     def test_takes_first_text_when_multiple_blocks(self):
         self.assertEqual(
-            compress_mod.first_text_block([mock.Mock(type="thinking", text="..."), self._text]),
+            compress_mod.extract_text([mock.Mock(type="thinking", text="..."), self._text]),
             "  body  ",
         )
 
     def test_plain_dict_text_block(self):
         self.assertEqual(
-            compress_mod.first_text_block([{"type": "tool_use"}, {"type": "text", "text": "dict body"}]),
+            compress_mod.extract_text([{"type": "tool_use"}, {"type": "text", "text": "dict body"}]),
             "dict body",
         )
 
     def test_bare_string_content(self):
-        self.assertEqual(compress_mod.first_text_block("  raw string  "), "  raw string  ")
+        self.assertEqual(compress_mod.extract_text("  raw string  "), "  raw string  ")
 
     def test_single_unwrapped_block_objects_(self):
         # Some SDK shapes return a single block, not a list — never crash.
-        self.assertEqual(compress_mod.first_text_block(self._text), "  body  ")
+        self.assertEqual(compress_mod.extract_text(self._text), "  body  ")
 
     def test_single_unwrapped_dict_block(self):
         self.assertEqual(
-            compress_mod.first_text_block({"type": "text", "text": "lone dict"}), "lone dict",
+            compress_mod.extract_text({"type": "text", "text": "lone dict"}), "lone dict",
         )
         # A lone non-text dict has no text to compress.
-        self.assertEqual(compress_mod.first_text_block({"type": "tool_use"}), "")
+        self.assertEqual(compress_mod.extract_text({"type": "tool_use"}), "")
 
     def test_no_text_returns_empty(self):
-        self.assertEqual(compress_mod.first_text_block([self._tool_use]), "")
-        self.assertEqual(compress_mod.first_text_block([]), "")
-        self.assertEqual(compress_mod.first_text_block(None), "")
+        self.assertEqual(compress_mod.extract_text([self._tool_use]), "")
+        self.assertEqual(compress_mod.extract_text([]), "")
+        self.assertEqual(compress_mod.extract_text(None), "")
+
+    def test_openai_string_content(self):
+        # choices[0].message.content as a plain string.
+        self.assertEqual(compress_mod.extract_text("  openai string  "), "  openai string  ")
+
+    def test_openai_content_parts(self):
+        # choices[0].message.content as a parts list with a non-text part first.
+        self.assertEqual(
+            compress_mod.extract_text({"role": "assistant", "content": [
+                {"type": "image_url", "image_url": {"url": "x"}},
+                {"type": "text", "text": "openai part"},
+            ]}),
+            "openai part",
+        )
+
+    def test_gemini_parts_shape(self):
+        # candidates[0].content.parts[].text
+        self.assertEqual(
+            compress_mod.extract_text({"parts": [{"text": "gemini text"}]}), "gemini text",
+        )
+        self.assertEqual(compress_mod.extract_text([{"parts": [{"text": "obj parts"}]}]), "obj parts")
+
+    def test_nested_content_recurses(self):
+        self.assertEqual(
+            compress_mod.extract_text({"content": [{"parts": [{"text": "nested"}]}]}), "nested",
+        )
+
+    def test_object_backed_parts_and_content(self):
+        # Objects (not dicts) carrying .parts / .content, as some wrappers emit.
+        self.assertEqual(
+            compress_mod.extract_text(mock.Mock(parts=[{"text": "objparts"}])), "objparts",
+        )
+        self.assertEqual(compress_mod.extract_text(mock.Mock(content="objcontent")), "objcontent")
+
+    def test_non_text_blocks_never_returned(self):
+        self.assertEqual(compress_mod.extract_text({"type": "thinking", "text": "skip me"}), "")
+        self.assertEqual(compress_mod.extract_text(mock.Mock(type="image_url", url="x")), "")
 
     def test_call_claude_raises_loudly_when_model_returns_no_compressible_text(self):
         # A tool_use-only reply through the SDK must fail loudly (RuntimeError),

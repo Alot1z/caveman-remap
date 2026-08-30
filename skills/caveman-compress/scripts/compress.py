@@ -371,37 +371,76 @@ CLAUDE_CALL_TIMEOUT_SECONDS = LOCK_WAIT_SECONDS // (MAX_RETRIES + 1)
 # ---------- Claude Calls ----------
 
 
-def first_text_block(content):
-    """Return the text of the first text block in an Anthropic content array.
+def extract_text(content):
+    """Return the first real text from a provider message's content.
 
-    On a tool-heavy session the SDK can put a ``tool_use`` block FIRST, so
-    ``msg.content[0]`` is not guaranteed to be text — and the old
-    ``msg.content[0].text`` then crashed with an AttributeError AFTER the paid
-    API call had already returned, wasting the call. Walk the blocks and take
-    the first textual one. Accepts TextBlock/ToolUseBlock objects, plain dicts,
-    a bare string, or ``None``; returns an empty string when there is no text.
+    Providers disagree wildly on the shape of their message content:
+      * Anthropic SDK      -> [TextBlock / ThinkingBlock / ToolUseBlock, ...]
+      * OpenAI-compatible  -> "plain string"
+                             or [{type: "text"|...|}, ...] under choices[*].message.content
+      * Gemini             -> {"parts": [{"text": "..."}]} under candidates[*].content
+    This doc lets caveman-compress work against any of them: it walks whatever
+    shape it is given and returns the first textual content, skipping
+    tool/thinking/image blocks — so ``content[0]`` being a non-text block can
+    never crash AFTER a paid call. Accepts lists, plain dicts, typed objects, a
+    bare string, or ``None``; returns an empty string when there is no text.
     """
     if content is None:
         return ""
     if isinstance(content, str):
-        return content
-    # Some SDK shapes hand back a single block unwrapped (not a []), and a dict
-    # is itself one block — normalize both so the walk below always iterates.
-    if not isinstance(content, (list, tuple)):
-        content = [content]
-    for block in content:
-        if isinstance(block, str):
-            text = block
-        elif isinstance(block, dict):
-            text = block.get("text") if block.get("type") == "text" else None
-        elif getattr(block, "type", None) == "text":
-            # Only a real text block; a thinking block also carries a `.text`
-            # attr but is not content to compress.
-            text = getattr(block, "text", None)
-        else:
-            text = None
+        return content if content.strip() else ""
+    if isinstance(content, (list, tuple)):
+        for item in content:
+            found = extract_text(item)
+            if found:
+                return found
+        return ""
+    if isinstance(content, dict):
+        # An explicit non-text block — never compress it.
+        if content.get("type") in ("tool_use", "thinking", "image", "image_url", "input_image", "call_tool"):
+            return ""
+        if content.get("type") == "text":
+            text = content.get("text")
+            return text if isinstance(text, str) and text.strip() else ""
+        # Gemini content block: {"parts": [{"text": ...}]}
+        if isinstance(content.get("parts"), (list, tuple)):
+            found = extract_text(content["parts"])
+            if found:
+                return found
+        # OpenAI message object: {"role": "...", "content": ...}
+        if "content" in content:
+            found = extract_text(content["content"])
+            if found:
+                return found
+        # Generic {"text": "..."}
+        text = content.get("text")
         if isinstance(text, str) and text.strip():
             return text
+        return ""
+    # Typed object (Anthropic TextBlock / ThinkingBlock / ToolUseBlock, or any
+    # generated response object). Gate on the same block types as the dict case
+    # so a thinking/tool block's non-text ``.text`` is never mistaken for
+    # content to compress.
+    btype = getattr(content, "type", None)
+    if btype == "text":
+        text = getattr(content, "text", None)
+        return text if isinstance(text, str) and text.strip() else ""
+    if btype in ("tool_use", "thinking", "image", "image_url", "call_tool"):
+        return ""
+    # Object-backed parts / content (Gemini / OpenAI-compatible wrappers).
+    parts = getattr(content, "parts", None)
+    if isinstance(parts, (list, tuple)):
+        found = extract_text(parts)
+        if found:
+            return found
+    sub = getattr(content, "content", None)
+    if sub is not None:
+        found = extract_text(sub)
+        if found:
+            return found
+    text = getattr(content, "text", None)
+    if isinstance(text, str) and text.strip():
+        return text
     return ""
 
 
@@ -429,7 +468,7 @@ def call_claude(prompt: str) -> str:
                 max_tokens=8192,
                 messages=[{"role": "user", "content": prompt}],
             )
-            text = first_text_block(msg.content).strip()
+            text = extract_text(msg.content).strip()
             if not text:
                 # No compressible text (only tool_use/thinking blocks, or an
                 # empty reply). Returning "" makes the caller quietly skip the

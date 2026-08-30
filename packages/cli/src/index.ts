@@ -10964,17 +10964,28 @@ function qwenEffectiveEnvValue(layers: JsonObject[], key: string): string | unde
   return typeof candidate === "string" ? candidate : null;
 }
 
-// Qwen loads dotenv and settings.env before resolving model-provider header
-// references. Return only availability: secret bytes never enter profile render
-// output, while Qwen still expands its native `$OPENAI_API_KEY` reference later.
+function qwenOpenAIKeyAvailability(value: string | undefined | null): boolean | null {
+  if (value === null) return null;
+  if (value === undefined || !value.trim()) return false;
+  if (qwenEnvReference.test(value) || /[\r\n]/.test(value)) return null;
+  return true;
+}
+
+// Qwen resolves settings before loading project dotenv/settings.env. Its normal
+// process then relaunches once, inheriting those late-loaded values, and resolves
+// the temporary system settings again. Pre-existing no-relaunch/sandbox processes
+// skip that second pass, so only process env or Qwen's home fallback can safely
+// satisfy a header reference there.
 function qwenEffectiveOpenAIKeyAvailable(): boolean | null {
   const layers = qwenSettingsLayers();
   if (!layers) return null;
-  const value = qwenEffectiveEnvValue(layers, "OPENAI_API_KEY");
-  if (value === null) return null;
-  if (value === undefined || !value.trim()) return false;
-  if (qwenEnvReference.test(value)) return null;
-  return /[\r\n]/.test(value) ? null : true;
+  if (!process.env.QWEN_CODE_NO_RELAUNCH && !process.env.SANDBOX) {
+    return qwenOpenAIKeyAvailability(qwenEffectiveEnvValue(layers, "OPENAI_API_KEY"));
+  }
+  const fallback = qwenHomeEnvFallback();
+  if (!fallback) return null;
+  const inherited = process.env.OPENAI_API_KEY;
+  return qwenOpenAIKeyAvailability(typeof inherited === "string" ? inherited : fallback.OPENAI_API_KEY);
 }
 
 function qwenCliBoolean(args: string[], name: string): boolean | undefined {

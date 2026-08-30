@@ -283,6 +283,84 @@ test("managed Qwen retains native key reference for effective dotenv and setting
   }
 });
 
+test("managed Qwen requires a second settings pass for late credential sources", async (t) => {
+  await t.test("no-relaunch omits user settings env", () => {
+    const fx = qwenFixture();
+    try {
+      const user = JSON.parse(fx.userBytes);
+      user.env = { OPENAI_API_KEY: "sk-no-relaunch-settings" };
+      writeFileSync(fx.userConfig, JSON.stringify(user));
+      withEnv({
+        HOME: fx.env.HOME,
+        CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+        QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfig,
+        QWEN_CODE_NO_RELAUNCH: "1",
+        SANDBOX: undefined,
+        CAVE_API_KEY: "cave-managed-secret",
+        OPENAI_API_KEY: undefined,
+      }, () => {
+        const injected = readInjected(buildWrapEnv(qwen, "https://gateway.example"));
+        for (const model of injected.config.modelProviders.openai) {
+          assert.equal(Object.hasOwn(model.generationConfig.customHeaders, "x-cave-upstream-key"), false);
+        }
+        assert.doesNotMatch(injected.raw, /\$OPENAI_API_KEY|sk-no-relaunch-settings/);
+      });
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  await t.test("sandbox omits project dotenv", () => {
+    const fx = qwenFixture();
+    const workspace = join(fx.root, "workspace");
+    try {
+      mkdirSync(join(workspace, ".qwen"), { recursive: true });
+      writeFileSync(join(workspace, ".qwen", ".env"), "OPENAI_API_KEY=sk-sandbox-project\n");
+      withEnv({
+        HOME: fx.env.HOME,
+        CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+        QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfig,
+        QWEN_CODE_NO_RELAUNCH: undefined,
+        SANDBOX: "sandbox",
+        CAVE_API_KEY: "cave-managed-secret",
+        OPENAI_API_KEY: undefined,
+      }, () => withCwd(workspace, () => {
+        const injected = readInjected(buildWrapEnv(qwen, "https://gateway.example"));
+        for (const model of injected.config.modelProviders.openai) {
+          assert.equal(Object.hasOwn(model.generationConfig.customHeaders, "x-cave-upstream-key"), false);
+        }
+        assert.doesNotMatch(injected.raw, /\$OPENAI_API_KEY|sk-sandbox-project/);
+      }));
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  await t.test("no-relaunch retains home dotenv fallback", () => {
+    const fx = qwenFixture();
+    try {
+      writeFileSync(join(dirname(fx.userConfig), ".env"), "OPENAI_API_KEY=sk-home-fallback\n");
+      withEnv({
+        HOME: fx.env.HOME,
+        CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+        QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfig,
+        QWEN_CODE_NO_RELAUNCH: "1",
+        SANDBOX: undefined,
+        CAVE_API_KEY: "cave-managed-secret",
+        OPENAI_API_KEY: undefined,
+      }, () => {
+        const injected = readInjected(buildWrapEnv(qwen, "https://gateway.example"));
+        for (const model of injected.config.modelProviders.openai) {
+          assert.equal(model.generationConfig.customHeaders["x-cave-upstream-key"], "$OPENAI_API_KEY");
+        }
+        assert.doesNotMatch(injected.raw, /sk-home-fallback/);
+      });
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
 test("managed Qwen follows workspace trust for project credential sources", async (t) => {
   for (const trust of ["DO_NOT_TRUST", "TRUST_FOLDER"]) {
     for (const source of ["project dotenv", "workspace settings env"]) {

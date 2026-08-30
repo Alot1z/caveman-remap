@@ -209,6 +209,43 @@ function handle(raw) {
       return;
     }
 
+    // /caveman-measure — run the L4 auto-measure against the active session
+    // and relay its JSON. This is the user-facing hook into the runtime at
+    // l4/caveman-l4.mjs (standalone, zero-dep, evidence-gated). Same watchdog
+    // + graceful-failure contract as /caveman-stats: bounded, optional, never
+    // blocks the turn.
+    const measureMatch = /^\/caveman(?::caveman)?-measure(?:\s+(.*))?$/.exec(prompt);
+    if (measureMatch && data.transcript_path) {
+      let block;
+      try {
+        const l4Path = path.join(__dirname, '..', '..', 'l4', 'caveman-l4.mjs');
+        const argv = [l4Path, 'auto-measure', '--session-file', data.transcript_path];
+        if (data.cwd) argv.push('--project', path.basename(data.cwd));
+        argv.push('--agent', 'claude');
+        block = execFileSync(process.execPath, argv, { encoding: 'utf8', timeout: 2500 }).trim();
+      } catch (e) {
+        block = '\"status\": \"error\", \"reason\": \"could not run L4 auto-measure\"';
+      }
+      process.stdout.write(JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: "UserPromptSubmit",
+          additionalContext: 'caveman measure result (JSON):\n\n' + block
+        }
+      }));
+      return;
+    }
+    if (measureMatch) {
+      // Command given but no active transcript to measure (e.g. --all style
+      // contexts / non-session hosts) — still answer, don't crash.
+      process.stdout.write(JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: "UserPromptSubmit",
+          additionalContext: 'caveman measure result (JSON):\n\n{\"status\": \"error\", \"reason\": \"no active session transcript to measure\"}'
+        }
+      }));
+      return;
+    }
+
     // Shared mode-change parser (#602) — single source of truth with the
     // opencode plugin for slash commands, namespaced /caveman:caveman-*,
     // natural-language activation/deactivation, and brevity triggers.

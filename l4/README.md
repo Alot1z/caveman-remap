@@ -14,6 +14,20 @@ is never invented.
 |---|---|---|
 | L4-1 `auto-measure` | `node l4/caveman-l4.mjs auto-measure --session-file <path> [--agent <name>] [--mode <mode>] [--project <root>] [--min-fresh-ms <ms>]` | **implemented** |
 | L4-2 `verify-gate` | `node l4/caveman-l4.mjs verify-gate --finding <file.json | inline-json>` | **implemented** |
+
+## Integration
+
+- **In-session: `/caveman-measure`.** The `UserPromptSubmit` hook
+  (`src/hooks/caveman-mode-tracker.js`) runs `auto-measure` against the active
+  session transcript and relays the measurement JSON — the same contract as
+  `/caveman-stats`. Run it after a compression pass to capture a measured
+  before/after figure.
+- **Scriptable: `verify-gate`.** Pipe a `{ claim, measured }` JSON object (or a
+  path to one) and get `REFUSED` / `REJECTED` / `VERIFIED`. It can be wired into
+  any CI or prompt flow that must not assert savings without evidence.
+- **Standalone by design.** The runtime has its own session parser; it imports
+  nothing from `caveman-stats` and does not require any other change to be
+  merged to work. Both can ship independently.
 | L4-3 `promote` | — | planned (candidate rules → `skills/caveman/rules/<language>/`) |
 | L4-4 `merge` | — | planned (per-agent × per-language profiles) |
 | L4-5 `self-improve` | — | planned (failures → rule candidates) |

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
@@ -26,6 +26,11 @@ const { buildWrapEnv } = await import(`${pathToFileURL(cli).href}?kilo-wrap`);
 const kilo = PROFILES.find((profile) => profile.id === "kilo");
 
 assert.ok(kilo, "compiled registry must contain Kilo Code");
+
+// Keep unit fixtures independent from developer Kilo account state. Dedicated
+// tests override this with isolated on-disk databases.
+process.env.KILO_DB = ":memory:";
+delete process.env.KILO_TEST_MANAGED_CONFIG_DIR;
 
 function runCli(args, env, cwd) {
   return new Promise((resolve, reject) => {
@@ -250,6 +255,22 @@ process.stdout.write(JSON.stringify({
   });
 }
 
+function writeKiloAccountState(path, { activeAccount = "account-1", activeOrg = null } = {}) {
+  mkdirSync(dirname(path), { recursive: true });
+  const script = [
+    'const { DatabaseSync } = require("node:sqlite");',
+    'const db = new DatabaseSync(process.argv[1]);',
+    'db.exec("CREATE TABLE account_state (id INTEGER PRIMARY KEY, active_account_id TEXT, active_org_id TEXT)");',
+    'db.prepare("INSERT INTO account_state (id, active_account_id, active_org_id) VALUES (1, ?, ?)").run(process.argv[2] || null, process.argv[3] || null);',
+    'db.close();',
+  ].join("\n");
+  const result = spawnSync(process.execPath, ["--no-warnings", "-e", script, path, activeAccount ?? "", activeOrg ?? ""], {
+    encoding: "utf8",
+    env: { ...process.env, NODE_NO_WARNINGS: "1", NODE_OPTIONS: "" },
+  });
+  assert.equal(result.status, 0, result.stderr);
+}
+
 test("Kilo profile exposes both published CLI binaries", () => {
   assert.deepEqual(kilo.binary_names, ["kilo", "kilocode"]);
   assert.equal(kilo.tested_agent_version, "7.5.6");
@@ -357,6 +378,94 @@ test("Kilo route guard ignores model-looking arguments after separator", async (
   assert.deepEqual(child.argv, args);
   assert.equal(JSON.parse(child.config).model, "caveman/gpt-5.5");
   assert.doesNotMatch(out.stderr, /launching directly/);
+});
+
+test("Kilo route guard recognizes exact higher-priority managed files", async (t) => {
+  for (const name of ["kilo.jsonc", "kilo.json", "opencode.jsonc", "opencode.json"]) {
+    await t.test(name, async () => {
+      const root = mkdtempSync(join(tmpdir(), "cave-kilo-managed-"));
+      try {
+        writeFileSync(join(root, name), "{}\n");
+        const out = await runKiloAlias("kilo", "kilo", ["run", "hello"], {
+          proxy: true,
+          env: { KILO_CONFIG_CONTENT: undefined, KILO_DB: ":memory:", KILO_TEST_MANAGED_CONFIG_DIR: root },
+        });
+        assert.equal(out.code, 0, out.stderr);
+        assert.equal(JSON.parse(out.stdout).config, "");
+        assert.equal(out.proxyStarted, false);
+        assert.match(out.stderr, /Kilo managed policy loads after Caveman's inline routing config; launching directly/);
+        assert.doesNotMatch(out.stderr, new RegExp(name.replace(".", "\\.")));
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  await t.test("unloaded legacy config.json", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cave-kilo-managed-legacy-"));
+    try {
+      writeFileSync(join(root, "config.json"), "{}\n");
+      const out = await runKiloAlias("kilo", "kilo", ["run", "hello"], {
+        env: { KILO_DB: ":memory:", KILO_TEST_MANAGED_CONFIG_DIR: root },
+      });
+      assert.equal(out.code, 0, out.stderr);
+      assert.equal(JSON.parse(JSON.parse(out.stdout).config).model, "caveman/gpt-5.5");
+      assert.doesNotMatch(out.stderr, /launching directly/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("Kilo route guard launches direct for active or unreadable organization state", async (t) => {
+  await t.test("active organization", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cave-kilo-org-"));
+    try {
+      const db = join(root, "kilo.db");
+      writeKiloAccountState(db, { activeOrg: "org-secret-value" });
+      const out = await runKiloAlias("kilo", "kilo", ["run", "hello"], {
+        proxy: true,
+        env: { KILO_CONFIG_CONTENT: undefined, KILO_DB: db },
+      });
+      assert.equal(out.code, 0, out.stderr);
+      assert.equal(JSON.parse(out.stdout).config, "");
+      assert.equal(out.proxyStarted, false);
+      assert.match(out.stderr, /Kilo active organization can load routing policy after Caveman's inline config; launching directly/);
+      assert.doesNotMatch(out.stderr, /org-secret-value/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("unreadable organization state", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cave-kilo-org-unknown-"));
+    try {
+      const out = await runKiloAlias("kilo", "kilo", ["run", "hello"], {
+        proxy: true,
+        env: { KILO_CONFIG_CONTENT: undefined, KILO_DB: root },
+      });
+      assert.equal(out.code, 0, out.stderr);
+      assert.equal(JSON.parse(out.stdout).config, "");
+      assert.equal(out.proxyStarted, false);
+      assert.match(out.stderr, /Kilo organization state cannot be verified safely; launching directly/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("Kilo route guard permits verified account state without an active organization", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cave-kilo-no-org-"));
+  try {
+    const db = join(root, "kilo.db");
+    writeKiloAccountState(db);
+    const out = await runKiloAlias("kilo", "kilo", ["run", "hello"], { env: { KILO_DB: db } });
+    assert.equal(out.code, 0, out.stderr);
+    assert.equal(JSON.parse(JSON.parse(out.stdout).config).model, "caveman/gpt-5.5");
+    assert.doesNotMatch(out.stderr, /launching directly/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("Kilo route guard fails closed when called through buildWrapEnv", () => {

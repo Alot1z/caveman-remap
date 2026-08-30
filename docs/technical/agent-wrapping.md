@@ -54,6 +54,11 @@ An explicit non-Caveman `--model`/`--m`/`-m`, top-level `attach`, `cloud`, or
 sessions execute outside Kilo's local routed process; `roll-call` deliberately spans
 models instead of honoring one routed model.
 
+Kilo organization and enterprise-managed config loads after inline environment
+config. When either higher-priority source is active—or account state cannot be
+verified safely—the wrapper launches Kilo directly instead of claiming proxy
+confinement or MCP recovery that later policy could override.
+
 Install Qwen Code's CLI before using its shortcut:
 
 ```bash

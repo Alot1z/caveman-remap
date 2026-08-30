@@ -27,7 +27,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { chmod, mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
-import { homedir, hostname, tmpdir } from "node:os";
+import { homedir, hostname, tmpdir, userInfo } from "node:os";
 import { basename, delimiter, dirname, extname, isAbsolute, join, normalize, parse, relative, resolve, sep } from "node:path";
 import { connect as netConnect, createServer as netCreateServer, isIP, type AddressInfo } from "node:net";
 import { request as httpRequest } from "node:http";
@@ -8870,8 +8870,9 @@ export function buildWrapEnv(agent?: AgentProfile, gw = gatewayURL(), mcpMode: M
     if (agent.id === "kilo" && mcpMode === "auto") {
       const ownedMcp = ownedMcpRegistration(agent.id, agentArgs);
       if (ownedMcp) {
-        // KILO_CONFIG_CONTENT has highest precedence. Project the exact owned
-        // registration into it so recovery evidence and effective config agree.
+        // Project exact owned registration into Kilo's highest user-controlled
+        // layer. Route preflight rejects active org/managed sources that load
+        // afterward, so no later known policy can silently disable recovery.
         rendered = deepMerge(rendered, { mcp: { caveman: kiloMcpEntry(ownedMcp) } });
       }
     }
@@ -11419,11 +11420,92 @@ function kiloProfileModelIds(agent: AgentProfile): Set<string> {
   return shared ?? new Set();
 }
 
+function kiloManagedPolicyPresent(): boolean {
+  const directory = process.env.KILO_TEST_MANAGED_CONFIG_DIR || (process.platform === "darwin"
+    ? "/Library/Application Support/kilo"
+    : process.platform === "win32"
+      ? join(process.env.ProgramData || "C:\\ProgramData", "kilo")
+      : "/etc/kilo");
+  // Exact Kilo 7.5.6 managed file set. config.json is a legacy global filename,
+  // but managed loading deliberately excludes it.
+  const configFiles = ["kilo.jsonc", "kilo.json", "opencode.jsonc", "opencode.json"];
+  if (configFiles.some((name) => existsSync(join(directory, name)))) return true;
+  if (process.platform !== "darwin") return false;
+  const preferenceFiles = ["/Library/Managed Preferences/ai.opencode.managed.plist"];
+  try {
+    preferenceFiles.unshift(join("/Library/Managed Preferences", userInfo().username, "ai.opencode.managed.plist"));
+  } catch {
+    // System-level preference remains covered; an unreadable username is itself
+    // unusual, but no user path can be resolved safely enough to claim absence.
+    return true;
+  }
+  return preferenceFiles.some((path) => existsSync(path));
+}
+
+function kiloDatabasePath(): string | null {
+  const rawDataRoot = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
+  const cleanedDataRoot = rawDataRoot.replace(/[\r\n]+/g, "");
+  if (!cleanedDataRoot) throw new Error("Kilo data root resolves to an empty path");
+  const dataRoot = normalize(isAbsolute(cleanedDataRoot) ? cleanedDataRoot : resolve(cleanedDataRoot));
+  const configured = process.env.KILO_DB;
+  if (configured === ":memory:") return null;
+  if (configured) {
+    if (/[\0\r\n]/.test(configured)) throw new Error("KILO_DB contains an invalid path character");
+    return normalize(isAbsolute(configured) ? configured : join(dataRoot, "kilo", configured));
+  }
+  return join(dataRoot, "kilo", "kilo.db");
+}
+
+function kiloActiveOrganizationState(): "none" | "active" | "unknown" {
+  let path: string | null;
+  try {
+    path = kiloDatabasePath();
+    if (path === null) return "none";
+    const stat = statSync(path);
+    if (!stat.isFile()) return "unknown";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "none";
+    return "unknown";
+  }
+  const script = [
+    'const { DatabaseSync } = require("node:sqlite");',
+    'const db = new DatabaseSync(process.argv[1], { readOnly: true });',
+    'try {',
+    '  const row = db.prepare("SELECT 1 AS active FROM account_state WHERE id = 1 AND active_account_id IS NOT NULL AND active_org_id IS NOT NULL LIMIT 1").get();',
+    '  process.stdout.write(row?.active === 1 ? "active" : "none");',
+    '} finally { db.close(); }',
+  ].join("\n");
+  const probe = spawnSync(process.execPath, ["--no-warnings", "-e", script, path], {
+    encoding: "utf8",
+    timeout: 2_000,
+    env: { ...process.env, NODE_NO_WARNINGS: "1", NODE_OPTIONS: "" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (probe.status !== 0 || probe.signal || probe.error) return "unknown";
+  return probe.stdout === "active" ? "active" : probe.stdout === "none" ? "none" : "unknown";
+}
+
+function kiloHigherPriorityRouteOverride(): AgentRouteOverride | null {
+  if (kiloManagedPolicyPresent()) {
+    return { surface: "managed policy", reason: "loads after Caveman's inline routing config" };
+  }
+  const organization = kiloActiveOrganizationState();
+  if (organization === "active") {
+    return { surface: "active organization", reason: "can load routing policy after Caveman's inline config" };
+  }
+  if (organization === "unknown") {
+    return { surface: "organization state", reason: "cannot be verified safely" };
+  }
+  return null;
+}
+
 // Kilo's inline config selects a routed default, but its CLI model option has
 // higher precedence and attach mode delegates inference to another server whose
 // environment this process cannot control. Detect both before proxy/bootstrap
 // work. Unknown short-option clusters fail direct instead of guessing yargs.
 function kiloRouteOverride(agent: AgentProfile, args: string[]): AgentRouteOverride | null {
+  const higherPriority = kiloHigherPriorityRouteOverride();
+  if (higherPriority) return higherPriority;
   const separator = args.indexOf("--");
   const parsedArgs = separator === -1 ? args : args.slice(0, separator);
   const valueOptions = new Set([

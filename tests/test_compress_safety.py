@@ -332,3 +332,49 @@ class TestOuterWrapperStripping(unittest.TestCase):
     def test_a_longer_wrapper_around_inner_fences_is_stripped(self):
         text = "````markdown\n# Title\n\n```bash\nls\n```\n````"
         self.assertEqual(compress_mod.strip_llm_wrapper(text), "# Title\n\n```bash\nls\n```")
+
+
+class FirstTextBlockTests(unittest.TestCase):
+    """first_text_block extracts the first TEXT block from an Anthropic content
+    array. A tool_use block can order BEFORE the text on tool-heavy sessions,
+    and the old ``msg.content[0].text`` crashed after a paid call (MEGA-2)."""
+
+    _tool_use = mock.Mock(type="tool_use", id="toolu_1", name="bash")
+    _text = mock.Mock(type="text", text="  body  ")
+
+    def test_skips_tool_use_first_block(self):
+        self.assertEqual(compress_mod.first_text_block([self._tool_use, self._text]), "  body  ")
+
+    def test_takes_first_text_when_multiple_blocks(self):
+        self.assertEqual(
+            compress_mod.first_text_block([mock.Mock(type="thinking", text="..."), self._text]),
+            "  body  ",
+        )
+
+    def test_plain_dict_text_block(self):
+        self.assertEqual(
+            compress_mod.first_text_block([{"type": "tool_use"}, {"type": "text", "text": "dict body"}]),
+            "dict body",
+        )
+
+    def test_bare_string_content(self):
+        self.assertEqual(compress_mod.first_text_block("  raw string  "), "  raw string  ")
+
+    def test_no_text_returns_empty(self):
+        self.assertEqual(compress_mod.first_text_block([self._tool_use]), "")
+        self.assertEqual(compress_mod.first_text_block([]), "")
+        self.assertEqual(compress_mod.first_text_block(None), "")
+
+    def test_call_claude_returns_the_skipped_text_block(self):
+        # End-to-end through the SDK path with a tool_use FIRST block: the paid
+        # call succeeds and returns the text instead of raising AttributeError.
+        import types
+
+        fake_msg = types.SimpleNamespace(content=[mock.Mock(type="tool_use"), mock.Mock(type="text", text="  compressed  ")])
+        fake_client = mock.Mock()
+        fake_client.messages.create.return_value = fake_msg
+        anthropic_stub = types.SimpleNamespace(Anthropic=mock.Mock(return_value=fake_client))
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
+             mock.patch.dict(sys.modules, {"anthropic": anthropic_stub}):
+            out = compress_mod.call_claude("prompt")
+        self.assertEqual(out, "compressed")

@@ -371,6 +371,36 @@ CLAUDE_CALL_TIMEOUT_SECONDS = LOCK_WAIT_SECONDS // (MAX_RETRIES + 1)
 # ---------- Claude Calls ----------
 
 
+def first_text_block(content):
+    """Return the text of the first text block in an Anthropic content array.
+
+    On a tool-heavy session the SDK can put a ``tool_use`` block FIRST, so
+    ``msg.content[0]`` is not guaranteed to be text — and the old
+    ``msg.content[0].text`` then crashed with an AttributeError AFTER the paid
+    API call had already returned, wasting the call. Walk the blocks and take
+    the first textual one. Accepts TextBlock/ToolUseBlock objects, plain dicts,
+    a bare string, or ``None``; returns an empty string when there is no text.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    for block in content:
+        if isinstance(block, str):
+            text = block
+        elif isinstance(block, dict):
+            text = block.get("text") if block.get("type") == "text" else None
+        elif getattr(block, "type", None) == "text":
+            # Only a real text block; a thinking block also carries a `.text`
+            # attr but is not content to compress.
+            text = getattr(block, "text", None)
+        else:
+            text = None
+        if isinstance(text, str) and text.strip():
+            return text
+    return ""
+
+
 def call_claude(prompt: str) -> str:
     """Send a prompt to Claude.
 
@@ -395,7 +425,7 @@ def call_claude(prompt: str) -> str:
                 max_tokens=8192,
                 messages=[{"role": "user", "content": prompt}],
             )
-            return strip_llm_wrapper(msg.content[0].text.strip())
+            return strip_llm_wrapper(first_text_block(msg.content).strip())
         except ImportError:
             pass  # anthropic not installed, fall back to CLI
     # Fallback: use claude CLI (handles desktop auth).

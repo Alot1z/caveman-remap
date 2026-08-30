@@ -894,7 +894,9 @@ function main() {
   }
 }
 
-if (require.main === module) main();  module.exports = {
+if (require.main === module) main();
+
+module.exports = {
   formatStats, formatShare, formatHistory, aggregateHistory, resetLifetime, persistSummaryConcurrent,
   parseDuration, deriveSavings,
   deriveNet, ruleOverheadPerTurn, parseSession, priceForModel, formatUsd, COMPRESSION,

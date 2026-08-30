@@ -44,7 +44,7 @@ an already-running Kilo editor extension.
 Install Qwen Code's CLI before using its shortcut:
 
 ```bash
-npm i -g @qwen-code/qwen-code
+npm i -g @qwen-code/qwen-code@0.22.3
 caveman qwen
 ```
 

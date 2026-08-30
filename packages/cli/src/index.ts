@@ -4529,11 +4529,17 @@ async function wrap(rest: string[]) {
     console.error("caveman wrap: --pixel not yet supported for codex subscription sessions");
     process.exit(1);
   }
-  await bootstrapLocalWrapRuntime(parsed);
-  await firstRunExperience();
+  // Route-changing Qwen flags intentionally bypass Caveman. Decide before any
+  // first-run install, proxy bootstrap, or welcome work so a direct launch has
+  // no Caveman side effects beyond its explicit warning.
+  const qwenDirect = agent?.id === "qwen" ? qwenRouteOverride(agent, extra) : null;
+  if (!qwenDirect) {
+    await bootstrapLocalWrapRuntime(parsed);
+    await firstRunExperience();
+  }
   // `wrap` is a zero-commit trial. Native hooks/MCP/config live only in a temp
   // host pack for this child; persistent integration requires an explicit install.
-  await runWrapped(resolved, extra, agent, parsed, codexAuthMode === "subscription");
+  await runWrapped(resolved, extra, agent, parsed, codexAuthMode === "subscription", qwenDirect);
 }
 
 // ===========================================================================
@@ -5098,8 +5104,11 @@ async function agentShortcut(rest: string[]) {
 // is the one-command compression path. If the proxy can't be reached, a TTY run
 // offers to launch the agent directly (no Caveman, no compression this run) rather
 // than wire it to a dead endpoint; non-TTY runs warn and route through as before.
-async function runWrapped(bin: string, cmdArgs: string[], agent?: AgentProfile, opts: WrapOptions = { mode: "compress", noProxy: false, toon: true, noShrink: false, mcpMode: "auto", noBrowse: false, delegate: false, minimal: false, command: [] }, codexSubscription = false) {
-  const result = await spawnWrapped(bin, cmdArgs, agent, opts, gatewayURL(), codexSubscription);
+async function runWrapped(bin: string, cmdArgs: string[], agent?: AgentProfile, opts: WrapOptions = { mode: "compress", noProxy: false, toon: true, noShrink: false, mcpMode: "auto", noBrowse: false, delegate: false, minimal: false, command: [] }, codexSubscription = false, qwenRouteDecision?: QwenRouteOverride | null) {
+  const result = await spawnWrapped(bin, cmdArgs, agent, opts, gatewayURL(), codexSubscription, qwenRouteDecision);
+  // Preflight route bypass is intentionally outside Caveman's lifecycle: no
+  // savings read, sync, telemetry, or other post-child mutation.
+  if (result.routeBypass) process.exit(result.code);
   const summary = result.summaryKind && result.sessionStart
     ? printSessionSavings(result.summaryKind, result.sessionStart, agent?.id)
     : null;
@@ -5160,7 +5169,8 @@ async function spawnWrapped(
   opts: WrapOptions,
   gw: string,
   codexSubscription = false,
-): Promise<{ code: number; proxyStarted: boolean; sessionStart?: string | undefined; summaryKind?: "observe" | "compress" | undefined }> {
+  qwenRouteDecision?: QwenRouteOverride | null,
+): Promise<{ code: number; proxyStarted: boolean; routeBypass: boolean; sessionStart?: string | undefined; summaryKind?: "observe" | "compress" | undefined }> {
   const { host, port } = gatewayHostPort(gw);
   const local = wrapMode(gw) === "local";
   let proxyStarted = false;
@@ -5169,14 +5179,23 @@ async function spawnWrapped(
   // Gemini cannot preserve both contracts. Launch direct instead of routing a
   // request that will 401 or misuse one credential as the other.
   const managedGeminiUnsupported = !local && agent?.id === "gemini";
-  let direct = managedGeminiUnsupported;
+  // `wrap` resolves this before first-run work and passes even a null decision.
+  // Other callers resolve here. Never reread mutable settings across that boundary.
+  const qwenOverride = agent?.id === "qwen"
+    ? qwenRouteDecision === undefined ? qwenRouteOverride(agent, cmdArgs) : qwenRouteDecision
+    : null;
+  const routeBypass = qwenOverride !== null;
+  let direct = managedGeminiUnsupported || qwenOverride !== null;
   if (managedGeminiUnsupported) {
     process.stderr.write("caveman: managed Gemini CLI wrap is unsupported because Gemini CLI cannot send separate Caveman and upstream credentials; launching directly\n");
+  }
+  if (qwenOverride) {
+    process.stderr.write(`caveman: Qwen ${qwenOverride.surface} ${qwenOverride.reason}; launching directly\n`);
   }
   // The local proxy compresses with no account. When wrap runs the LOCAL
   // proxy path we resolve the mode; managed gateway traffic is governed by the cloud
   // policy engine, so we never resolve it here.
-  const gateApplies = local && !opts.noProxy;
+  const gateApplies = !direct && local && !opts.noProxy;
   const entitlement = gateApplies ? readWrapEntitlement() : null;
   const entitlementState = gateApplies ? readWrapEntitlementState() : null;
   const gate = gateApplies ? resolveWrapGate(entitlement, new Date(), opts.mode) : null;
@@ -5198,19 +5217,19 @@ async function spawnWrapped(
   // detail itself — i.e. it has the caveman MCP retrieve tool installed (run
   // `caveman mcp install <agent>`). When it does, signal the proxy to use MCP
   // recovery (which lets it compress streams); otherwise streams pass through.
-  const ephemeralMcp = agent && (agent.id === "claude" || agent.id === "codex")
+  const ephemeralMcp = !direct && agent && (agent.id === "claude" || agent.id === "codex")
     && !opts.minimal && opts.mcpMode === "auto" && wrapRecoveryEligible(opts)
     ? probeMcpBinary()
     : null;
   if (ephemeralMcp && !ephemeralMcp.probe.current) queueStaleMcpBinary(ephemeralMcp.probe);
   const ephemeralMcpBinary = ephemeralMcp?.probe.current ? ephemeralMcp.binary : undefined;
-  const mcpRecovery = Boolean(ephemeralMcpBinary) || wrapMcpRecoveryAvailable(agent, opts, cmdArgs);
-  const delegateAlreadyInstalled = Boolean(agent && mcpServerInstalled(agent.id, "caveman-delegate"));
-  const ephemeralDelegateMcp = agent && (agent.id === "claude" || agent.id === "codex")
+  const mcpRecovery = !direct && (Boolean(ephemeralMcpBinary) || wrapMcpRecoveryAvailable(agent, opts, cmdArgs));
+  const delegateAlreadyInstalled = Boolean(!direct && agent && mcpServerInstalled(agent.id, "caveman-delegate"));
+  const ephemeralDelegateMcp = !direct && agent && (agent.id === "claude" || agent.id === "codex")
     && !opts.minimal && opts.delegate && !delegateAlreadyInstalled
     ? resolveDelegateMcpCommand()
     : null;
-  if (agent && (agent.id === "claude" || agent.id === "codex") && opts.delegate && !delegateAlreadyInstalled && !ephemeralDelegateMcp) {
+  if (!direct && agent && (agent.id === "claude" || agent.id === "codex") && opts.delegate && !delegateAlreadyInstalled && !ephemeralDelegateMcp) {
     process.stderr.write("caveman: delegate enabled but caveman-delegate server is unavailable; launching without delegate\n");
   }
   const desiredRecoveryViaMCP = observeEstimate ? false : mcpRecovery;
@@ -5218,7 +5237,7 @@ async function spawnWrapped(
   const proxyVersion = gateApplies ? probeProxyVersion() : null;
   let runtime: ProxyRuntimeState = { owner: "unknown" };
   let runtimeState: OffState | null = null;
-  let proxyReady = await portListening(host, port);
+  let proxyReady = direct ? false : await portListening(host, port);
   if (proxyReady && gateApplies) {
     runtime = readProxyRuntimeState(port, proxyVersion);
     if (runtime.owner === "unknown") {
@@ -5294,7 +5313,7 @@ async function spawnWrapped(
       }
     }
   }
-  if (!proxyReady) {
+  if (!proxyReady && !direct) {
     if (local && !opts.noProxy) {
       proxyStarted = codexSubscription
         ? await startWrapProxy(effectiveMode, desiredRecoveryViaMCP, false, undefined, undefined, gw, "codex-subscription", observeEstimate)
@@ -5309,7 +5328,7 @@ async function spawnWrapped(
           : OFF_STATES.staleBinary("caveman-proxy", proxyVersion?.version ?? "unknown", cliVersion());
       }
     }
-    if (!proxyReady && !direct) {
+    if (!proxyReady) {
       const startHint = codexSubscription || opts.mode === "record" ? "caveman start" : `CAVEMAN_MODE=${opts.mode} caveman start`;
       if (codexSubscription && opts.noProxy) {
         // Explicit proxy:false leaves subscription Codex in pass-through launch mode
@@ -5329,7 +5348,7 @@ async function spawnWrapped(
           process.stderr.write(`${mark("warn")} cancelled — run ${cyan(startHint)}, then re-run your wrap\n`);
           emitCommandRunOnce("error", "usage");
           removeProxySessionMarker(sessionMarker);
-          return { code: 130, proxyStarted };
+          return { code: 130, proxyStarted, routeBypass };
         }
       } else {
         process.stderr.write(
@@ -5509,7 +5528,7 @@ async function spawnWrapped(
     cleanupWrapTempDirs();
     removeProxySessionMarker(sessionMarker);
   }
-  return { code, proxyStarted, sessionStart, summaryKind };
+  return { code, proxyStarted, routeBypass, sessionStart, summaryKind };
 }
 
 export function claudeCaveBuildEnv(): NodeJS.ProcessEnv {
@@ -8820,13 +8839,14 @@ export function buildWrapEnv(agent?: AgentProfile, gw = gatewayURL(), mcpMode: M
   if (!agent) return env;
   if (applyClaudeBedrockWrap(env, agent, renderedGw, gw)) return env;
   if (agent.id === "qwen") {
-    const safeMode = qwenSafeModeEnabled(agentArgs);
-    if (safeMode === null) throw new Error("cannot safely resolve Qwen's effective settings");
-    if (safeMode) {
-      // Qwen safe mode discards system settings, including Caveman's provider
-      // route. Do not launch a child that would silently bypass the proxy.
+    const override = qwenRouteOverride(agent, agentArgs);
+    if (override?.surface === "effective settings") {
+      throw new Error("cannot safely resolve Qwen's effective settings");
+    }
+    if (override?.surface === "--safe-mode" && override.reason === "ignores Caveman system settings") {
       throw new Error("Qwen safe mode ignores Caveman system settings");
     }
+    if (override) throw new Error(`Qwen ${override.surface} ${override.reason}`);
   }
   const inj = agent.injection;
   if (inj.method === "env") {
@@ -11319,20 +11339,212 @@ function qwenEffectiveOpenAIKeyAvailable(): boolean | null {
   return qwenOpenAIKeyAvailability(typeof inherited === "string" ? inherited : fallback.OPENAI_API_KEY);
 }
 
-function qwenCliBoolean(args: string[], name: string): boolean | undefined {
-  let value: boolean | undefined;
+type QwenRouteOverride = { surface: string; reason: string };
+type QwenMatchedOption = { inline: boolean; value?: string };
+
+function qwenMatchedOption(arg: string, names: readonly string[]): QwenMatchedOption | null {
+  for (const name of names) {
+    if (arg === name) return { inline: false };
+    if (arg.startsWith(`${name}=`)) return { inline: true, value: arg.slice(name.length + 1) };
+  }
+  return null;
+}
+
+function qwenProfileModelIds(agent: AgentProfile): Set<string> {
+  if (agent.id !== "qwen" || agent.injection.method !== "config-file") return new Set();
+  const overlays = [agent.injection.config_overlay.local, agent.injection.config_overlay.managed ?? agent.injection.config_overlay.local];
+  let shared: Set<string> | undefined;
+  for (const overlay of overlays) {
+    const models = jsonValueAt(overlay, ["modelProviders", "openai"]);
+    if (!Array.isArray(models)) return new Set();
+    const ids = new Set(models.flatMap((model) => {
+      const id = jsonValueAt(model, ["id"]);
+      return typeof id === "string" && id.trim() === id && id ? [id] : [];
+    }));
+    shared = shared === undefined ? ids : new Set([...shared].filter((id) => ids.has(id)));
+  }
+  return shared ?? new Set();
+}
+
+function qwenBooleanArg(
+  args: string[],
+  index: number,
+  positive: readonly string[],
+  negative: readonly string[],
+): { matched: boolean; value?: boolean; malformed: boolean; consumed: number } {
+  const arg = args[index]!;
+  const negated = qwenMatchedOption(arg, negative);
+  if (negated?.inline) return { matched: true, malformed: true, consumed: 0 };
+  if (negated) return { matched: true, value: false, malformed: false, consumed: 0 };
+  const enabled = qwenMatchedOption(arg, positive);
+  if (!enabled) return { matched: false, malformed: false, consumed: 0 };
+  if (enabled.inline) {
+    if (enabled.value === "true" || enabled.value === "false") {
+      return { matched: true, value: enabled.value === "true", malformed: false, consumed: 0 };
+    }
+    return { matched: true, malformed: true, consumed: 0 };
+  }
+  const next = args[index + 1];
+  if (next === "true" || next === "false") {
+    return { matched: true, value: next === "true", malformed: false, consumed: 1 };
+  }
+  return { matched: true, value: true, malformed: false, consumed: 0 };
+}
+
+// Qwen's temporary system settings route can be superseded by CLI routing and
+// auth flags, while safe/bare modes can discard it entirely. Parse the pinned
+// 0.22.3 spellings before proxy startup. Ambiguous or repeated selectors launch
+// direct: preserving the user's argv is safer than claiming traffic was routed.
+function qwenRouteOverride(agent: AgentProfile, args: string[]): QwenRouteOverride | null {
+  // Qwen 0.22.3 checks raw process.argv before yargs and forces SIMPLE mode
+  // whenever this exact token occurs, even after `--` or beside `false`.
+  if (args.includes("--bare")) return { surface: "--bare", reason: "ignores Caveman system settings" };
+  const modelValues: string[] = [];
+  const fallbackValues: string[] = [];
+  const authValues: string[] = [];
+  const safeValues: boolean[] = [];
+  const bareValues: boolean[] = [];
+  let modelOccurrences = 0;
+  let authOccurrences = 0;
+  let safeMalformed = false;
+  let bareMalformed = false;
+  let modelMalformed = false;
+  let fallbackMalformed = false;
+  let authMalformed = false;
+
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
     if (arg === "--") break;
-    if (arg === `--no-${name}`) {
+
+    if (qwenMatchedOption(arg, ["--openai-api-key", "--openaiApiKey"])) {
+      return { surface: "--openai-api-key", reason: "overrides Caveman's credential route" };
+    }
+    if (qwenMatchedOption(arg, ["--openai-base-url", "--openaiBaseUrl"])) {
+      return { surface: "--openai-base-url", reason: "overrides Caveman's gateway route" };
+    }
+
+    const model = qwenMatchedOption(arg, ["--model", "--m"]);
+    if (model || arg === "-m") {
+      modelOccurrences++;
+      const value = model?.inline ? model.value : args[index + 1];
+      if (typeof value !== "string" || !value || value === "--" || (!model?.inline && value.startsWith("-"))) {
+        modelMalformed = true;
+      } else {
+        modelValues.push(value);
+        if (!model?.inline) index++;
+      }
+      continue;
+    }
+    if (arg.startsWith("-") && !arg.startsWith("--") && arg.slice(1).includes("m")) {
+      if (!arg.startsWith("-m=")) {
+        return { surface: "-m", reason: "is ambiguous inside a short-option cluster" };
+      }
+      modelOccurrences++;
+      const value = arg.slice(3);
+      if (!value) modelMalformed = true;
+      else modelValues.push(value);
+      continue;
+    }
+
+    const fallback = qwenMatchedOption(arg, ["--fallback-model", "--fallbackModel"]);
+    if (fallback) {
+      const raw: string[] = [];
+      if (fallback.inline) {
+        if (fallback.value !== undefined) raw.push(fallback.value);
+      }
+      // yargs arrays consume every following non-option token even when first
+      // value used `=`; all of them participate in the effective fallback list.
+      while (index + 1 < args.length && !args[index + 1]!.startsWith("-")) raw.push(args[++index]!);
+      const values = raw.flatMap((value) => value.split(",").map((item) => item.trim()).filter(Boolean));
+      if (values.length === 0) fallbackMalformed = true;
+      else fallbackValues.push(...values);
+      continue;
+    }
+
+    const auth = qwenMatchedOption(arg, ["--auth-type", "--authType"]);
+    if (auth) {
+      authOccurrences++;
+      const value = auth.inline ? auth.value : args[index + 1];
+      if (typeof value !== "string" || !value || value === "--" || (!auth.inline && value.startsWith("-"))) {
+        authMalformed = true;
+      } else {
+        authValues.push(value);
+        if (!auth.inline) index++;
+      }
+      continue;
+    }
+
+    const safe = qwenBooleanArg(args, index, ["--safe-mode", "--safeMode"], ["--no-safe-mode", "--no-safeMode"]);
+    if (safe.matched) {
+      safeMalformed ||= safe.malformed;
+      if (safe.value !== undefined) safeValues.push(safe.value);
+      index += safe.consumed;
+      continue;
+    }
+    const bare = qwenBooleanArg(args, index, ["--bare"], ["--no-bare"]);
+    if (bare.matched) {
+      bareMalformed ||= bare.malformed;
+      if (bare.value !== undefined) bareValues.push(bare.value);
+      index += bare.consumed;
+    }
+  }
+
+  if (modelMalformed || modelOccurrences > 1 || modelValues.length !== modelOccurrences) {
+    return { surface: "--model", reason: "is repeated or malformed" };
+  }
+  if (fallbackMalformed || fallbackValues.length > 3) {
+    return { surface: "--fallback-model", reason: "is repeated or malformed" };
+  }
+  if (authMalformed || authOccurrences > 1 || authValues.length !== authOccurrences) {
+    return { surface: "--auth-type", reason: "is repeated or malformed" };
+  }
+  if (safeMalformed || safeValues.length > 1) return { surface: "--safe-mode", reason: "is repeated or malformed" };
+  if (bareMalformed || bareValues.length > 1) return { surface: "--bare", reason: "is repeated or malformed" };
+
+  const routedModels = qwenProfileModelIds(agent);
+  if (routedModels.size === 0) return { surface: "routing profile", reason: "has no common local and managed model" };
+  if (modelValues.some((model) => !routedModels.has(model))) {
+    return { surface: "--model", reason: "selects a model outside Caveman's routed profile" };
+  }
+  if (fallbackValues.some((model) => !routedModels.has(model))) {
+    return { surface: "--fallback-model", reason: "selects a model outside Caveman's routed profile" };
+  }
+  if (authValues.some((auth) => auth !== "openai")) {
+    return { surface: "--auth-type", reason: "selects an auth provider outside Caveman's routed profile" };
+  }
+
+  const layers = qwenSettingsLayers();
+  if (!layers) return { surface: "effective settings", reason: "cannot be resolved safely" };
+  const safeEnv = qwenEffectiveEnvValue(layers, "QWEN_CODE_SAFE_MODE");
+  const bareEnv = qwenEffectiveEnvValue(layers, "QWEN_CODE_SIMPLE");
+  if (safeEnv === null || bareEnv === null) return { surface: "effective settings", reason: "cannot be resolved safely" };
+  const truthy = (value: string | undefined) => !!value && ["1", "true", "yes", "on"].includes(value.toLowerCase().trim());
+  const safeMode = safeValues[0] ?? truthy(safeEnv);
+  // Pinned Qwen implements bare mode as CLI-true OR QWEN_CODE_SIMPLE. An
+  // explicit CLI false cannot neutralize an ambient true value.
+  const bareMode = bareValues[0] === true || truthy(bareEnv);
+  if (safeMode) return { surface: "--safe-mode", reason: "ignores Caveman system settings" };
+  if (bareMode) return { surface: "--bare", reason: "ignores Caveman system settings" };
+  return null;
+}
+
+function qwenCliBoolean(args: string[], name: string): boolean | undefined {
+  let value: boolean | undefined;
+  const camel = name.replace(/-([a-z])/g, (_match, char: string) => char.toUpperCase());
+  const names = new Set([name, camel]);
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg === "--") break;
+    if ([...names].some((candidate) => arg === `--no-${candidate}`)) {
       value = false;
       continue;
     }
-    if (arg.startsWith(`--${name}=`)) {
+    const withValue = [...names].find((candidate) => arg.startsWith(`--${candidate}=`));
+    if (withValue) {
       value = arg.slice(arg.indexOf("=") + 1) === "true";
       continue;
     }
-    if (arg !== `--${name}`) continue;
+    if (![...names].some((candidate) => arg === `--${candidate}`)) continue;
     const next = args[index + 1];
     if (next === "true" || next === "false") {
       value = next === "true";
@@ -11350,11 +11562,6 @@ function qwenModeEnabled(args: string[], name: string, envKey: string, layers: J
   const raw = qwenEffectiveEnvValue(layers, envKey);
   if (raw === null) return null;
   return !!raw && ["1", "true", "yes", "on"].includes(raw.toLowerCase().trim());
-}
-
-function qwenSafeModeEnabled(args: string[]): boolean | null {
-  const layers = qwenSettingsLayers();
-  return layers ? qwenModeEnabled(args, "safe-mode", "QWEN_CODE_SAFE_MODE", layers) : null;
 }
 
 function qwenArgsPermitRecovery(args: string[], layers: JsonObject[]): boolean {

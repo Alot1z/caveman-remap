@@ -305,8 +305,13 @@ test("Kilo MCP install is idempotent, marker-owned, upgradeable, and reversible"
       config_path: canonicalTestPath(fx.configPath),
     });
     withEnv({ HOME: fx.env.HOME, CAVEMAN_HOME: fx.env.CAVEMAN_HOME }, () => {
-      const config = JSON.parse(buildWrapEnv(kilo, "http://127.0.0.1:8787", "marker-only").KILO_CONFIG_CONTENT);
-      assert.deepEqual(config.mcp.caveman, { type: "local", command: [fx.mcpV1], enabled: true });
+      const automatic = JSON.parse(buildWrapEnv(kilo, "http://127.0.0.1:8787", "auto").KILO_CONFIG_CONTENT);
+      assert.deepEqual(automatic.mcp.caveman, { type: "local", command: [fx.mcpV1], enabled: true });
+      for (const mode of ["marker-only", "off"]) {
+        const suppressed = JSON.parse(buildWrapEnv(kilo, "http://127.0.0.1:8787", mode).KILO_CONFIG_CONTENT);
+        assert.equal(suppressed.mcp?.caveman, undefined, `${mode} must not project Kilo MCP into the temporary config`);
+      }
+      assert.equal(readFileSync(fx.configPath, "utf8"), firstBytes);
     });
 
     const repeated = await runCli(["mcp", "install", "kilo"], fx.env);

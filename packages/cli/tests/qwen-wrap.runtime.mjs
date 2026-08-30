@@ -901,10 +901,17 @@ test("Qwen MCP install is idempotent, marker-owned, upgradeable, and reversible"
       QWEN_CODE_SYSTEM_DEFAULTS_PATH: fx.env.QWEN_CODE_SYSTEM_DEFAULTS_PATH,
       QWEN_CODE_LEGACY_MCP_BLOCKING: "0",
     }, () => {
-      const wrapped = buildWrapEnv(qwen, "http://127.0.0.1:8787", "marker-only");
-      assert.equal(wrapped.QWEN_CODE_LEGACY_MCP_BLOCKING, "1");
-      const config = readInjected(wrapped).config;
-      assert.deepEqual(config.mcpServers.caveman, { command: fx.mcpV1, args: [] });
+      const automatic = buildWrapEnv(qwen, "http://127.0.0.1:8787", "auto");
+      assert.equal(automatic.QWEN_CODE_LEGACY_MCP_BLOCKING, "1");
+      assert.deepEqual(readInjected(automatic).config.mcpServers.caveman, { command: fx.mcpV1, args: [] });
+      for (const mode of ["marker-only", "off"]) {
+        const suppressed = buildWrapEnv(qwen, "http://127.0.0.1:8787", mode);
+        assert.equal(suppressed.QWEN_CODE_LEGACY_MCP_BLOCKING, "1");
+        const config = readInjected(suppressed).config;
+        assert.equal(config.mcpServers?.caveman, undefined, `${mode} must not project Qwen MCP into the temporary config`);
+        assert.equal(config.mcp?.excluded?.includes("caveman") ?? false, false, `${mode} must not inject Qwen MCP exclusion policy`);
+      }
+      assert.equal(readFileSync(fx.configPath, "utf8"), firstBytes);
     });
 
     const repeated = await runCli(["mcp", "install", "qwen"], fx.env);

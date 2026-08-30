@@ -8632,7 +8632,7 @@ function applyConfigFileInjection(env: NodeJS.ProcessEnv, agent: AgentProfile, i
     env,
     renderOptions,
   );
-  if (agent.id === "qwen") {
+  if (agent.id === "qwen" && mcpMode === "auto") {
     const ownedMcp = ownedMcpRegistration(agent.id, agentArgs);
     if (ownedMcp) {
       // Qwen merges system settings last. Mirror only a still-journaled native
@@ -8797,8 +8797,8 @@ function applyClaudeBedrockWrap(env: NodeJS.ProcessEnv, agent: AgentProfile, ren
 //   - config-env-content: render the mode-selected inline config and set it as one var
 //   - config-file:        merge a mode-selected overlay into a temp config file
 // An unrecognized method falls through to the generic union (fail-open), not a guess.
-// mcpMode governs the config-file arm only (it is the arm that can inject the
-// caveman MCP server). It defaults to "auto" — today's behavior — rather than
+// mcpMode governs every temporary config arm that can inject the caveman MCP
+// server. It defaults to "auto" — today's behavior — rather than
 // resolving config here, so this exported function stays a function of its
 // arguments and cannot pick up the developer's own global config in tests. The
 // one production caller passes the SAME opts.mcpMode that wrapMcpRecoveryAvailable
@@ -8838,7 +8838,7 @@ export function buildWrapEnv(agent?: AgentProfile, gw = gatewayURL(), mcpMode: M
     const cc = inj.config_content;
     const content = wrapMode(gw) === "managed" && cc.managed !== undefined ? cc.managed : cc.local;
     let rendered = renderDeep(content, renderedGw, env);
-    if (agent.id === "kilo") {
+    if (agent.id === "kilo" && mcpMode === "auto") {
       const ownedMcp = ownedMcpRegistration(agent.id, agentArgs);
       if (ownedMcp) {
         // KILO_CONFIG_CONTENT has highest precedence. Project the exact owned

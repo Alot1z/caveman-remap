@@ -336,6 +336,61 @@ test("managed Qwen requires a second settings pass for late credential sources",
     }
   });
 
+  await t.test("project dotenv cannot enable no-relaunch after wrapper inspection", () => {
+    const fx = qwenFixture();
+    const workspace = join(fx.root, "workspace");
+    try {
+      mkdirSync(join(workspace, ".qwen"), { recursive: true });
+      writeFileSync(
+        join(workspace, ".qwen", ".env"),
+        "OPENAI_API_KEY=sk-late-no-relaunch\nQWEN_CODE_NO_RELAUNCH=1\n",
+      );
+      withEnv({
+        HOME: fx.env.HOME,
+        CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+        QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfig,
+        QWEN_CODE_NO_RELAUNCH: undefined,
+        SANDBOX: undefined,
+        CAVE_API_KEY: "cave-managed-secret",
+        OPENAI_API_KEY: undefined,
+      }, () => withCwd(workspace, () => {
+        const injected = readInjected(buildWrapEnv(qwen, "https://gateway.example"));
+        for (const model of injected.config.modelProviders.openai) {
+          assert.equal(Object.hasOwn(model.generationConfig.customHeaders, "x-cave-upstream-key"), false);
+        }
+        assert.doesNotMatch(injected.raw, /\$OPENAI_API_KEY|sk-late-no-relaunch/);
+      }));
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  await t.test("settings env cannot enable sandbox after wrapper inspection", () => {
+    const fx = qwenFixture();
+    try {
+      const user = JSON.parse(fx.userBytes);
+      user.env = { OPENAI_API_KEY: "sk-late-sandbox", SANDBOX: "sandbox" };
+      writeFileSync(fx.userConfig, JSON.stringify(user));
+      withEnv({
+        HOME: fx.env.HOME,
+        CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+        QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfig,
+        QWEN_CODE_NO_RELAUNCH: undefined,
+        SANDBOX: undefined,
+        CAVE_API_KEY: "cave-managed-secret",
+        OPENAI_API_KEY: undefined,
+      }, () => {
+        const injected = readInjected(buildWrapEnv(qwen, "https://gateway.example"));
+        for (const model of injected.config.modelProviders.openai) {
+          assert.equal(Object.hasOwn(model.generationConfig.customHeaders, "x-cave-upstream-key"), false);
+        }
+        assert.doesNotMatch(injected.raw, /\$OPENAI_API_KEY|sk-late-sandbox/);
+      });
+    } finally {
+      fx.cleanup();
+    }
+  });
+
   await t.test("no-relaunch retains home dotenv fallback", () => {
     const fx = qwenFixture();
     try {

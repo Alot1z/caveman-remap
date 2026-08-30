@@ -10979,7 +10979,10 @@ function qwenOpenAIKeyAvailability(value: string | undefined | null): boolean | 
 function qwenEffectiveOpenAIKeyAvailable(): boolean | null {
   const layers = qwenSettingsLayers();
   if (!layers) return null;
-  if (!process.env.QWEN_CODE_NO_RELAUNCH && !process.env.SANDBOX) {
+  const noRelaunch = qwenEffectiveEnvValue(layers, "QWEN_CODE_NO_RELAUNCH");
+  const sandbox = qwenEffectiveEnvValue(layers, "SANDBOX");
+  if (noRelaunch === null || sandbox === null) return null;
+  if (!noRelaunch && !sandbox) {
     return qwenOpenAIKeyAvailability(qwenEffectiveEnvValue(layers, "OPENAI_API_KEY"));
   }
   const fallback = qwenHomeEnvFallback();

@@ -500,7 +500,10 @@ export const PROFILES: AgentProfile[] = [
     "binary_names": [
       "qwen"
     ],
-    "args": [],
+    "args": [
+      "--extensions",
+      "none"
+    ],
     "install": "npm i -g @qwen-code/qwen-code@0.22.3",
     "wire_protocol": "openai-chat",
     "injection": {
@@ -513,6 +516,7 @@ export const PROFILES: AgentProfile[] = [
       },
       "config_overlay": {
         "local": {
+          "providerProtocol": {},
           "modelProviders": {
             "openai": [
               {
@@ -546,11 +550,64 @@ export const PROFILES: AgentProfile[] = [
             }
           },
           "model": {
-            "name": "gpt-5.5"
+            "name": "gpt-5.5",
+            "baseUrl": "{{cave_base_url}}/v1"
           },
-          "modelFallbacks": ""
+          "modelFallbacks": "",
+          "fastModel": "",
+          "advisorModel": "",
+          "visionModel": "",
+          "compactionModel": "",
+          "imageModel": "",
+          "voiceModel": "",
+          "disableAllHooks": true,
+          "tools": {
+            "webSearch": {
+              "enabled": false,
+              "model": ""
+            }
+          },
+          "agents": {
+            "builtin": {
+              "exploreModel": "inherit"
+            },
+            "allowedGrades": []
+          },
+          "permissions": {
+            "deny": [
+              "Agent",
+              "Skill"
+            ]
+          },
+          "skills": {
+            "disabledLevels": [
+              "project",
+              "user",
+              "extension",
+              "bundled"
+            ]
+          },
+          "slashCommands": {
+            "disabled": [
+              "auth",
+              "connect",
+              "login",
+              "model",
+              "arena",
+              "agents",
+              "workflows",
+              "settings",
+              "config",
+              "skills",
+              "voice",
+              "extensions",
+              "hooks",
+              "import-config"
+            ]
+          }
         },
         "managed": {
+          "providerProtocol": {},
           "modelProviders": {
             "openai": [
               {
@@ -586,9 +643,61 @@ export const PROFILES: AgentProfile[] = [
             }
           },
           "model": {
-            "name": "gpt-5.5"
+            "name": "gpt-5.5",
+            "baseUrl": "{{cave_base_url}}/v1"
           },
-          "modelFallbacks": ""
+          "modelFallbacks": "",
+          "fastModel": "",
+          "advisorModel": "",
+          "visionModel": "",
+          "compactionModel": "",
+          "imageModel": "",
+          "voiceModel": "",
+          "disableAllHooks": true,
+          "tools": {
+            "webSearch": {
+              "enabled": false,
+              "model": ""
+            }
+          },
+          "agents": {
+            "builtin": {
+              "exploreModel": "inherit"
+            },
+            "allowedGrades": []
+          },
+          "permissions": {
+            "deny": [
+              "Agent",
+              "Skill"
+            ]
+          },
+          "skills": {
+            "disabledLevels": [
+              "project",
+              "user",
+              "extension",
+              "bundled"
+            ]
+          },
+          "slashCommands": {
+            "disabled": [
+              "auth",
+              "connect",
+              "login",
+              "model",
+              "arena",
+              "agents",
+              "workflows",
+              "settings",
+              "config",
+              "skills",
+              "voice",
+              "extensions",
+              "hooks",
+              "import-config"
+            ]
+          }
         }
       }
     },

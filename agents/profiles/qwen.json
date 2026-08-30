@@ -51,14 +51,20 @@
         "imageModel": "",
         "voiceModel": "",
         "disableAllHooks": true,
-        "tools": { "webSearch": { "enabled": false, "model": "" } },
+        "tools": {
+          "webSearch": { "enabled": false, "model": "" },
+          "workflowsEnabled": false,
+          "disabled": ["agent", "skill", "web_search", "create_sub_session", "workflow"]
+        },
         "agents": { "builtin": { "exploreModel": "inherit" }, "allowedGrades": [] },
-        "permissions": { "deny": ["Agent", "Skill"] },
+        "permissions": { "deny": ["Agent", "Skill", "WebSearch", "CreateSubSession", "Workflow"] },
         "skills": { "disabledLevels": ["project", "user", "extension", "bundled"] },
+        "experimental": { "liveVoice": { "enabled": false, "apiKey": "", "model": "" } },
         "slashCommands": {
           "disabled": [
             "auth", "connect", "login", "model", "arena", "agents", "workflows",
-            "settings", "config", "skills", "voice", "extensions", "hooks", "import-config"
+            "settings", "config", "permissions", "skills", "voice", "extensions", "reload-plugins",
+            "hooks", "mcp", "resume", "continue", "import-config"
           ]
         }
       },
@@ -102,14 +108,20 @@
         "imageModel": "",
         "voiceModel": "",
         "disableAllHooks": true,
-        "tools": { "webSearch": { "enabled": false, "model": "" } },
+        "tools": {
+          "webSearch": { "enabled": false, "model": "" },
+          "workflowsEnabled": false,
+          "disabled": ["agent", "skill", "web_search", "create_sub_session", "workflow"]
+        },
         "agents": { "builtin": { "exploreModel": "inherit" }, "allowedGrades": [] },
-        "permissions": { "deny": ["Agent", "Skill"] },
+        "permissions": { "deny": ["Agent", "Skill", "WebSearch", "CreateSubSession", "Workflow"] },
         "skills": { "disabledLevels": ["project", "user", "extension", "bundled"] },
+        "experimental": { "liveVoice": { "enabled": false, "apiKey": "", "model": "" } },
         "slashCommands": {
           "disabled": [
             "auth", "connect", "login", "model", "arena", "agents", "workflows",
-            "settings", "config", "skills", "voice", "extensions", "hooks", "import-config"
+            "settings", "config", "permissions", "skills", "voice", "extensions", "reload-plugins",
+            "hooks", "mcp", "resume", "continue", "import-config"
           ]
         }
       }

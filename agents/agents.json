@@ -517,7 +517,15 @@
               "webSearch": {
                 "enabled": false,
                 "model": ""
-              }
+              },
+              "workflowsEnabled": false,
+              "disabled": [
+                "agent",
+                "skill",
+                "web_search",
+                "create_sub_session",
+                "workflow"
+              ]
             },
             "agents": {
               "builtin": {
@@ -528,7 +536,10 @@
             "permissions": {
               "deny": [
                 "Agent",
-                "Skill"
+                "Skill",
+                "WebSearch",
+                "CreateSubSession",
+                "Workflow"
               ]
             },
             "skills": {
@@ -538,6 +549,13 @@
                 "extension",
                 "bundled"
               ]
+            },
+            "experimental": {
+              "liveVoice": {
+                "enabled": false,
+                "apiKey": "",
+                "model": ""
+              }
             },
             "slashCommands": {
               "disabled": [
@@ -550,10 +568,15 @@
                 "workflows",
                 "settings",
                 "config",
+                "permissions",
                 "skills",
                 "voice",
                 "extensions",
+                "reload-plugins",
                 "hooks",
+                "mcp",
+                "resume",
+                "continue",
                 "import-config"
               ]
             }
@@ -610,7 +633,15 @@
               "webSearch": {
                 "enabled": false,
                 "model": ""
-              }
+              },
+              "workflowsEnabled": false,
+              "disabled": [
+                "agent",
+                "skill",
+                "web_search",
+                "create_sub_session",
+                "workflow"
+              ]
             },
             "agents": {
               "builtin": {
@@ -621,7 +652,10 @@
             "permissions": {
               "deny": [
                 "Agent",
-                "Skill"
+                "Skill",
+                "WebSearch",
+                "CreateSubSession",
+                "Workflow"
               ]
             },
             "skills": {
@@ -631,6 +665,13 @@
                 "extension",
                 "bundled"
               ]
+            },
+            "experimental": {
+              "liveVoice": {
+                "enabled": false,
+                "apiKey": "",
+                "model": ""
+              }
             },
             "slashCommands": {
               "disabled": [
@@ -643,10 +684,15 @@
                 "workflows",
                 "settings",
                 "config",
+                "permissions",
                 "skills",
                 "voice",
                 "extensions",
+                "reload-plugins",
                 "hooks",
+                "mcp",
+                "resume",
+                "continue",
                 "import-config"
               ]
             }

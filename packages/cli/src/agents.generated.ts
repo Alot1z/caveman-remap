@@ -564,7 +564,15 @@ export const PROFILES: AgentProfile[] = [
             "webSearch": {
               "enabled": false,
               "model": ""
-            }
+            },
+            "workflowsEnabled": false,
+            "disabled": [
+              "agent",
+              "skill",
+              "web_search",
+              "create_sub_session",
+              "workflow"
+            ]
           },
           "agents": {
             "builtin": {
@@ -575,7 +583,10 @@ export const PROFILES: AgentProfile[] = [
           "permissions": {
             "deny": [
               "Agent",
-              "Skill"
+              "Skill",
+              "WebSearch",
+              "CreateSubSession",
+              "Workflow"
             ]
           },
           "skills": {
@@ -585,6 +596,13 @@ export const PROFILES: AgentProfile[] = [
               "extension",
               "bundled"
             ]
+          },
+          "experimental": {
+            "liveVoice": {
+              "enabled": false,
+              "apiKey": "",
+              "model": ""
+            }
           },
           "slashCommands": {
             "disabled": [
@@ -597,10 +615,15 @@ export const PROFILES: AgentProfile[] = [
               "workflows",
               "settings",
               "config",
+              "permissions",
               "skills",
               "voice",
               "extensions",
+              "reload-plugins",
               "hooks",
+              "mcp",
+              "resume",
+              "continue",
               "import-config"
             ]
           }
@@ -657,7 +680,15 @@ export const PROFILES: AgentProfile[] = [
             "webSearch": {
               "enabled": false,
               "model": ""
-            }
+            },
+            "workflowsEnabled": false,
+            "disabled": [
+              "agent",
+              "skill",
+              "web_search",
+              "create_sub_session",
+              "workflow"
+            ]
           },
           "agents": {
             "builtin": {
@@ -668,7 +699,10 @@ export const PROFILES: AgentProfile[] = [
           "permissions": {
             "deny": [
               "Agent",
-              "Skill"
+              "Skill",
+              "WebSearch",
+              "CreateSubSession",
+              "Workflow"
             ]
           },
           "skills": {
@@ -678,6 +712,13 @@ export const PROFILES: AgentProfile[] = [
               "extension",
               "bundled"
             ]
+          },
+          "experimental": {
+            "liveVoice": {
+              "enabled": false,
+              "apiKey": "",
+              "model": ""
+            }
           },
           "slashCommands": {
             "disabled": [
@@ -690,10 +731,15 @@ export const PROFILES: AgentProfile[] = [
               "workflows",
               "settings",
               "config",
+              "permissions",
               "skills",
               "voice",
               "extensions",
+              "reload-plugins",
               "hooks",
+              "mcp",
+              "resume",
+              "continue",
               "import-config"
             ]
           }

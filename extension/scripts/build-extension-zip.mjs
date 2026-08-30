@@ -10,6 +10,14 @@ const CRC_TABLE = Array.from({ length: 256 }, (_, value) => {
   return crc >>> 0;
 });
 
+// Target selection: `chrome` (default) builds from extension/ with its own manifest;
+// `firefox` (#810) stages the SAME shared runtime files flat at the extension root
+// (WebExtensions forbid `../` escapes), then swaps in the Firefox-tuned manifest.
+const target = process.argv[2] ?? "chrome";
+if (!["chrome", "firefox"].includes(target)) {
+  throw new Error(`unknown target "${target}"; expected chrome | firefox`);
+}
+
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = join(root, "dist");
 const stage = join(dist, "stage");
@@ -22,13 +30,17 @@ if (packageJSON.version !== source.manifest.version) {
 rmSync(stage, { recursive: true, force: true });
 mkdirSync(stage, { recursive: true });
 for (const file of SHIPPABLE_FILES) {
-  const target = join(stage, file);
-  mkdirSync(dirname(target), { recursive: true });
-  copyFileSync(join(root, file), target);
+  const targetFile = join(stage, file);
+  mkdirSync(dirname(targetFile), { recursive: true });
+  copyFileSync(join(root, file), targetFile);
+}
+if (target === "firefox") {
+  copyFileSync(join(root, "firefox/manifest.json"), join(stage, "manifest.json"));
 }
 verifyExtensionRoot(stage, { exact: true });
 
-const output = join(dist, `caveman-browser-${source.manifest.version}.zip`);
+const label = target === "firefox" ? "firefox-" : "";
+const output = join(dist, `caveman-browser-${label}${source.manifest.version}.zip`);
 writeFileSync(output, createZip(stage, SHIPPABLE_FILES));
 process.stdout.write(`${output}\n`);
 

@@ -124,6 +124,14 @@ test("profile compiler accepts optional upstream-key reference only as a whole h
   assert.equal(out.status, 0, out.stderr);
 });
 
+test("profile compiler accepts Kilo's closed managed upstream-key header", () => {
+  const out = checkProfile((profile) => {
+    profile.injection.config_content.managed.provider.caveman.options
+      .headers["x-cave-upstream-key"] = "{{cave_optional_openai_key_env}}";
+  }, kiloBase);
+  assert.equal(out.status, 0, out.stderr);
+});
+
 rejects("composed optional upstream-key reference", (profile) => {
   profile.injection.config_overlay.managed.modelProviders.openai[0]
     .generationConfig.customHeaders["x-cave-upstream-key"] = "Bearer {{cave_optional_openai_key_env}}";
@@ -131,7 +139,7 @@ rejects("composed optional upstream-key reference", (profile) => {
 
 rejects("optional upstream-key reference outside its closed header", (profile) => {
   profile.injection.config_overlay.managed.modelProviders.openai[0].apiKey = "{{cave_optional_openai_key_env}}";
-}, /only as Qwen's managed OpenAI provider/, qwenBase);
+}, /only as Qwen or Kilo's closed managed OpenAI provider/, qwenBase);
 
 rejects("optional upstream-key reference for another agent", (profile) => {
   profile.injection = {
@@ -151,12 +159,17 @@ rejects("optional upstream-key reference for another agent", (profile) => {
       },
     },
   };
-}, /only as Qwen's managed OpenAI provider/);
+}, /only as Qwen or Kilo's closed managed OpenAI provider/);
 
 rejects("optional upstream-key reference in Qwen local config", (profile) => {
   profile.injection.config_overlay.local.modelProviders.openai[0]
     .generationConfig.customHeaders["x-cave-upstream-key"] = "{{cave_optional_openai_key_env}}";
-}, /only as Qwen's managed OpenAI provider/, qwenBase);
+}, /only as Qwen or Kilo's closed managed OpenAI provider/, qwenBase);
+
+rejects("optional upstream-key reference in Kilo local config", (profile) => {
+  profile.injection.config_content.local.provider.caveman.options
+    .headers["x-cave-upstream-key"] = "{{cave_optional_openai_key_env}}";
+}, /only as Qwen or Kilo's closed managed OpenAI provider/, kiloBase);
 
 rejects("optional upstream-key reference through a path-shaped JSON key", (profile) => {
   profile.injection.config_overlay = {
@@ -164,7 +177,7 @@ rejects("optional upstream-key reference through a path-shaped JSON key", (profi
       "managed.modelProviders.openai[0].generationConfig.customHeaders.x-cave-upstream-key": "{{cave_optional_openai_key_env}}",
     },
   };
-}, /only as Qwen's managed OpenAI provider/, qwenBase);
+}, /only as Qwen or Kilo's closed managed OpenAI provider/, qwenBase);
 
 rejects("literal nested gateway URL", (profile) => {
   profile.injection = {

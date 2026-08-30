@@ -128,7 +128,7 @@ function validateKnownKeys(value, allowed, need, label) {
 }
 
 function optionalOpenAIKeyEnvPathAllowed(profileId, segments) {
-  return profileId === "qwen"
+  const qwenManagedHeader = profileId === "qwen"
     && segments.length === 9
     && segments[0] === "injection"
     && segments[1] === "config_overlay"
@@ -139,6 +139,17 @@ function optionalOpenAIKeyEnvPathAllowed(profileId, segments) {
     && segments[6] === "generationConfig"
     && segments[7] === "customHeaders"
     && segments[8] === "x-cave-upstream-key";
+  const kiloManagedHeader = profileId === "kilo"
+    && segments.length === 8
+    && segments[0] === "injection"
+    && segments[1] === "config_content"
+    && segments[2] === "managed"
+    && segments[3] === "provider"
+    && segments[4] === "caveman"
+    && segments[5] === "options"
+    && segments[6] === "headers"
+    && segments[7] === "x-cave-upstream-key";
+  return qwenManagedHeader || kiloManagedHeader;
 }
 
 function validateConfigStrings(value, need, path = "injection config", profileId = "", segments = []) {
@@ -152,7 +163,7 @@ function validateConfigStrings(value, need, path = "injection config", profileId
       need(value === OPTIONAL_OPENAI_KEY_ENV_TEMPLATE, `${path} must use ${OPTIONAL_OPENAI_KEY_ENV_TEMPLATE} as the entire value`);
       need(
         optionalOpenAIKeyEnvPathAllowed(profileId, segments),
-        `${path} may use ${OPTIONAL_OPENAI_KEY_ENV_TEMPLATE} only as Qwen's managed OpenAI provider x-cave-upstream-key`,
+        `${path} may use ${OPTIONAL_OPENAI_KEY_ENV_TEMPLATE} only as Qwen or Kilo's closed managed OpenAI provider x-cave-upstream-key`,
       );
       return;
     }

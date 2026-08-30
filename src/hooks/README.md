@@ -52,6 +52,7 @@ since it is an explicit user reset.
 - Writes the active mode for **this session** when a caveman command is detected; on deactivation it stores a durable `off` and clears the legacy mirror
 - Emits a small per-turn reinforcement reminder when the session's mode is a non-independent one (`lite`/`full`/`ultra`/`wenyan*`)
 - Remembers the displaced prose mode per session, so two windows each running `/caveman-commit` return to their own level
+- `/caveman-measure` runs the L4 auto-measure runtime (`l4/caveman-l4.mjs`): measures the live transcript and returns an idempotent, watermark-guarded JSON receipt (never inflates an already-measured session)
 - Supports: `lite`, `full`, `ultra`, `wenyan`, `wenyan-lite`, `wenyan-full`, `wenyan-ultra`, `commit`, `review`, `compress`
 
 ### `caveman-statusline.sh` / `caveman-statusline.ps1` — Statusline badge script
@@ -216,6 +217,7 @@ since it is an explicit user reset.
 - Writes the active mode for **this session** when a caveman command is detected; on deactivation it stores a durable `off` and clears the legacy mirror
 - Emits a small per-turn reinforcement reminder when the session's mode is a non-independent one (`lite`/`full`/`ultra`/`wenyan*`)
 - Remembers the displaced prose mode per session, so two windows each running `/caveman-commit` return to their own level
+- `/caveman-measure` runs the L4 auto-measure runtime (`l4/caveman-l4.mjs`): measures the live transcript and returns an idempotent, watermark-guarded JSON receipt (never inflates an already-measured session)
 - Supports: `lite`, `full`, `ultra`, `wenyan`, `wenyan-lite`, `wenyan-full`, `wenyan-ultra`, `commit`, `review`, `compress`
 
 ### `caveman-statusline.sh` / `caveman-statusline.ps1` — Statusline badge script

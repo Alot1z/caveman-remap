@@ -4529,17 +4529,17 @@ async function wrap(rest: string[]) {
     console.error("caveman wrap: --pixel not yet supported for codex subscription sessions");
     process.exit(1);
   }
-  // Route-changing Qwen flags intentionally bypass Caveman. Decide before any
+  // Route-changing agent flags intentionally bypass Caveman. Decide before any
   // first-run install, proxy bootstrap, or welcome work so a direct launch has
   // no Caveman side effects beyond its explicit warning.
-  const qwenDirect = agent?.id === "qwen" ? qwenRouteOverride(agent, extra) : null;
-  if (!qwenDirect) {
+  const routeDecision = agent ? agentRouteOverride(agent, extra) : null;
+  if (!routeDecision) {
     await bootstrapLocalWrapRuntime(parsed);
     await firstRunExperience();
   }
   // `wrap` is a zero-commit trial. Native hooks/MCP/config live only in a temp
   // host pack for this child; persistent integration requires an explicit install.
-  await runWrapped(resolved, extra, agent, parsed, codexAuthMode === "subscription", qwenDirect);
+  await runWrapped(resolved, extra, agent, parsed, codexAuthMode === "subscription", routeDecision);
 }
 
 // ===========================================================================
@@ -5104,8 +5104,8 @@ async function agentShortcut(rest: string[]) {
 // is the one-command compression path. If the proxy can't be reached, a TTY run
 // offers to launch the agent directly (no Caveman, no compression this run) rather
 // than wire it to a dead endpoint; non-TTY runs warn and route through as before.
-async function runWrapped(bin: string, cmdArgs: string[], agent?: AgentProfile, opts: WrapOptions = { mode: "compress", noProxy: false, toon: true, noShrink: false, mcpMode: "auto", noBrowse: false, delegate: false, minimal: false, command: [] }, codexSubscription = false, qwenRouteDecision?: QwenRouteOverride | null) {
-  const result = await spawnWrapped(bin, cmdArgs, agent, opts, gatewayURL(), codexSubscription, qwenRouteDecision);
+async function runWrapped(bin: string, cmdArgs: string[], agent?: AgentProfile, opts: WrapOptions = { mode: "compress", noProxy: false, toon: true, noShrink: false, mcpMode: "auto", noBrowse: false, delegate: false, minimal: false, command: [] }, codexSubscription = false, routeDecision?: AgentRouteOverride | null) {
+  const result = await spawnWrapped(bin, cmdArgs, agent, opts, gatewayURL(), codexSubscription, routeDecision);
   // Preflight route bypass is intentionally outside Caveman's lifecycle: no
   // savings read, sync, telemetry, or other post-child mutation.
   if (result.routeBypass) process.exit(result.code);
@@ -5169,7 +5169,7 @@ async function spawnWrapped(
   opts: WrapOptions,
   gw: string,
   codexSubscription = false,
-  qwenRouteDecision?: QwenRouteOverride | null,
+  routeDecision?: AgentRouteOverride | null,
 ): Promise<{ code: number; proxyStarted: boolean; routeBypass: boolean; sessionStart?: string | undefined; summaryKind?: "observe" | "compress" | undefined }> {
   const { host, port } = gatewayHostPort(gw);
   const local = wrapMode(gw) === "local";
@@ -5181,16 +5181,16 @@ async function spawnWrapped(
   const managedGeminiUnsupported = !local && agent?.id === "gemini";
   // `wrap` resolves this before first-run work and passes even a null decision.
   // Other callers resolve here. Never reread mutable settings across that boundary.
-  const qwenOverride = agent?.id === "qwen"
-    ? qwenRouteDecision === undefined ? qwenRouteOverride(agent, cmdArgs) : qwenRouteDecision
+  const routeOverride = agent
+    ? routeDecision === undefined ? agentRouteOverride(agent, cmdArgs) : routeDecision
     : null;
-  const routeBypass = qwenOverride !== null;
-  let direct = managedGeminiUnsupported || qwenOverride !== null;
+  const routeBypass = routeOverride !== null;
+  let direct = managedGeminiUnsupported || routeOverride !== null;
   if (managedGeminiUnsupported) {
     process.stderr.write("caveman: managed Gemini CLI wrap is unsupported because Gemini CLI cannot send separate Caveman and upstream credentials; launching directly\n");
   }
-  if (qwenOverride) {
-    process.stderr.write(`caveman: Qwen ${qwenOverride.surface} ${qwenOverride.reason}; launching directly\n`);
+  if (routeOverride && agent) {
+    process.stderr.write(`caveman: ${routeOverrideLabel(agent)} ${routeOverride.surface} ${routeOverride.reason}; launching directly\n`);
   }
   // The local proxy compresses with no account. When wrap runs the LOCAL
   // proxy path we resolve the mode; managed gateway traffic is governed by the cloud
@@ -5739,7 +5739,10 @@ function renderTemplate(s: string, gw = gatewayURL()): string {
 }
 
 const OPTIONAL_OPENAI_KEY_ENV_TEMPLATE = "{{cave_optional_openai_key_env}}";
-type RenderDeepOptions = { optionalOpenAIKeyEnvAvailable?: boolean };
+type RenderDeepOptions = {
+  optionalOpenAIKeyEnvAvailable?: boolean;
+  optionalOpenAIKeyReference?: "$OPENAI_API_KEY" | "{env:OPENAI_API_KEY}";
+};
 
 // renderDeep applies renderTemplate to every string leaf of a JSON value — used to
 // render an agent's inline-config template before it is stringified into an env var.
@@ -5750,7 +5753,9 @@ function renderDeep(v: unknown, gw = gatewayURL(), env: NodeJS.ProcessEnv = proc
   if (v === OPTIONAL_OPENAI_KEY_ENV_TEMPLATE) {
     const key = env.OPENAI_API_KEY;
     const inherited = typeof key === "string" && !!key.trim() && !/[\r\n]/.test(key);
-    return (options.optionalOpenAIKeyEnvAvailable ?? inherited) ? "$OPENAI_API_KEY" : undefined;
+    return (options.optionalOpenAIKeyEnvAvailable ?? inherited)
+      ? options.optionalOpenAIKeyReference ?? "$OPENAI_API_KEY"
+      : undefined;
   }
   if (typeof v === "string") return renderTemplate(v, gw);
   if (Array.isArray(v)) {
@@ -8838,16 +8843,17 @@ export function buildWrapEnv(agent?: AgentProfile, gw = gatewayURL(), mcpMode: M
   }
   if (!agent) return env;
   if (applyClaudeBedrockWrap(env, agent, renderedGw, gw)) return env;
+  const routeOverride = agentRouteOverride(agent, agentArgs);
   if (agent.id === "qwen") {
-    const override = qwenRouteOverride(agent, agentArgs);
+    const override = routeOverride;
     if (override?.surface === "effective settings") {
       throw new Error("cannot safely resolve Qwen's effective settings");
     }
     if (override?.surface === "--safe-mode" && override.reason === "ignores Caveman system settings") {
       throw new Error("Qwen safe mode ignores Caveman system settings");
     }
-    if (override) throw new Error(`Qwen ${override.surface} ${override.reason}`);
   }
+  if (routeOverride) throw new Error(`${routeOverrideLabel(agent)} ${routeOverride.surface} ${routeOverride.reason}`);
   const inj = agent.injection;
   if (inj.method === "env") {
     for (const [k, raw] of Object.entries(inj.env)) {
@@ -8857,7 +8863,10 @@ export function buildWrapEnv(agent?: AgentProfile, gw = gatewayURL(), mcpMode: M
   } else if (inj.method === "config-env-content") {
     const cc = inj.config_content;
     const content = wrapMode(gw) === "managed" && cc.managed !== undefined ? cc.managed : cc.local;
-    let rendered = renderDeep(content, renderedGw, env);
+    const renderOptions: RenderDeepOptions = agent.id === "kilo"
+      ? { optionalOpenAIKeyReference: "{env:OPENAI_API_KEY}" }
+      : {};
+    let rendered = renderDeep(content, renderedGw, env, renderOptions);
     if (agent.id === "kilo" && mcpMode === "auto") {
       const ownedMcp = ownedMcpRegistration(agent.id, agentArgs);
       if (ownedMcp) {
@@ -11339,13 +11348,78 @@ function qwenEffectiveOpenAIKeyAvailable(): boolean | null {
   return qwenOpenAIKeyAvailability(typeof inherited === "string" ? inherited : fallback.OPENAI_API_KEY);
 }
 
-type QwenRouteOverride = { surface: string; reason: string };
+type AgentRouteOverride = { surface: string; reason: string };
 type QwenMatchedOption = { inline: boolean; value?: string };
 
 function qwenMatchedOption(arg: string, names: readonly string[]): QwenMatchedOption | null {
   for (const name of names) {
     if (arg === name) return { inline: false };
     if (arg.startsWith(`${name}=`)) return { inline: true, value: arg.slice(name.length + 1) };
+  }
+  return null;
+}
+
+function kiloProfileModelIds(agent: AgentProfile): Set<string> {
+  if (agent.id !== "kilo" || agent.injection.method !== "config-env-content") return new Set();
+  const contents = [agent.injection.config_content.local, agent.injection.config_content.managed ?? agent.injection.config_content.local];
+  let shared: Set<string> | undefined;
+  for (const content of contents) {
+    const enabled = jsonValueAt(content, ["enabled_providers"]);
+    const models = jsonValueAt(content, ["provider", "caveman", "models"]);
+    if (!Array.isArray(enabled) || enabled.length !== 1 || enabled[0] !== "caveman"
+      || !models || typeof models !== "object" || Array.isArray(models)) return new Set();
+    const ids = new Set(Object.keys(models).filter((id) => id && id.trim() === id).map((id) => `caveman/${id}`));
+    shared = shared === undefined ? ids : new Set([...shared].filter((id) => ids.has(id)));
+  }
+  return shared ?? new Set();
+}
+
+// Kilo's inline config selects a routed default, but its CLI model option has
+// higher precedence and attach mode delegates inference to another server whose
+// environment this process cannot control. Detect both before proxy/bootstrap
+// work. Unknown short-option clusters fail direct instead of guessing yargs.
+function kiloRouteOverride(agent: AgentProfile, args: string[]): AgentRouteOverride | null {
+  const separator = args.indexOf("--");
+  const parsedArgs = separator === -1 ? args : args.slice(0, separator);
+  const runIndex = parsedArgs.indexOf("run");
+  for (const command of ["attach", "cloud", "roll-call"] as const) {
+    const commandIndex = parsedArgs.indexOf(command);
+    if (commandIndex !== -1 && (runIndex === -1 || commandIndex < runIndex)) {
+      const reason = command === "attach"
+        ? "uses another server's provider route"
+        : "runs outside Kilo's local single-model route";
+      return { surface: command, reason };
+    }
+  }
+
+  let modelValue: string | undefined;
+  let modelOccurrences = 0;
+  for (let index = 0; index < parsedArgs.length; index++) {
+    const arg = parsedArgs[index]!;
+    if (arg === "--attach" || arg.startsWith("--attach=")) {
+      return { surface: "--attach", reason: "uses another server's provider route" };
+    }
+    const model = qwenMatchedOption(arg, ["--model", "--m", "-m"]);
+    if (model) {
+      modelOccurrences++;
+      const value = model?.inline ? model.value : parsedArgs[index + 1];
+      if (typeof value !== "string" || !value || value.startsWith("-")) {
+        return { surface: "--model", reason: "is repeated or malformed" };
+      }
+      modelValue = value;
+      if (!model?.inline) index++;
+      continue;
+    }
+    if (arg.startsWith("-") && !arg.startsWith("--") && arg.slice(1).includes("m")) {
+      return { surface: "-m", reason: "is ambiguous inside a short-option cluster" };
+    }
+  }
+  if (modelOccurrences > 1) return { surface: "--model", reason: "is repeated or malformed" };
+
+  const routedModels = kiloProfileModelIds(agent);
+  if (routedModels.size === 0) return { surface: "routing profile", reason: "does not confine Kilo to Caveman providers" };
+  if (modelValue !== undefined && !routedModels.has(modelValue)) {
+    return { surface: "--model", reason: "selects a model outside Caveman's routed profile" };
   }
   return null;
 }
@@ -11395,7 +11469,7 @@ function qwenBooleanArg(
 // auth flags, while safe/bare modes can discard it entirely. Parse the pinned
 // 0.22.3 spellings before proxy startup. Ambiguous or repeated selectors launch
 // direct: preserving the user's argv is safer than claiming traffic was routed.
-function qwenRouteOverride(agent: AgentProfile, args: string[]): QwenRouteOverride | null {
+function qwenRouteOverride(agent: AgentProfile, args: string[]): AgentRouteOverride | null {
   // Qwen 0.22.3 checks raw process.argv before yargs and forces SIMPLE mode
   // whenever this exact token occurs, even after `--` or beside `false`.
   if (args.includes("--bare")) return { surface: "--bare", reason: "ignores Caveman system settings" };
@@ -11526,6 +11600,18 @@ function qwenRouteOverride(agent: AgentProfile, args: string[]): QwenRouteOverri
   if (safeMode) return { surface: "--safe-mode", reason: "ignores Caveman system settings" };
   if (bareMode) return { surface: "--bare", reason: "ignores Caveman system settings" };
   return null;
+}
+
+function agentRouteOverride(agent: AgentProfile, args: string[]): AgentRouteOverride | null {
+  if (agent.id === "kilo") return kiloRouteOverride(agent, args);
+  if (agent.id === "qwen") return qwenRouteOverride(agent, args);
+  return null;
+}
+
+function routeOverrideLabel(agent: AgentProfile): string {
+  if (agent.id === "qwen") return "Qwen";
+  if (agent.id === "kilo") return "Kilo";
+  return agent.display_name;
 }
 
 function qwenCliBoolean(args: string[], name: string): boolean | undefined {

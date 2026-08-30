@@ -41,6 +41,19 @@ caveman pi
 package. Both launch the same `kilo` profile. CLI wrapping does not reconfigure
 an already-running Kilo editor extension.
 
+Install the verified Kilo CLI version before using either shortcut:
+
+```bash
+npm install -g @kilocode/cli@7.5.6
+caveman kilo
+```
+
+The wrapper confines Kilo's active providers to the injected `caveman` provider.
+An explicit non-Caveman `--model`/`--m`/`-m`, top-level `attach`, `cloud`, or
+`roll-call`, or `run --attach` launches directly with a warning. Attached and cloud
+sessions execute outside Kilo's local routed process; `roll-call` deliberately spans
+models instead of honoring one routed model.
+
 Install Qwen Code's CLI before using its shortcut:
 
 ```bash

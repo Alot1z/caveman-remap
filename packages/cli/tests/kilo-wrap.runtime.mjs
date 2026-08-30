@@ -181,7 +181,12 @@ function writePendingMcpUninstall(agent, markerPath, configPath, configBefore, c
   return { adjacentPath, journal, locatorPath };
 }
 
-function runKiloAlias(invokedAs, installedBinary) {
+function runKiloAlias(
+  invokedAs,
+  installedBinary,
+  agentArgs = ["run", "hello", "--model", "caveman/gpt-5.5"],
+  options = {},
+) {
   const root = mkdtempSync(join(tmpdir(), `cave-${invokedAs}-`));
   const home = join(root, "home");
   const binDir = join(root, "bin");
@@ -192,11 +197,14 @@ function runKiloAlias(invokedAs, installedBinary) {
 
   const sentinel = '{"theme":"caveman-test","provider":{"custom":true}}\n';
   const userConfig = join(configDir, "kilo.json");
+  const proxy = join(root, "caveman-proxy-sentinel");
+  const proxySentinel = join(root, "proxy-was-started");
   writeFileSync(userConfig, sentinel);
   writeFileSync(
     join(home, ".caveman-cloud", "config.json"),
-    JSON.stringify({ wrap: { proxy: false, shrink: false, mcp: false, browse: false } }),
+    JSON.stringify({ wrap: { proxy: options.proxy === true, shrink: false, mcp: false, browse: false } }),
   );
+  writeFileSync(proxy, `#!/bin/sh\nprintf invoked > ${JSON.stringify(proxySentinel)}\nexit 1\n`, { mode: 0o755 });
   writeFileSync(
     join(binDir, installedBinary),
     `#!/usr/bin/env node
@@ -215,13 +223,15 @@ process.stdout.write(JSON.stringify({
     CAVEMAN_HOME: home,
     PATH: `${binDir}:${process.env.PATH}`,
     OPENAI_API_KEY: "sk-kilo-upstream-test",
+    CAVEMAN_PROXY_BIN: proxy,
     NO_COLOR: "1",
+    ...options.env,
   };
   delete env.CAVE_GATEWAY_URL;
   delete env.CAVE_API_KEY;
 
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [cli, invokedAs, "run", "hello", "--model", "openai/test"], { env });
+    const child = spawn(process.execPath, [cli, invokedAs, ...agentArgs], { env });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk));
@@ -229,8 +239,9 @@ process.stdout.write(JSON.stringify({
     child.on("error", reject);
     child.on("exit", (code, signal) => {
       const userConfigAfter = readFileSync(userConfig, "utf8");
+      const proxyStarted = existsSync(proxySentinel);
       rmSync(root, { recursive: true, force: true });
-      resolve({ code, signal, stdout, stderr, userConfigAfter, sentinel });
+      resolve({ code, signal, stdout, stderr, userConfigAfter, sentinel, proxyStarted });
     });
   });
 }
@@ -238,8 +249,12 @@ process.stdout.write(JSON.stringify({
 test("Kilo profile exposes both published CLI binaries", () => {
   assert.deepEqual(kilo.binary_names, ["kilo", "kilocode"]);
   assert.equal(kilo.tested_agent_version, "7.5.6");
+  assert.equal(kilo.install, "npm install -g @kilocode/cli@7.5.6");
   assert.equal(kilo.injection.method, "config-env-content");
   assert.equal(kilo.injection.env_var, "KILO_CONFIG_CONTENT");
+  for (const content of [kilo.injection.config_content.local, kilo.injection.config_content.managed]) {
+    assert.deepEqual(content.enabled_providers, ["caveman"]);
+  }
 });
 
 for (const binary of ["kilo", "kilocode"]) {
@@ -247,7 +262,7 @@ for (const binary of ["kilo", "kilocode"]) {
     const out = await runKiloAlias(binary, binary);
     assert.equal(out.code, 0, `exit ${out.code}/${out.signal}: ${out.stderr}`);
     const child = JSON.parse(out.stdout);
-    assert.deepEqual(child.argv, ["run", "hello", "--model", "openai/test"]);
+    assert.deepEqual(child.argv, ["run", "hello", "--model", "caveman/gpt-5.5"]);
     assert.equal(child.openaiKey, "sk-kilo-upstream-test");
 
     const config = JSON.parse(child.config);
@@ -255,9 +270,86 @@ for (const binary of ["kilo", "kilocode"]) {
     assert.equal(config.provider.caveman.options.apiKey, "{env:OPENAI_API_KEY}");
     assert.equal(config.provider.caveman.options.headers["X-Cave-Agent"], "kilo");
     assert.equal(config.model, "caveman/gpt-5.5");
+    assert.deepEqual(config.enabled_providers, ["caveman"]);
     assert.equal(out.userConfigAfter, out.sentinel);
   });
 }
+
+test("Kilo route guard accepts profile-backed model spellings", async (t) => {
+  for (const fixture of [
+    { name: "long equals", args: ["run", "--model=caveman/gpt-5.4-mini", "hello"] },
+    { name: "long alias spaced", args: ["run", "--m", "caveman/gpt-5.5", "hello"] },
+    { name: "long alias equals", args: ["run", "--m=caveman/gpt-5.4-mini", "hello"] },
+    { name: "short spaced", args: ["run", "-m", "caveman/gpt-5.5", "hello"] },
+    { name: "short equals", args: ["-m=caveman/gpt-5.4-mini", "run", "hello"] },
+    { name: "global model before command", args: ["--model", "caveman/gpt-5.5", "run", "hello"] },
+  ]) {
+    await t.test(fixture.name, async () => {
+      const out = await runKiloAlias("kilo", "kilo", fixture.args);
+      assert.equal(out.code, 0, out.stderr);
+      const child = JSON.parse(out.stdout);
+      assert.deepEqual(child.argv, fixture.args);
+      assert.equal(JSON.parse(child.config).model, "caveman/gpt-5.5");
+      assert.doesNotMatch(out.stderr, /launching directly/);
+    });
+  }
+});
+
+test("Kilo route guard launches direct for model and attach bypasses", async (t) => {
+  const fixtures = [
+    { name: "foreign model", surface: "--model", args: ["run", "hello", "--model", "openai/test"] },
+    { name: "foreign short model", surface: "--model", args: ["run", "-m", "openai/test", "hello"] },
+    { name: "foreign long alias", surface: "--model", args: ["run", "--m=openai/test", "hello"] },
+    { name: "foreign short equals", surface: "--model", args: ["run", "-m=openai/test", "hello"] },
+    { name: "ambiguous attached model", surface: "-m", args: ["run", "-mopenai/test", "hello"] },
+    { name: "repeated model", surface: "--model", args: ["run", "--model", "caveman/gpt-5.5", "--model=caveman/gpt-5.4-mini"] },
+    { name: "repeated alias", surface: "--model", args: ["run", "--m", "caveman/gpt-5.5", "--m=caveman/gpt-5.4-mini"] },
+    { name: "missing model", surface: "--model", args: ["run", "hello", "--model"] },
+    { name: "missing alias", surface: "--model", args: ["run", "hello", "--m"] },
+    { name: "top-level attach", surface: "attach", args: ["attach", "https://remote.example/session"] },
+    { name: "run attach", surface: "--attach", args: ["run", "--attach", "https://remote.example/session", "hello"] },
+    { name: "run attach equals", surface: "--attach", args: ["run", "--attach=https://remote.example/session", "hello"] },
+    { name: "cloud agent", surface: "cloud", args: ["--print-logs", "cloud", "run", "task"] },
+    { name: "roll call", surface: "roll-call", args: ["roll-call", "gpt"] },
+  ];
+  for (const fixture of fixtures) {
+    await t.test(fixture.name, async () => {
+      const out = await runKiloAlias("kilo", "kilo", fixture.args, {
+        proxy: true,
+        env: { KILO_CONFIG_CONTENT: undefined },
+      });
+      assert.equal(out.code, 0, `exit ${out.code}/${out.signal}: ${out.stderr}`);
+      const child = JSON.parse(out.stdout);
+      assert.deepEqual(child.argv, fixture.args);
+      assert.equal(child.config, "");
+      assert.equal(out.proxyStarted, false);
+      assert.ok(out.stderr.includes(`Kilo ${fixture.surface}`), out.stderr);
+      assert.match(out.stderr, /launching directly/);
+      assert.doesNotMatch(out.stderr, /openai\/test|remote\.example/);
+    });
+  }
+});
+
+test("Kilo route guard ignores model-looking arguments after separator", async () => {
+  const args = ["run", "hello", "--", "--model", "openai/test"];
+  const out = await runKiloAlias("kilo", "kilo", args);
+  assert.equal(out.code, 0, out.stderr);
+  const child = JSON.parse(out.stdout);
+  assert.deepEqual(child.argv, args);
+  assert.equal(JSON.parse(child.config).model, "caveman/gpt-5.5");
+  assert.doesNotMatch(out.stderr, /launching directly/);
+});
+
+test("Kilo route guard fails closed when called through buildWrapEnv", () => {
+  assert.throws(
+    () => buildWrapEnv(kilo, "http://127.0.0.1:8787", "auto", ["run", "--model", "openai/test"]),
+    /Kilo --model selects a model outside Caveman's routed profile/,
+  );
+  assert.throws(
+    () => buildWrapEnv(kilo, "http://127.0.0.1:8787", "auto", ["attach", "https:\/\/remote.example\/session"]),
+    /Kilo attach uses another server's provider route/,
+  );
+});
 
 test("managed Kilo config keeps gateway and upstream credentials separate", () => {
   const previousCaveKey = process.env.CAVE_API_KEY;
@@ -274,6 +366,7 @@ test("managed Kilo config keeps gateway and upstream credentials separate", () =
     assert.equal(options.apiKey, "{env:CAVE_API_KEY}");
     assert.equal(options.headers["x-cave-upstream-key"], "{env:OPENAI_API_KEY}");
     assert.equal(options.headers["X-Cave-Agent"], "kilo");
+    assert.deepEqual(config.enabled_providers, ["caveman"]);
     assert.doesNotMatch(raw, /cave_gateway_secret|sk_upstream_secret/);
   } finally {
     if (previousCaveKey === undefined) delete process.env.CAVE_API_KEY;
@@ -281,6 +374,16 @@ test("managed Kilo config keeps gateway and upstream credentials separate", () =
     if (previousOpenAIKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = previousOpenAIKey;
   }
+});
+
+test("managed Kilo omits upstream header when no OpenAI credential is inherited", () => {
+  withEnv({ CAVE_API_KEY: "cave_gateway_secret", OPENAI_API_KEY: undefined }, () => {
+    const raw = buildWrapEnv(kilo, "https://gateway.example").KILO_CONFIG_CONTENT;
+    assert.ok(raw);
+    const headers = JSON.parse(raw).provider.caveman.options.headers;
+    assert.equal(Object.hasOwn(headers, "x-cave-upstream-key"), false);
+    assert.doesNotMatch(raw, /cave_optional_openai_key_env|OPENAI_API_KEY/);
+  });
 });
 
 test("Kilo MCP install is idempotent, marker-owned, upgradeable, and reversible", async () => {

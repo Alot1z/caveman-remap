@@ -5692,14 +5692,26 @@ function renderTemplate(s: string, gw = gatewayURL()): string {
     .replaceAll("{{cave_org_id}}", orgIdFromConfigFile());
 }
 
+const OPTIONAL_OPENAI_KEY_ENV_TEMPLATE = "{{cave_optional_openai_key_env}}";
+
 // renderDeep applies renderTemplate to every string leaf of a JSON value — used to
 // render an agent's inline-config template before it is stringified into an env var.
-function renderDeep(v: unknown, gw = gatewayURL()): unknown {
+// Optional credential references disappear as whole object properties when their
+// source variable is unavailable. Secrets never enter generated JSON: the retained
+// value is the agent-native `$OPENAI_API_KEY` reference, not its expansion.
+function renderDeep(v: unknown, gw = gatewayURL(), env: NodeJS.ProcessEnv = process.env): unknown {
+  if (v === OPTIONAL_OPENAI_KEY_ENV_TEMPLATE) {
+    const key = env.OPENAI_API_KEY;
+    return typeof key === "string" && key.trim() && !/[\r\n]/.test(key) ? "$OPENAI_API_KEY" : undefined;
+  }
   if (typeof v === "string") return renderTemplate(v, gw);
-  if (Array.isArray(v)) return v.map((item) => renderDeep(item, gw));
+  if (Array.isArray(v)) return v.map((item) => renderDeep(item, gw, env)).filter((item) => item !== undefined);
   if (v && typeof v === "object") {
     const out: Record<string, unknown> = {};
-    for (const [k, val] of Object.entries(v as Record<string, unknown>)) out[k] = renderDeep(val, gw);
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      const rendered = renderDeep(val, gw, env);
+      if (rendered !== undefined) out[k] = rendered;
+    }
     return out;
   }
   return v;
@@ -8385,7 +8397,7 @@ function applyConfigFileInjection(env: NodeJS.ProcessEnv, agent: AgentProfile, i
   const mode = wrapMode(modeGw);
   const staticOverlay = mode === "managed" && inj.config_overlay.managed !== undefined ? inj.config_overlay.managed : inj.config_overlay.local;
   const builder = overlayBuilders[agent.id];
-  let rawOverlay = renderDeep(builder ? builder(agent, baseConfig, { mode, gatewayUrl: gw, env }) : staticOverlay, gw);
+  let rawOverlay = renderDeep(builder ? builder(agent, baseConfig, { mode, gatewayUrl: gw, env }) : staticOverlay, gw, env);
   if (agent.id === "qwen") {
     const ownedMcp = ownedMcpRegistration(agent.id, agentArgs);
     if (ownedMcp) {
@@ -8587,7 +8599,7 @@ export function buildWrapEnv(agent?: AgentProfile, gw = gatewayURL(), mcpMode: M
   } else if (inj.method === "config-env-content") {
     const cc = inj.config_content;
     const content = wrapMode(gw) === "managed" && cc.managed !== undefined ? cc.managed : cc.local;
-    let rendered = renderDeep(content, renderedGw);
+    let rendered = renderDeep(content, renderedGw, env);
     if (agent.id === "kilo") {
       const ownedMcp = ownedMcpRegistration(agent.id, agentArgs);
       if (ownedMcp) {

@@ -72,6 +72,44 @@ rejects("unknown top-level key", (profile) => {
   profile.typo_field = true;
 }, /unknown top-level key "typo_field"/);
 
+test("profile compiler accepts optional upstream-key reference only as a whole header value", () => {
+  const out = checkProfile((profile) => {
+    profile.injection = {
+      method: "config-file",
+      env_var: "CLAUDE_CONFIG_PATH",
+      base_config: { path: "~/.claude/settings.json" },
+      config_overlay: {
+        local: {
+          generationConfig: {
+            customHeaders: { "x-cave-upstream-key": "{{cave_optional_openai_key_env}}" },
+          },
+        },
+      },
+    };
+  });
+  assert.equal(out.status, 0, out.stderr);
+});
+
+rejects("composed optional upstream-key reference", (profile) => {
+  profile.injection = {
+    method: "config-file",
+    env_var: "CLAUDE_CONFIG_PATH",
+    base_config: { path: "~/.claude/settings.json" },
+    config_overlay: {
+      local: { customHeaders: { "x-cave-upstream-key": "Bearer {{cave_optional_openai_key_env}}" } },
+    },
+  };
+}, /must use \{\{cave_optional_openai_key_env\}\} as the entire value/);
+
+rejects("optional upstream-key reference outside its closed header", (profile) => {
+  profile.injection = {
+    method: "config-file",
+    env_var: "CLAUDE_CONFIG_PATH",
+    base_config: { path: "~/.claude/settings.json" },
+    config_overlay: { local: { apiKey: "{{cave_optional_openai_key_env}}" } },
+  };
+}, /only as x-cave-upstream-key/);
+
 rejects("literal nested gateway URL", (profile) => {
   profile.injection = {
     method: "config-env-content",

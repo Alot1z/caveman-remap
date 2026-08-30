@@ -46,7 +46,8 @@ const PROFILE_PATH_PATTERN = "^~/\\.[a-z0-9][a-z0-9-]*/[A-Za-z0-9._/-]+$";
 const ENV_KEY_RE = new RegExp(ENV_KEY_PATTERN);
 const ENV_VALUE_RE = new RegExp(ENV_VALUE_PATTERN);
 const PROFILE_PATH_RE = new RegExp(PROFILE_PATH_PATTERN);
-const TEMPLATE_RE = /\{\{cave_(?:base_url|proxy_url|api_key|org_id)\}\}/g;
+const OPTIONAL_OPENAI_KEY_ENV_TEMPLATE = "{{cave_optional_openai_key_env}}";
+const TEMPLATE_RE = /\{\{cave_(?:base_url|proxy_url|api_key|org_id|optional_openai_key_env)\}\}/g;
 const ENV_VAR_RE = /^[A-Z][A-Z0-9_]*$/;
 
 function die(msg) {
@@ -126,6 +127,11 @@ function validateConfigStrings(value, need, path = "injection config") {
     need(tokens.length === knownTokens.length, `${path} contains an unknown template token`);
     need(!/[`;]|\$\(|\r|\n|\0/.test(value), `${path} contains a shell or loader metacharacter`);
     const key = path.split(".").at(-1) ?? "";
+    if (value.includes(OPTIONAL_OPENAI_KEY_ENV_TEMPLATE)) {
+      need(value === OPTIONAL_OPENAI_KEY_ENV_TEMPLATE, `${path} must use ${OPTIONAL_OPENAI_KEY_ENV_TEMPLATE} as the entire value`);
+      need(key.toLowerCase() === "x-cave-upstream-key", `${path} may use ${OPTIONAL_OPENAI_KEY_ENV_TEMPLATE} only as x-cave-upstream-key`);
+      return;
+    }
     if (/^(baseurl|base_url|api_base|host|endpoint|url)$/i.test(key)) {
       const remainder = value.replace(TEMPLATE_RE, "");
       need(knownTokens.length > 0 && /^[A-Za-z0-9._/-]*$/.test(remainder), `${path} must route through a cave template token`);

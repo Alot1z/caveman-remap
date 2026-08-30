@@ -266,6 +266,41 @@ test("config-file injection selects local vs managed overlays by gateway mode", 
   assert.deepEqual(managedCfg, { mode: "managed", url: attributed("https://gateway.example.com", agent.id) });
 });
 
+test("optional upstream-key references omit unavailable credentials without serializing secrets", () => {
+  const agent = fakeProfile("fake-optional-upstream", {
+    method: "config-file",
+    env_var: "FAKE_OPTIONAL_UPSTREAM_CONFIG",
+    base_config: { path: join(tmpdir(), "caveman-missing-optional-upstream.json") },
+    config_overlay: {
+      local: {},
+      managed: {
+        generationConfig: {
+          customHeaders: {
+            "x-cave-upstream-key": "{{cave_optional_openai_key_env}}",
+            "X-Cave-Agent": "fake-optional-upstream",
+          },
+        },
+      },
+    },
+  });
+
+  for (const scenario of [
+    { name: "present", value: "sk-upstream-secret", expected: "$OPENAI_API_KEY" },
+    { name: "absent", value: undefined, expected: undefined },
+    { name: "blank", value: "  ", expected: undefined },
+    { name: "newline", value: "sk-invalid\nheader", expected: undefined },
+  ]) {
+    withEnv({ OPENAI_API_KEY: scenario.value }, () => {
+      const env = buildWrapEnv(agent, "https://gateway.example");
+      const raw = readFileSync(env.FAKE_OPTIONAL_UPSTREAM_CONFIG, "utf8");
+      const cfg = JSON.parse(raw);
+      assert.equal(cfg.generationConfig.customHeaders["x-cave-upstream-key"], scenario.expected, scenario.name);
+      assert.equal(cfg.generationConfig.customHeaders["X-Cave-Agent"], "fake-optional-upstream");
+      assert.doesNotMatch(raw, /sk-upstream-secret|sk-invalid/);
+    });
+  }
+});
+
 test("openclaw config-file injection keeps attribution header and uses path-attributed gateway", () => {
   const dir = mkdtempSync(join(tmpdir(), "cave-openclaw-config-file-"));
   const home = mkdtempSync(join(tmpdir(), "cave-openclaw-home-"));

@@ -385,6 +385,10 @@ def first_text_block(content):
         return ""
     if isinstance(content, str):
         return content
+    # Some SDK shapes hand back a single block unwrapped (not a []), and a dict
+    # is itself one block — normalize both so the walk below always iterates.
+    if not isinstance(content, (list, tuple)):
+        content = [content]
     for block in content:
         if isinstance(block, str):
             text = block
@@ -425,7 +429,18 @@ def call_claude(prompt: str) -> str:
                 max_tokens=8192,
                 messages=[{"role": "user", "content": prompt}],
             )
-            return strip_llm_wrapper(first_text_block(msg.content).strip())
+            text = first_text_block(msg.content).strip()
+            if not text:
+                # No compressible text (only tool_use/thinking blocks, or an
+                # empty reply). Returning "" makes the caller quietly skip the
+                # section and leaves it permanently uncompressed with no signal;
+                # fail loudly instead so a wrongly-shaped prompt is diagnosed,
+                # not silently dropped after a paid call.
+                raise RuntimeError(
+                    "Claude returned no compressible text (only tool_use/thinking "
+                    "blocks or an empty response). Retry the compression."
+                )
+            return strip_llm_wrapper(text)
         except ImportError:
             pass  # anthropic not installed, fall back to CLI
     # Fallback: use claude CLI (handles desktop auth).

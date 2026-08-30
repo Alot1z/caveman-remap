@@ -360,10 +360,35 @@ class FirstTextBlockTests(unittest.TestCase):
     def test_bare_string_content(self):
         self.assertEqual(compress_mod.first_text_block("  raw string  "), "  raw string  ")
 
+    def test_single_unwrapped_block_objects_(self):
+        # Some SDK shapes return a single block, not a list — never crash.
+        self.assertEqual(compress_mod.first_text_block(self._text), "  body  ")
+
+    def test_single_unwrapped_dict_block(self):
+        self.assertEqual(
+            compress_mod.first_text_block({"type": "text", "text": "lone dict"}), "lone dict",
+        )
+        # A lone non-text dict has no text to compress.
+        self.assertEqual(compress_mod.first_text_block({"type": "tool_use"}), "")
+
     def test_no_text_returns_empty(self):
         self.assertEqual(compress_mod.first_text_block([self._tool_use]), "")
         self.assertEqual(compress_mod.first_text_block([]), "")
         self.assertEqual(compress_mod.first_text_block(None), "")
+
+    def test_call_claude_raises_loudly_when_model_returns_no_compressible_text(self):
+        # A tool_use-only reply through the SDK must fail loudly (RuntimeError),
+        # not silently return "" which the caller would drop with no signal.
+        import types
+
+        fake_msg = types.SimpleNamespace(content=[mock.Mock(type="tool_use")])
+        fake_client = mock.Mock()
+        fake_client.messages.create.return_value = fake_msg
+        anthropic_stub = types.SimpleNamespace(Anthropic=mock.Mock(return_value=fake_client))
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
+             mock.patch.dict(sys.modules, {"anthropic": anthropic_stub}):
+            with self.assertRaisesRegex(RuntimeError, "no compressible text"):
+                compress_mod.call_claude("prompt")
 
     def test_call_claude_returns_the_skipped_text_block(self):
         # End-to-end through the SDK path with a tool_use FIRST block: the paid

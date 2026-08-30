@@ -426,26 +426,63 @@ function validate(p, file) {
 }
 
 // checkConformancePins derives every agent-conformance matrix pin from the profile's
-// tested_agent_version so the two cannot silently diverge (issue #135). The workflow is
-// absent in the published CLI-only layout, so skip it there rather than fail.
+// tested_agent_version so the two cannot silently diverge (issue #135). This compiler runs
+// from the source registry, where the workflow is part of the contract: a missing or
+// unparseable workflow must fail rather than silently disable the pin gate.
 function checkConformancePins(agentsById) {
   const wf = process.env.CAVEMAN_CONFORMANCE_WORKFLOW
     ? resolve(process.env.CAVEMAN_CONFORMANCE_WORKFLOW)
-    : join(here, "..", "..", ".github", "workflows", "agent-conformance.yml");
-  if (!existsSync(wf)) return;
-  const text = readFileSync(wf, "utf8");
-  const entryRe = /- id:\s*(\S+)\s*\r?\n\s*install:\s*([^\r\n]+)/g;
-  let m;
-  while ((m = entryRe.exec(text)) !== null) {
-    const id = m[1].trim();
-    const install = m[2];
+    : join(here, "..", ".github", "workflows", "agent-conformance.yml");
+  let text;
+  try {
+    text = readFileSync(wf, "utf8");
+  } catch (error) {
+    die(`conformance workflow not readable at ${wf} — cannot verify shipped profile pins (fail-closed): ${error.message}`);
+  }
+
+  // Parse only pinned-upstream-binary.matrix.include. A repository-wide `- id:` scan
+  // would mix in the @latest matrix and could let one lane accidentally satisfy another.
+  const jobMatch = /^  pinned-upstream-binary:\s*$/m.exec(text);
+  if (!jobMatch) die(`${wf}: missing pinned-upstream-binary job (fail-closed)`);
+  const jobStart = jobMatch.index + jobMatch[0].length;
+  const afterJob = text.slice(jobStart);
+  const nextJob = /^  [A-Za-z0-9_-]+:\s*$/m.exec(afterJob);
+  const job = nextJob ? afterJob.slice(0, nextJob.index) : afterJob;
+  const includeMatch = /^ {8}include:\s*$/m.exec(job);
+  if (!includeMatch) die(`${wf}: pinned-upstream-binary matrix.include is missing or unparseable (fail-closed)`);
+  const includeStart = includeMatch.index + includeMatch[0].length;
+  const afterInclude = job.slice(includeStart);
+  const includeEnd = /^ {4}[A-Za-z0-9_-]+:\s*$/m.exec(afterInclude);
+  const include = includeEnd ? afterInclude.slice(0, includeEnd.index) : afterInclude;
+
+  const declaredIds = [...include.matchAll(/^ {10}- id:\s*(\S+)\s*$/gm)].map((match) => match[1]);
+  const entries = [...include.matchAll(/^ {10}- id:\s*(\S+)\s*\r?\n {12}install:\s*(\S[^\r\n]*)$/gm)]
+    .map((match) => ({ id: match[1], install: match[2].trim() }));
+  if (declaredIds.length === 0 || entries.length !== declaredIds.length) {
+    die(`${wf}: pinned-upstream-binary matrix entries must each be exactly an id followed by one single-line install command (fail-closed)`);
+  }
+
+  const duplicateIds = declaredIds.filter((id, index) => declaredIds.indexOf(id) !== index);
+  if (duplicateIds.length > 0) die(`${wf}: duplicate pinned profile id(s): ${[...new Set(duplicateIds)].join(", ")}`);
+  const entryById = new Map(entries.map((entry) => [entry.id, entry]));
+  const shippedIds = [...agentsById.keys()].sort();
+  const missing = shippedIds.filter((id) => !entryById.has(id));
+  const unknown = declaredIds.filter((id) => !agentsById.has(id));
+  gate(missing.length === 0, `${wf}: pinned-upstream-binary is missing shipped profile id(s): ${missing.join(", ")}`);
+  gate(unknown.length === 0, `${wf}: pinned-upstream-binary contains unknown profile id(s): ${unknown.join(", ")}`);
+
+  for (const id of shippedIds) {
     const profile = agentsById.get(id);
-    if (!profile || !profile.tested_agent_version || profile.tested_agent_version === "x") continue;
+    const entry = entryById.get(id);
+    if (!entry || !profile?.tested_agent_version || profile.tested_agent_version === "x") continue;
     const pv = profile.tested_agent_version;
-    if (!/^\d+\.\d+\.\d+/.test(pv)) continue; // non-semver pin (e.g. a git sha) — not derivable
-    const iv = (install.match(/@(\d+\.\d+\.\d+[0-9A-Za-z.-]*)/) || install.match(/==(\d+\.\d+\.\d+[0-9A-Za-z.-]*)/))?.[1];
-    if (!iv) continue;
-    if (iv !== pv) gate(false, `.github/workflows/agent-conformance.yml pins ${id}@${iv} but profile tested_agent_version is ${pv} — the CI pin must equal the profile pin (issue #135)`);
+    if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(pv)) continue; // non-semver pin (e.g. a git sha) — not derivable
+    const versions = [...entry.install.matchAll(/(?:@|==)(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?=$|[^0-9A-Za-z.-])/g)]
+      .map((match) => match[1]);
+    gate(versions.length === 1, `${wf}: pinned install for ${id} must carry exactly one parseable version pin matching tested_agent_version ${pv} (found ${versions.length})`);
+    if (versions.length === 1 && versions[0] !== pv) {
+      gate(false, `${wf} pins ${id}@${versions[0]} but profile tested_agent_version is ${pv} — the CI pin must equal the profile pin (issue #135)`);
+    }
   }
 }
 

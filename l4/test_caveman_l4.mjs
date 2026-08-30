@@ -7,7 +7,7 @@
 
 import { execFileSync } from 'node:child_process';
 import {
-  mkdtempSync, writeFileSync, appendFileSync, rmSync, utimesSync,
+  mkdtempSync, writeFileSync, appendFileSync, rmSync, utimesSync, mkdirSync, existsSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -121,6 +121,30 @@ test('verify-gate VERIFIES a pre-computed measured estimate', (dir) => {
   const out = run(dir, ['verify-gate', '--finding', finding]);
   assert.strictEqual(out.ok, true);
   assert.strictEqual(out.verdict, 'VERIFIED');
+});
+
+test('a stale lock (dead owner pid) is recovered, not stuck busy', (dir) => {
+  const sess = join(dir, 's.jsonl');
+  writeFileSync(sess, JSON.stringify({ type: 'assistant', message: { id: 'm1', usage: { output_tokens: 50 } } }) + '\n');
+  // A crashed run leaves `<state>/<project>__<session>.lock/` with a dead owner
+  // pid recorded. auto-measure must steal it and proceed, not report 'busy'.
+  const lock = join(dir, 'state', 'default__s.lock');
+  mkdirSync(lock, { recursive: true });
+  writeFileSync(join(lock, 'owner'), '999999999 2020-01-01T00:00:00.000Z');
+  const out = run(dir, ['auto-measure', '--session-file', sess]);
+  assert.strictEqual(out.status, 'measured', 'leftover/crashed lock is recovered');
+  assert.ok(!existsSync(lock), 'lock removed after the run');
+});
+
+test('a live lock is honored as busy (never double-write)', (dir) => {
+  const sess = join(dir, 's.jsonl');
+  writeFileSync(sess, JSON.stringify({ type: 'assistant', message: { id: 'm1', usage: { output_tokens: 50 } } }) + '\n');
+  // A genuinely live owner (this runner process) must NOT be stolen.
+  const lock = join(dir, 'state', 'default__s.lock');
+  mkdirSync(lock, { recursive: true });
+  writeFileSync(join(lock, 'owner'), `${process.pid} ${new Date().toISOString()}`);
+  const out = run(dir, ['auto-measure', '--session-file', sess]);
+  assert.strictEqual(out.status, 'busy', 'a live owner pid must not be stolen');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

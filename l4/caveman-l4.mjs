@@ -26,7 +26,6 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -69,13 +68,45 @@ function writeJsonAtomic(pathStr, value) {
 
 // Staleness probe + lock guard (WEP: trigger on staleness -> lock -> apply ->
 // verify -> rollback). Returns an unlock function or null when the run is
-// already in progress.
+// already in progress. The lock must be recoverable after a crash: a killed
+// process leaves the directory behind, and without recovery the next run would
+// report 'busy' forever. We steal the lock when the recorded owner pid is
+// provably dead, or the lock has simply aged past LOCK_STALE_MS.
+const LOCK_STALE_MS = 60_000;
+
+function ownerPidAlive(ownerFile) {
+  try {
+    const pid = Number(fs.readFileSync(ownerFile, 'utf8').trim().split(/\s+/)[0]);
+    if (!Number.isFinite(pid) || pid <= 0) return null; // unparseable — unknown
+    try { process.kill(pid, 0); return true; }
+    catch (e) { return e.code === 'EPERM' ? true : false; }
+  } catch { return null; }
+}
+
+function stealLock(lockPath) {
+  const ownerFile = path.join(lockPath, 'owner');
+  try {
+    const alive = ownerPidAlive(ownerFile);
+    const tooOld = Date.now() - fs.statSync(lockPath).mtimeMs > LOCK_STALE_MS;
+    if (alive === false || tooOld) {
+      fs.rmSync(lockPath, { recursive: true, force: true });
+      return true;
+    }
+    return false;
+  } catch { return false; }
+}
+
 function acquireLock(lockPath) {
   try {
     fs.mkdirSync(lockPath);
     fs.writeFileSync(path.join(lockPath, 'owner'), `${process.pid} ${nowIso()}`);
     return () => { try { fs.rmSync(lockPath, { recursive: true, force: true }); } catch {} };
   } catch {
+    // Lock dir already exists — busy unless it is a stale/crashed lock we can
+    // recover. Try once; if the steal raced, fall back to 'busy'.
+    if (stealLock(lockPath)) {
+      try { return acquireLock(lockPath); } catch { return null; }
+    }
     return null;
   }
 }
@@ -132,6 +163,11 @@ function autoMeasure(opts) {
   const lockPath = path.join(STATE_DIR, `${project}__${sessionId}.lock`);
   const unlock = acquireLock(lockPath);
   if (!unlock) { process.stdout.write(JSON.stringify({ status: 'busy', sessionId }) + '\n'); return; }
+  // Backup the previous profile row-set before appending (WEP: backup, then
+  // verify after apply, roll back on failure). Created lazily so a 'fresh'
+  // skip never churns disk.
+  const profilePath = path.join(PROFILES_DIR, `${agent}.jsonl`);
+  const backup = profilePath + '.bak';
   try {
     const watermark = readJson(watermarkPath, null);
     const fresh = watermark && stats.mtimeMs <= watermark.mtimeMs + minFresh;
@@ -142,17 +178,10 @@ function autoMeasure(opts) {
       return;
     }
 
-    // Backup the previous profile row-set before appending (WEP: backup, then
-    // verify after apply, roll back on failure).
-    const profilePath = path.join(PROFILES_DIR, `${agent}.jsonl`);
-    const backup = profilePath + '.bak';
     if (fs.existsSync(profilePath)) fs.copyFileSync(profilePath, backup);
 
     const parsed = parseSession(sessionFile);
-    if (!parsed) {
-      fs.copyFileSync(backup, profilePath);
-      fail(`could not parse session JSONL: ${sessionFile}`);
-    }
+    if (!parsed) throw new Error(`could not parse session JSONL: ${sessionFile}`);
 
     const measurement = {
       ts: nowIso(),
@@ -172,16 +201,19 @@ function autoMeasure(opts) {
     const rows = readJsonLines(profilePath);
     const last = rows[rows.length - 1];
     const verified = last && last.session === sessionId && last.ts === measurement.ts;
-    if (!verified) {
-      fs.copyFileSync(backup, profilePath); // rollback
-      fail(`append verification failed; profile rolled back (${profilePath})`);
-    }
+    if (!verified) throw new Error(`append verification failed; profile rolled back (${profilePath})`);
 
     writeJsonAtomic(watermarkPath, { mtimeMs: stats.mtimeMs, lastMeasuredAt: measurement.ts, lineCount: rows.length });
     process.stdout.write(JSON.stringify({
       status: 'measured', sessionId, agent, measurement,
       checks: { staleness: 'PASS', dedupe: 'PASS', append_verify: 'PASS' },
     }) + '\n');
+  } catch (err) {
+    // Best-effort rollback to the pre-append state; then rethrow so the CLI
+    // reports the error AFTER finally has released the lock — never a wedged
+    // 'busy' session for a transient parse/verify failure.
+    if (fs.existsSync(backup)) { try { fs.copyFileSync(backup, profilePath); } catch {} }
+    throw err;
   } finally {
     unlock();
   }
@@ -272,13 +304,17 @@ switch (sub) {
   case 'auto-measure': {
     const sessionFile = flag('session-file');
     if (!sessionFile) fail('auto-measure: --session-file <path> is required');
-    autoMeasure({
-      sessionFile,
-      agent: flag('agent'),
-      mode: flag('mode'),
-      project: flag('project'),
-      minFreshMs: flag('min-fresh-ms'),
-    });
+    try {
+      autoMeasure({
+        sessionFile,
+        agent: flag('agent'),
+        mode: flag('mode'),
+        project: flag('project'),
+        minFreshMs: flag('min-fresh-ms'),
+      });
+    } catch (err) {
+      fail(String((err && err.message) || err));
+    }
     break;
   }
   case 'verify-gate': {

@@ -216,15 +216,33 @@ function handle(raw) {
     // blocks the turn.
     const measureMatch = /^\/caveman(?::caveman)?-measure(?:\s+(.*))?$/.exec(prompt);
     if (measureMatch && data.transcript_path) {
+      // The runtime is NOT part of the shipped hook file set, so resolve it
+      // against every location it can realistically live: a source checkout
+      // (<repo-root>/l4), a hook tree co-located with an l4/ folder, and a
+      // per-user install under $CLAUDE_CONFIG_DIR. If none exist, degrade to a
+      // graceful error instead of guessing a path that points nowhere.
+      const resolveL4 = () => {
+        const candidates = [
+          path.join(__dirname, '..', '..', 'l4', 'caveman-l4.mjs'),
+          path.join(__dirname, 'l4', 'caveman-l4.mjs'),
+          path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'l4', 'caveman-l4.mjs'),
+        ];
+        for (const p of candidates) { try { if (fs.statSync(p).isFile()) return p; } catch { /* not here */ } }
+        return null;
+      };
       let block;
-      try {
-        const l4Path = path.join(__dirname, '..', '..', 'l4', 'caveman-l4.mjs');
-        const argv = [l4Path, 'auto-measure', '--session-file', data.transcript_path];
-        if (data.cwd) argv.push('--project', path.basename(data.cwd));
-        argv.push('--agent', 'claude');
-        block = execFileSync(process.execPath, argv, { encoding: 'utf8', timeout: 2500 }).trim();
-      } catch (e) {
-        block = '\"status\": \"error\", \"reason\": \"could not run L4 auto-measure\"';
+      const l4Path = resolveL4();
+      if (l4Path) {
+        try {
+          const argv = [l4Path, 'auto-measure', '--session-file', data.transcript_path];
+          if (data.cwd) argv.push('--project', path.basename(data.cwd));
+          argv.push('--agent', 'claude');
+          block = execFileSync(process.execPath, argv, { encoding: 'utf8', timeout: 2500 }).trim();
+        } catch (e) {
+          block = JSON.stringify({ status: 'error', reason: 'could not run L4 auto-measure' });
+        }
+      } else {
+        block = JSON.stringify({ status: 'error', reason: 'L4 runtime not installed — l4/caveman-l4.mjs not found next to this hook' });
       }
       process.stdout.write(JSON.stringify({
         hookSpecificOutput: {

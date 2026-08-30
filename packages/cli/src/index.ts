@@ -11416,17 +11416,19 @@ function kiloProfileModelIds(agent: AgentProfile): Set<string> {
 function kiloRouteOverride(agent: AgentProfile, args: string[]): AgentRouteOverride | null {
   const separator = args.indexOf("--");
   const parsedArgs = separator === -1 ? args : args.slice(0, separator);
-  const runIndex = parsedArgs.indexOf("run");
-  for (const command of ["attach", "cloud", "roll-call"] as const) {
-    const commandIndex = parsedArgs.indexOf(command);
-    if (commandIndex !== -1 && (runIndex === -1 || commandIndex < runIndex)) {
-      const reason = command === "attach"
-        ? "uses another server's provider route"
-        : "runs outside Kilo's local single-model route";
-      return { surface: command, reason };
-    }
-  }
-
+  const valueOptions = new Set([
+    "--log-level", "--port", "--hostname", "--mdns-domain", "--cors",
+    "--session", "-s", "--worktree", "--prompt", "--agent", "--replay-limit",
+    "--command", "--format", "--file", "-f", "--title", "--password", "-p",
+    "--username", "-u", "--dir", "--variant", "--timeout", "--parallel", "--output",
+    "--repo", "--repo-type", "--branch", "--mode", "--org-id", "--session-id", "--message-id",
+  ]);
+  const booleanOptions = new Set([
+    "-h", "--help", "-v", "--version", "--print-logs", "--pure", "--mdns",
+    "-c", "--continue", "--fork", "--cloud-fork", "--auto", "--mini", "--no-replay",
+    "--share", "--thinking", "-i", "--interactive", "--stream", "--verbose", "--quiet",
+  ]);
+  let command: string | undefined;
   let modelValue: string | undefined;
   let modelOccurrences = 0;
   for (let index = 0; index < parsedArgs.length; index++) {
@@ -11447,6 +11449,31 @@ function kiloRouteOverride(agent: AgentProfile, args: string[]): AgentRouteOverr
     }
     if (arg.startsWith("-") && !arg.startsWith("--") && arg.slice(1).includes("m")) {
       return { surface: "-m", reason: "is ambiguous inside a short-option cluster" };
+    }
+    const equals = arg.indexOf("=");
+    const optionName = equals === -1 ? arg : arg.slice(0, equals);
+    if (valueOptions.has(optionName)) {
+      if (equals === -1) {
+        const value = parsedArgs[index + 1];
+        if (typeof value !== "string" || !value || value.startsWith("-")) {
+          return { surface: optionName, reason: "is malformed and makes command routing ambiguous" };
+        }
+        index++;
+      } else if (!arg.slice(equals + 1)) {
+        return { surface: optionName, reason: "is malformed and makes command routing ambiguous" };
+      }
+      continue;
+    }
+    if (booleanOptions.has(arg)) continue;
+    if (arg.startsWith("-")) {
+      return { surface: "arguments", reason: "cannot be parsed safely with Kilo 7.5.6 option arities" };
+    }
+    if (command === undefined) {
+      command = arg;
+      if (command === "attach") return { surface: "attach", reason: "uses another server's provider route" };
+      if (command === "cloud" || command === "roll-call") {
+        return { surface: command, reason: "runs outside Kilo's local single-model route" };
+      }
     }
   }
   if (modelOccurrences > 1) return { surface: "--model", reason: "is repeated or malformed" };

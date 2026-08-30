@@ -287,6 +287,7 @@ test("Kilo route guard accepts profile-backed model spellings", async (t) => {
     { name: "short spaced", args: ["run", "-m", "caveman/gpt-5.5", "hello"] },
     { name: "short equals", args: ["-m=caveman/gpt-5.4-mini", "run", "hello"] },
     { name: "global model before command", args: ["--model", "caveman/gpt-5.5", "run", "hello"] },
+    { name: "value containing command before run", args: ["--dir", "run", "run", "hello"] },
   ]) {
     await t.test(fixture.name, async () => {
       const out = await runKiloAlias("kilo", "kilo", fixture.args);
@@ -311,10 +312,17 @@ test("Kilo route guard launches direct for model and attach bypasses", async (t)
     { name: "missing model", surface: "--model", args: ["run", "hello", "--model"] },
     { name: "missing alias", surface: "--model", args: ["run", "hello", "--m"] },
     { name: "top-level attach", surface: "attach", args: ["attach", "https://remote.example/session"] },
+    { name: "attach after dir value named run", surface: "attach", args: ["--dir", "run", "attach", "https://remote.example/session"] },
+    { name: "attach after session value named run", surface: "attach", args: ["--session", "run", "attach", "https://remote.example/session"] },
+    { name: "attach after password value named run", surface: "attach", args: ["--password", "run", "attach", "https://remote.example/session"] },
+    { name: "attach after username value named run", surface: "attach", args: ["--username", "run", "attach", "https://remote.example/session"] },
     { name: "run attach", surface: "--attach", args: ["run", "--attach", "https://remote.example/session", "hello"] },
     { name: "run attach equals", surface: "--attach", args: ["run", "--attach=https://remote.example/session", "hello"] },
     { name: "cloud agent", surface: "cloud", args: ["--print-logs", "cloud", "run", "task"] },
+    { name: "cloud after valued global", surface: "cloud", args: ["--log-level", "INFO", "cloud", "start"] },
+    { name: "cloud after command option", surface: "cloud", args: ["--repo", "run", "cloud", "start"] },
     { name: "roll call", surface: "roll-call", args: ["roll-call", "gpt"] },
+    { name: "unknown option arity", surface: "arguments", args: ["--future-option", "run", "cloud", "start"] },
   ];
   for (const fixture of fixtures) {
     await t.test(fixture.name, async () => {
@@ -335,7 +343,7 @@ test("Kilo route guard launches direct for model and attach bypasses", async (t)
 });
 
 test("Kilo route guard ignores model-looking arguments after separator", async () => {
-  const args = ["run", "hello", "--", "--model", "openai/test"];
+  const args = ["run", "hello", "--", "--model", "openai/test", "attach", "https://remote.example/session"];
   const out = await runKiloAlias("kilo", "kilo", args);
   assert.equal(out.code, 0, out.stderr);
   const child = JSON.parse(out.stdout);

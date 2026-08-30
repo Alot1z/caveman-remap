@@ -425,7 +425,7 @@ def extract_text(content):
     if btype == "text":
         text = getattr(content, "text", None)
         return text if isinstance(text, str) and text.strip() else ""
-    if btype in ("tool_use", "thinking", "image", "image_url", "call_tool"):
+    if btype in ("tool_use", "thinking", "image", "image_url", "input_image", "call_tool"):
         return ""
     # Object-backed parts / content (Gemini / OpenAI-compatible wrappers).
     parts = getattr(content, "parts", None)

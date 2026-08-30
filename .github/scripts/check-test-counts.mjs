@@ -37,7 +37,7 @@ const CONFIG = {
     commands: [
       ['', 'python', ['-m', 'pytest', '-q', 'tests/test_compress_safety.py', 'tests/test_compress_concurrency.py']],
     ],
-    result: '46 passed, 0 failed, 4 skipped',
+    result: '47 passed, 0 failed, 4 skipped',
   },
   'l4-compression-runtime': {
     setup: [],

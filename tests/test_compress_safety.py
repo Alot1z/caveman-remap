@@ -416,6 +416,15 @@ class ExtractTextTests(unittest.TestCase):
         self.assertEqual(compress_mod.extract_text({"type": "thinking", "text": "skip me"}), "")
         self.assertEqual(compress_mod.extract_text(mock.Mock(type="image_url", url="x")), "")
 
+    def test_object_backed_input_image_never_returned(self):
+        # The dict branch skips input_image explicitly; the object branch must
+        # treat a typed input_image object the same way, even when it carries a
+        # .text attribute (symmetric skip, never mistaken for content).
+        self.assertEqual(
+            compress_mod.extract_text(mock.Mock(type="input_image", text="not content")),
+            "",
+        )
+
     def test_call_claude_returns_empty_consistently_when_no_text(self):
         # A tool_use-only reply through the SDK returns "", the SAME contract as
         # the CLI arm, so the caller's existing graceful "empty response"

@@ -227,7 +227,7 @@ export const PROFILES: AgentProfile[] = [
       "kilocode"
     ],
     "args": [],
-    "install": "npm install -g @kilocode/cli",
+    "install": "npm install -g @kilocode/cli@7.5.6",
     "wire_protocol": "openai-chat",
     "injection": {
       "method": "config-env-content",
@@ -265,7 +265,10 @@ export const PROFILES: AgentProfile[] = [
               }
             }
           },
-          "model": "caveman/gpt-5.5"
+          "model": "caveman/gpt-5.5",
+          "enabled_providers": [
+            "caveman"
+          ]
         },
         "managed": {
           "provider": {
@@ -276,7 +279,7 @@ export const PROFILES: AgentProfile[] = [
                 "baseURL": "{{cave_base_url}}/v1",
                 "apiKey": "{env:CAVE_API_KEY}",
                 "headers": {
-                  "x-cave-upstream-key": "{env:OPENAI_API_KEY}",
+                  "x-cave-upstream-key": "{{cave_optional_openai_key_env}}",
                   "X-Cave-Agent": "kilo"
                 }
               },
@@ -300,7 +303,10 @@ export const PROFILES: AgentProfile[] = [
               }
             }
           },
-          "model": "caveman/gpt-5.5"
+          "model": "caveman/gpt-5.5",
+          "enabled_providers": [
+            "caveman"
+          ]
         }
       }
     },

@@ -3,13 +3,18 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   accessSync,
   appendFileSync,
+  closeSync,
   cpSync,
   existsSync,
+  fchmodSync,
+  fsyncSync,
   chmodSync,
   constants,
   copyFileSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   lstatSync,
   readdirSync,
   readFileSync,
@@ -2579,7 +2584,7 @@ function readPendingAgentNativeBundleRemoval(agent: "claude" | "codex"): AgentNa
   }
 }
 
-type McpServerMarker = { command: string; args: string[] };
+type McpServerMarker = { command: string; args: string[]; config_path?: string; schema_version?: 1 };
 
 function mcpServerToolName(serverName: string): string | undefined {
   if (serverName === "caveman") return "caveman_retrieve";
@@ -2589,14 +2594,36 @@ function mcpServerToolName(serverName: string): string | undefined {
   return undefined;
 }
 
-function readMcpServerMarker(agent: string, serverName: string): McpServerMarker | null {
+function parseMcpServerMarkerBytes(agent: string, serverName: string, bytes: Buffer): McpServerMarker | null {
   try {
-    const value = JSON.parse(readFileSync(mcpServerMarkerPath(agent, serverName), "utf8")) as Record<string, unknown>;
+    const value = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
     const expectedTool = mcpServerToolName(serverName);
     if (!expectedTool || value.tool !== expectedTool) return null;
-    if (Object.keys(value).sort().join("\0") !== ["args", "command", "tool"].join("\0")) return null;
+    const hasConfigPath = Object.hasOwn(value, "config_path");
+    const expectedKeys = hasConfigPath
+      ? ["args", "command", "config_path", "schema_version", "tool"]
+      : ["args", "command", "tool"];
+    if (Object.keys(value).sort().join("\0") !== expectedKeys.join("\0")) return null;
     if (typeof value.command !== "string" || !value.command.trim() || /[\r\n]/.test(value.command) || !Array.isArray(value.args) || !value.args.every((arg) => typeof arg === "string")) return null;
-    return { command: value.command, args: value.args as string[] };
+    if (hasConfigPath && (value.schema_version !== 1
+      || agent !== "kilo" && agent !== "qwen"
+      || typeof value.config_path !== "string"
+      || value.config_path !== canonicalMcpConfigPath(value.config_path))) return null;
+    return {
+      command: value.command,
+      args: value.args as string[],
+      ...(hasConfigPath ? { config_path: value.config_path as string, schema_version: 1 as const } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readMcpServerMarker(agent: string, serverName: string): McpServerMarker | null {
+  try {
+    const path = mcpServerMarkerPath(agent, serverName);
+    if ((agent === "kilo" || agent === "qwen") && lstatSync(path).isSymbolicLink()) return null;
+    return parseMcpServerMarkerBytes(agent, serverName, readFileSync(path));
   } catch {
     return null;
   }
@@ -6541,6 +6568,103 @@ function atomicWriteFile(path: string, bytes: Buffer, mode = 0o600): void {
   }
 }
 
+function fsyncParentDirectory(path: string): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(dirname(path), constants.O_RDONLY);
+    fsyncSync(fd);
+  } catch {
+    // Some platforms/filesystems reject directory fsync. File fsync + atomic
+    // rename still provides strongest portable guarantee available to Node.
+  } finally {
+    if (fd !== undefined) try { closeSync(fd); } catch { /* best effort */ }
+  }
+}
+
+function durableAtomicWriteFile(path: string, bytes: Buffer, mode = 0o600): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temp = join(dirname(path), `.${basename(path)}.caveman-${process.pid}-${randomUUID()}.tmp`);
+  let fd: number | undefined;
+  try {
+    fd = openSync(temp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, mode);
+    writeFileSync(fd, bytes);
+    fchmodSync(fd, mode);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(temp, path);
+    fsyncParentDirectory(path);
+  } catch (error) {
+    if (fd !== undefined) try { closeSync(fd); } catch { /* original error wins */ }
+    try { unlinkSync(temp); } catch { /* no partial */ }
+    throw error;
+  }
+}
+
+// Publish a fully-synced file without replacing an existing intent. Hard-linking
+// a same-directory temp gives O_EXCL semantics plus atomic visibility.
+function durableCreateFile(path: string, bytes: Buffer, mode = 0o600): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temp = join(dirname(path), `.${basename(path)}.caveman-create-${process.pid}-${randomUUID()}.tmp`);
+  try {
+    durableAtomicWriteFile(temp, bytes, mode);
+    linkSync(temp, path);
+    fsyncParentDirectory(path);
+  } finally {
+    try { unlinkSync(temp); } catch { /* published or failed before temp creation */ }
+  }
+}
+
+function optionalBytesEqual(left: Buffer | null, right: Buffer | null): boolean {
+  return left === null ? right === null : right !== null && left.equals(right);
+}
+
+function durableReplaceFileIfUnchanged(path: string, expected: Buffer | null, next: Buffer | null, mode = 0o600): void {
+  const current = fileBytes(path);
+  if (!optionalBytesEqual(current, expected)) throw new Error(`${path} changed during MCP update; refusing overwrite`);
+  if (next === null) {
+    if (current !== null) {
+      const atDelete = fileBytes(path);
+      if (!optionalBytesEqual(atDelete, expected)) throw new Error(`${path} changed during MCP update; refusing removal`);
+      unlinkSync(path);
+      fsyncParentDirectory(path);
+    }
+    return;
+  }
+
+  // Prepare durable replacement first, then run final compare immediately
+  // before rename. Per-agent lock serializes Caveman writers; this CAS catches
+  // external edits observed before commit without erasing them.
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temp = join(dirname(path), `.${basename(path)}.caveman-cas-${process.pid}-${randomUUID()}.tmp`);
+  let fd: number | undefined;
+  try {
+    fd = openSync(temp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, mode);
+    writeFileSync(fd, next);
+    fchmodSync(fd, mode);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    const atCommit = fileBytes(path);
+    if (!optionalBytesEqual(atCommit, expected)) throw new Error(`${path} changed during MCP update; refusing overwrite`);
+    renameSync(temp, path);
+    fsyncParentDirectory(path);
+  } catch (error) {
+    if (fd !== undefined) try { closeSync(fd); } catch { /* original error wins */ }
+    try { unlinkSync(temp); } catch { /* no partial */ }
+    throw error;
+  }
+}
+
+function durableUnlink(path: string): void {
+  try {
+    unlinkSync(path);
+    fsyncParentDirectory(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
 function parseJsonFileObject(path: string, bytes: Buffer | null): Record<string, unknown> {
   if (!bytes || bytes.length === 0) return {};
   const parsed = JSON.parse(bytes.toString("utf8"));
@@ -7413,6 +7537,78 @@ function withIntegrationLock<T>(agent: string, run: () => T): T {
       const owner = JSON.parse(readFileSync(ownerPath, "utf8")) as { token?: unknown };
       if (owner.token === token) rmSync(lock, { recursive: true, force: true });
     } catch { /* best effort; future process can reclaim stale owner */ }
+  }
+}
+
+function withMcpConfigLock<T>(configPath: string, run: () => T): T {
+  const canonicalPath = canonicalMcpConfigPath(configPath);
+  const key = createHash("sha256").update(canonicalPath).digest("hex").slice(0, 20);
+  const lock = join(dirname(canonicalPath), `.caveman-mcp-${key}.lock`);
+  const token = randomUUID();
+  const claim = `${lock}.claim-${token}`;
+  const owner = { schema_version: 1, pid: process.pid, token, config_path: canonicalPath, started_at: new Date().toISOString() };
+  mkdirSync(dirname(lock), { recursive: true, mode: 0o700 });
+  mkdirSync(claim, { mode: 0o700 });
+  try {
+    durableAtomicWriteFile(join(claim, "owner.json"), Buffer.from(JSON.stringify(owner) + "\n"));
+    try {
+      renameSync(claim, lock);
+      fsyncParentDirectory(lock);
+    } catch (error) {
+      // Rename-to-existing differs by platform (EEXIST, ENOTEMPTY, EPERM,
+      // EACCES). Existing published lock is authority regardless of errno.
+      try { lstatSync(lock); } catch { throw error; }
+      let stale = false;
+      try {
+        const lockStat = lstatSync(lock);
+        const ownerPath = join(lock, "owner.json");
+        const ownerStat = lstatSync(ownerPath);
+        const existing = JSON.parse(readFileSync(ownerPath, "utf8")) as Record<string, unknown>;
+        const keys = ["config_path", "pid", "schema_version", "started_at", "token"];
+        if (!lockStat.isDirectory() || lockStat.isSymbolicLink()
+          || !ownerStat.isFile() || ownerStat.isSymbolicLink()
+          || readdirSync(lock).sort().join("\0") !== "owner.json"
+          || Object.keys(existing).sort().join("\0") !== keys.join("\0")
+          || existing.schema_version !== 1
+          || typeof existing.pid !== "number" || !Number.isInteger(existing.pid) || existing.pid <= 1
+          || typeof existing.token !== "string"
+          || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(existing.token)
+          || existing.config_path !== canonicalPath
+          || typeof existing.started_at !== "string"
+          || new Date(existing.started_at).toISOString() !== existing.started_at
+          || process.platform !== "win32" && ((lockStat.mode | ownerStat.mode) & 0o077) !== 0) {
+          throw new Error("invalid MCP lock owner");
+        }
+        try { process.kill(existing.pid, 0); }
+        catch (probeError) { stale = (probeError as NodeJS.ErrnoException).code === "ESRCH"; }
+      } catch {
+        // Populated claim is durable before publication, so malformed or
+        // ownerless lock can never be our crash residue. Never delete it.
+        stale = false;
+      }
+      if (!stale) throw new Error(`MCP config change already running for ${canonicalPath}`);
+      const quarantine = `${lock}.stale-${token}`;
+      try {
+        renameSync(lock, quarantine);
+        renameSync(claim, lock);
+        fsyncParentDirectory(lock);
+        process.stderr.write(`${mark("warn")} reclaimed stale MCP config lock for ${canonicalPath}\n`);
+      } catch {
+        throw new Error(`MCP config change already running for ${canonicalPath}`);
+      } finally {
+        try { rmSync(quarantine, { recursive: true, force: true }); } catch { /* isolated stale lock only */ }
+      }
+    }
+    return run();
+  } finally {
+    try { rmSync(claim, { recursive: true, force: true }); } catch { /* published or absent */ }
+    try {
+      const current = JSON.parse(readFileSync(join(lock, "owner.json"), "utf8")) as { token?: unknown };
+      if (current.token === token) {
+        rmSync(lock, { recursive: true, force: true });
+        fsyncParentDirectory(lock);
+      }
+    } catch { /* only owning token may remove a published lock */ }
   }
 }
 
@@ -9829,6 +10025,37 @@ function cavemanBin(name: string, envVar: string): string {
 function mcpServerMarkerPath(agentId: string, serverName: string): string {
   return join(cavemanHome(), "mcp", serverName === "caveman" ? `${agentId}.json` : `${agentId}.${serverName}.json`);
 }
+
+function canonicalOwnedMcpMarkerPath(agent: "kilo" | "qwen", serverName: string): string {
+  const path = mcpServerMarkerPath(agent, serverName);
+  try {
+    if (lstatSync(path).isSymbolicLink()) {
+      throw new Error(`${path} is a symlink; refusing transactional ownership mutation`);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  return canonicalMcpConfigPath(path);
+}
+
+// A native MCP registration and its Caveman ownership journal form one logical
+// write. Prove the journal directory is writable before touching agent config;
+// otherwise Kilo/Qwen would refuse both a later upgrade and removal because the
+// surviving registration has no trustworthy owner.
+function preflightMcpServerMarker(agentId: string, serverName: string): void {
+  const path = mcpServerMarkerPath(agentId, serverName);
+  const probe = join(dirname(path), `.${basename(path)}.preflight-${process.pid}-${randomUUID()}`);
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    chmodSync(dirname(path), 0o700);
+    durableAtomicWriteFile(probe, Buffer.alloc(0));
+    unlinkSync(probe);
+    fsyncParentDirectory(probe);
+  } catch (error) {
+    try { unlinkSync(probe); } catch { /* no probe survived */ }
+    throw new Error(`cannot persist ${agentId} ${serverName} MCP ownership journal at ${path}: ${(error as Error).message}`);
+  }
+}
 function mcpMarkerPath(agentId: string): string {
   return mcpServerMarkerPath(agentId, "caveman");
 }
@@ -10160,19 +10387,29 @@ function mcpUninstall(target?: string, serverName = "caveman") {
     }
     targets = [a];
   } else {
-    targets = AGENTS.filter((a) => mcpServerInstalled(a.id, serverName));
+    targets = AGENTS.filter((a) => mcpServerInstalled(a.id, serverName)
+      || ((a.id === "kilo" || a.id === "qwen") && (
+        existsSync(mcpPendingJournalPath(a.id, serverName))
+        || existsSync(mcpConfigPendingJournalPath(a.id === "kilo" ? kiloConfigPath() : qwenConfigPath()))
+      )));
     if (targets.length === 0) {
       console.error(`no agents have the ${serverName} MCP tool installed`);
       return;
     }
   }
   for (const a of targets) {
-    if (uninstallMcpForAgent(a, serverName)) {
-      try {
-        unlinkSync(mcpServerMarkerPath(a.id, serverName));
-      } catch {
-        // marker already gone — the visible state is what matters.
+    const uninstallOne = (lockedConfigPath?: string): boolean => {
+      if (a.id === "kilo" || a.id === "qwen") {
+        return transactOwnedMcpConfig(a.id, serverName, "uninstall", undefined, lockedConfigPath);
       }
+      if (!uninstallMcpForAgent(a, serverName)) return false;
+      durableUnlink(mcpServerMarkerPath(a.id, serverName));
+      return true;
+    };
+    const removed = a.id === "kilo" || a.id === "qwen"
+      ? withOwnedMcpTransactionLock(a.id, serverName, uninstallOne)
+      : uninstallOne();
+    if (removed) {
       process.stderr.write(`${mark("ok")} ${a.display_name}: ${serverName} MCP tool removed\n`);
     }
   }
@@ -10195,9 +10432,8 @@ function uninstallMcpForAgent(a: AgentProfile, serverName = "caveman"): boolean 
     case "opencode":
       return removeMcpJson(join(homedir(), ".config", "opencode", "opencode.json"), ["mcp", serverName]);
     case "kilo":
-      return removeMcpKiloJson(serverName);
     case "qwen":
-      return removeMcpQwenJson(serverName);
+      throw new Error(`${a.display_name} MCP changes require the ownership transaction`);
     case "gemini":
       return removeMcpJson(join(homedir(), ".gemini", "settings.json"), ["mcpServers", serverName]);
     case "hermes":
@@ -10298,15 +10534,16 @@ function kiloMcpEntryMatches(value: unknown, mcp: { command: string; args: strin
     && entry.command.every((arg, index) => typeof arg === "string" && arg === command[index]);
 }
 
-function readStrictMcpJsonRoot(path: string): { root: Record<string, unknown>; exists: boolean } | null {
-  let raw: string;
+function readStrictMcpJsonRoot(path: string): { root: Record<string, unknown>; exists: boolean; bytes: Buffer | null } | null {
+  let bytes: Buffer;
   try {
-    raw = readFileSync(path, "utf8");
+    bytes = readFileSync(path);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { root: {}, exists: false };
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { root: {}, exists: false, bytes: null };
     console.error(`${mark("warn")} cannot read ${path}: ${(e as Error).message}; not modifying it`);
     return null;
   }
+  const raw = bytes.toString("utf8");
   try {
     if (!raw.trim()) {
       console.error(`${mark("warn")} ${path} is empty; not modifying it`);
@@ -10317,11 +10554,91 @@ function readStrictMcpJsonRoot(path: string): { root: Record<string, unknown>; e
       console.error(`${mark("warn")} ${path} is not a JSON object; not modifying it`);
       return null;
     }
-    return { root: parsed as Record<string, unknown>, exists: true };
+    return { root: parsed as Record<string, unknown>, exists: true, bytes };
   } catch (e) {
     console.error(`${mark("warn")} cannot read ${path}: ${(e as Error).message}; not modifying it`);
     return null;
   }
+}
+
+type OwnedMcpConfigPlan = {
+  agent: "kilo" | "qwen";
+  path: string;
+  before: Buffer | null;
+  beforeMode: number;
+  after: Buffer | null;
+  changed: boolean;
+};
+
+function canonicalMcpConfigPath(path: string): string {
+  const absolute = normalize(resolve(path));
+  const missing: string[] = [];
+  let ancestor = absolute;
+  while (true) {
+    try {
+      return normalize(join(realpathSync(ancestor), ...missing));
+    } catch {
+      try {
+        if (lstatSync(ancestor).isSymbolicLink()) {
+          throw new Error(`MCP config path contains dangling symlink ${ancestor}; refusing mutation`);
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      const parent = dirname(ancestor);
+      if (parent === ancestor) return absolute;
+      missing.unshift(basename(ancestor));
+      ancestor = parent;
+    }
+  }
+}
+
+function ownedMcpConfigPlan(
+  agent: "kilo" | "qwen",
+  path: string,
+  loaded: { bytes: Buffer | null; exists: boolean },
+  after: Buffer | null,
+): OwnedMcpConfigPlan {
+  const canonicalPath = canonicalMcpConfigPath(path);
+  let beforeMode = 0o600;
+  if (loaded.exists) {
+    beforeMode = statSync(canonicalPath).mode & 0o777;
+    if (!optionalBytesEqual(fileBytes(canonicalPath), loaded.bytes)) {
+      throw new Error(`${canonicalPath} changed while planning MCP update; refusing overwrite`);
+    }
+  }
+  return {
+    agent,
+    path: canonicalPath,
+    before: loaded.bytes,
+    beforeMode,
+    after,
+    changed: !optionalBytesEqual(loaded.bytes, after),
+  };
+}
+
+function movedOwnedMcpEntryState(
+  agent: "kilo" | "qwen",
+  serverName: string,
+  marker: McpServerMarker,
+): "absent" | "present" | "ambiguous" {
+  const activePath = canonicalMcpConfigPath(agent === "kilo" ? kiloConfigPath() : qwenConfigPath());
+  if (marker.config_path === activePath || fileBytes(activePath) === null) return "absent";
+  const root = agent === "kilo" ? readOptionalJsonObject(activePath) : readQwenJsonObject(activePath);
+  if (!root) return "ambiguous";
+  const entry = jsonValueAt(root, agent === "kilo" ? ["mcp", serverName] : ["mcpServers", serverName]);
+  if (entry === undefined) return "absent";
+  // Exact match proves a physical move; a different value can be same moved
+  // registration edited afterward. Both retain ownership marker fail-closed.
+  return "present";
+}
+
+function movedOwnedMcpRemovalBlocked(agent: "kilo" | "qwen", serverName: string, marker: McpServerMarker): boolean {
+  const state = movedOwnedMcpEntryState(agent, serverName, marker);
+  if (state === "absent") return false;
+  const activePath = canonicalMcpConfigPath(agent === "kilo" ? kiloConfigPath() : qwenConfigPath());
+  console.error(`${mark("warn")} recorded ${agent} MCP config is missing while ${activePath} ${state === "present" ? "contains" : "may contain"} moved ${serverName} state; retaining ownership marker`);
+  return true;
 }
 
 function kiloJsoncBlocksJsonCreation(path: string, exists: boolean): boolean {
@@ -10330,72 +10647,83 @@ function kiloJsoncBlocksJsonCreation(path: string, exists: boolean): boolean {
   return true;
 }
 
-function installMcpKiloJson(mcp: { command: string; args: string[] }, serverName = "caveman"): boolean {
-  const path = kiloConfigPath();
+function planMcpKiloJson(mcp: { command: string; args: string[] }, serverName = "caveman"): OwnedMcpConfigPlan | null {
+  const path = canonicalMcpConfigPath(kiloConfigPath());
+  const marker = readMcpServerMarker("kilo", serverName);
+  if (marker?.config_path && marker.config_path !== path) {
+    console.error(`${mark("warn")} ${serverName} is owned in ${marker.config_path}; uninstall it before installing into ${path}`);
+    return null;
+  }
   const loaded = readStrictMcpJsonRoot(path);
-  if (!loaded || kiloJsoncBlocksJsonCreation(path, loaded.exists)) return false;
+  if (!loaded || kiloJsoncBlocksJsonCreation(path, loaded.exists)) return null;
   const { root } = loaded;
   if (root.mcp !== undefined && (!root.mcp || typeof root.mcp !== "object" || Array.isArray(root.mcp))) {
     console.error(`${mark("warn")} ${path} mcp must be a JSON object; not modifying it`);
-    return false;
+    return null;
   }
   const servers = root.mcp as Record<string, unknown> | undefined;
   const current = servers?.[serverName];
-  const marker = readMcpServerMarker("kilo", serverName);
+  if (marker && !marker.config_path && current === undefined) {
+    console.error(`${mark("warn")} legacy ${serverName} ownership marker does not identify its Kilo config; refusing relocation`);
+    return null;
+  }
   if (current !== undefined) {
     if (!marker) {
       console.error(`${mark("warn")} ${path} mcp.${serverName} exists but is not Caveman-journaled; refusing overwrite`);
-      return false;
+      return null;
     }
     if (!kiloMcpEntryMatches(current, marker)) {
       console.error(`${mark("warn")} ${path} mcp.${serverName} changed since Caveman installed it; refusing overwrite`);
-      return false;
+      return null;
     }
-    if (kiloMcpEntryMatches(current, mcp)) return true;
+    if (kiloMcpEntryMatches(current, mcp)) {
+      return ownedMcpConfigPlan("kilo", path, loaded, loaded.bytes!);
+    }
   }
   const nextServers = servers ?? {};
   nextServers[serverName] = kiloMcpEntry(mcp);
   root.mcp = nextServers;
-  try {
-    atomicWriteFile(path, Buffer.from(JSON.stringify(root, null, 2) + "\n"));
-    return true;
-  } catch (e) {
-    console.error(`${mark("warn")} cannot write ${path}: ${(e as Error).message}`);
-    return false;
-  }
+  return ownedMcpConfigPlan("kilo", path, loaded, Buffer.from(JSON.stringify(root, null, 2) + "\n"));
 }
 
-function removeMcpKiloJson(serverName = "caveman"): boolean {
-  const path = kiloConfigPath();
+function planRemoveMcpKiloJson(serverName = "caveman"): OwnedMcpConfigPlan | null {
+  const marker = readMcpServerMarker("kilo", serverName);
+  const path = marker?.config_path ?? canonicalMcpConfigPath(kiloConfigPath());
   const loaded = readStrictMcpJsonRoot(path);
-  if (!loaded || kiloJsoncBlocksJsonCreation(path, loaded.exists)) return false;
-  if (!loaded.exists) return true;
+  if (!loaded) return null;
+  if (!loaded.exists) {
+    if (marker && !marker.config_path) {
+      console.error(`${mark("warn")} legacy ${serverName} ownership marker does not identify its Kilo config; refusing removal`);
+      return null;
+    }
+    if (marker?.config_path && movedOwnedMcpRemovalBlocked("kilo", serverName, marker)) return null;
+    return ownedMcpConfigPlan("kilo", path, loaded, null);
+  }
   const { root } = loaded;
   if (root.mcp !== undefined && (!root.mcp || typeof root.mcp !== "object" || Array.isArray(root.mcp))) {
     console.error(`${mark("warn")} ${path} mcp must be a JSON object; not modifying it`);
-    return false;
+    return null;
   }
   const servers = root.mcp as Record<string, unknown> | undefined;
   const current = servers?.[serverName];
-  if (current === undefined) return true;
-  const marker = readMcpServerMarker("kilo", serverName);
+  if (current === undefined) {
+    if (marker && !marker.config_path) {
+      console.error(`${mark("warn")} legacy ${serverName} ownership marker does not identify its Kilo config; refusing removal`);
+      return null;
+    }
+    return ownedMcpConfigPlan("kilo", path, loaded, loaded.bytes);
+  }
   if (!marker) {
     console.error(`${mark("warn")} ${path} mcp.${serverName} exists but is not Caveman-journaled; refusing removal`);
-    return false;
+    return null;
   }
   if (!kiloMcpEntryMatches(current, marker)) {
     console.error(`${mark("warn")} ${path} mcp.${serverName} changed since Caveman installed it; refusing removal`);
-    return false;
+    return null;
   }
   delete servers![serverName];
   if (Object.keys(servers!).length === 0) delete root.mcp;
-  try {
-    atomicWriteFile(path, Buffer.from(JSON.stringify(root, null, 2) + "\n"));
-    return true;
-  } catch (e) {
-    console.error(`${mark("warn")} cannot write ${path}: ${(e as Error).message}`);
-    return false;
-  }
+  return ownedMcpConfigPlan("kilo", path, loaded, Buffer.from(JSON.stringify(root, null, 2) + "\n"));
 }
 
 type QwenHomeState = { root: string; env: NodeJS.ProcessEnv; ambiguous: boolean };
@@ -11068,85 +11396,440 @@ function ownedMcpRegistration(agentId: string, agentArgs: string[] = []): McpSer
   const marker = readMcpServerMarker(agentId, "caveman");
   if (!marker) return null;
   if (agentId === "kilo") {
-    const config = readOptionalJsonObject(kiloConfigPath());
+    const activePath = canonicalMcpConfigPath(kiloConfigPath());
+    if (marker.config_path && marker.config_path !== activePath) return null;
+    const config = readOptionalJsonObject(marker.config_path ?? activePath);
     return config && kiloMcpEntryMatches(jsonValueAt(config, ["mcp", "caveman"]), marker) ? marker : null;
   }
   if (agentId === "qwen") {
+    const activePath = canonicalMcpConfigPath(qwenConfigPath());
+    if (marker.config_path && marker.config_path !== activePath) return null;
     const layers = qwenSettingsLayers();
     if (!layers || !qwenArgsPermitRecovery(agentArgs, layers)) return null;
-    const config = readQwenJsonObject(qwenConfigPath());
+    const config = readQwenJsonObject(marker.config_path ?? activePath);
     if (!config || !qwenMcpEntryMatches(jsonValueAt(config, ["mcpServers", "caveman"]), marker)) return null;
     return qwenSettingsPermitRecovery(marker, layers) ? marker : null;
   }
   return marker;
 }
 
-function installMcpQwenJson(mcp: { command: string; args: string[] }, serverName = "caveman"): boolean {
-  const path = qwenConfigPath();
+function planMcpQwenJson(mcp: { command: string; args: string[] }, serverName = "caveman"): OwnedMcpConfigPlan | null {
+  const path = canonicalMcpConfigPath(qwenConfigPath());
+  const marker = readMcpServerMarker("qwen", serverName);
+  if (marker?.config_path && marker.config_path !== path) {
+    console.error(`${mark("warn")} ${serverName} is owned in ${marker.config_path}; uninstall it before installing into ${path}`);
+    return null;
+  }
   const loaded = readStrictMcpJsonRoot(path);
-  if (!loaded) return false;
+  if (!loaded) return null;
   const { root } = loaded;
   if (root.mcpServers !== undefined && (!root.mcpServers || typeof root.mcpServers !== "object" || Array.isArray(root.mcpServers))) {
     console.error(`${mark("warn")} ${path} mcpServers must be a JSON object; not modifying it`);
-    return false;
+    return null;
   }
   const servers = root.mcpServers as Record<string, unknown> | undefined;
   const current = servers?.[serverName];
-  const marker = readMcpServerMarker("qwen", serverName);
+  if (marker && !marker.config_path && current === undefined) {
+    console.error(`${mark("warn")} legacy ${serverName} ownership marker does not identify its Qwen config; refusing relocation`);
+    return null;
+  }
   if (current !== undefined) {
     if (!marker) {
       console.error(`${mark("warn")} ${path} mcpServers.${serverName} exists but is not Caveman-journaled; refusing overwrite`);
-      return false;
+      return null;
     }
     if (!qwenMcpEntryMatches(current, marker)) {
       console.error(`${mark("warn")} ${path} mcpServers.${serverName} changed since Caveman installed it; refusing overwrite`);
-      return false;
+      return null;
     }
-    if (qwenMcpEntryMatches(current, mcp)) return true;
+    if (qwenMcpEntryMatches(current, mcp)) {
+      return ownedMcpConfigPlan("qwen", path, loaded, loaded.bytes!);
+    }
   }
   const nextServers = servers ?? {};
   nextServers[serverName] = qwenMcpEntry(mcp);
   root.mcpServers = nextServers;
-  try {
-    atomicWriteFile(path, Buffer.from(JSON.stringify(root, null, 2) + "\n"));
-    return true;
-  } catch (e) {
-    console.error(`${mark("warn")} cannot write ${path}: ${(e as Error).message}`);
-    return false;
-  }
+  return ownedMcpConfigPlan("qwen", path, loaded, Buffer.from(JSON.stringify(root, null, 2) + "\n"));
 }
 
-function removeMcpQwenJson(serverName = "caveman"): boolean {
-  const path = qwenConfigPath();
+function planRemoveMcpQwenJson(serverName = "caveman"): OwnedMcpConfigPlan | null {
+  const marker = readMcpServerMarker("qwen", serverName);
+  const path = marker?.config_path ?? canonicalMcpConfigPath(qwenConfigPath());
   const loaded = readStrictMcpJsonRoot(path);
-  if (!loaded) return false;
-  if (!loaded.exists) return true;
+  if (!loaded) return null;
+  if (!loaded.exists) {
+    if (marker && !marker.config_path) {
+      console.error(`${mark("warn")} legacy ${serverName} ownership marker does not identify its Qwen config; refusing removal`);
+      return null;
+    }
+    if (marker?.config_path && movedOwnedMcpRemovalBlocked("qwen", serverName, marker)) return null;
+    return ownedMcpConfigPlan("qwen", path, loaded, null);
+  }
   const { root } = loaded;
   if (root.mcpServers !== undefined && (!root.mcpServers || typeof root.mcpServers !== "object" || Array.isArray(root.mcpServers))) {
     console.error(`${mark("warn")} ${path} mcpServers must be a JSON object; not modifying it`);
-    return false;
+    return null;
   }
   const servers = root.mcpServers as Record<string, unknown> | undefined;
   const current = servers?.[serverName];
-  if (current === undefined) return true;
-  const marker = readMcpServerMarker("qwen", serverName);
+  if (current === undefined) {
+    if (marker && !marker.config_path) {
+      console.error(`${mark("warn")} legacy ${serverName} ownership marker does not identify its Qwen config; refusing removal`);
+      return null;
+    }
+    return ownedMcpConfigPlan("qwen", path, loaded, loaded.bytes);
+  }
   if (!marker) {
     console.error(`${mark("warn")} ${path} mcpServers.${serverName} exists but is not Caveman-journaled; refusing removal`);
-    return false;
+    return null;
   }
   if (!qwenMcpEntryMatches(current, marker)) {
     console.error(`${mark("warn")} ${path} mcpServers.${serverName} changed since Caveman installed it; refusing removal`);
-    return false;
+    return null;
   }
   delete servers![serverName];
   if (Object.keys(servers!).length === 0) delete root.mcpServers;
+  return ownedMcpConfigPlan("qwen", path, loaded, Buffer.from(JSON.stringify(root, null, 2) + "\n"));
+}
+
+type OwnedMcpPendingJournal = {
+  schema_version: 1;
+  transaction_id: string;
+  agent: "kilo" | "qwen";
+  server_name: string;
+  action: "install" | "uninstall";
+  config_path: string;
+  marker_path: string;
+  config_before_base64: string | null;
+  config_before_mode: number;
+  config_before_sha256: string | null;
+  config_after_sha256: string | null;
+  marker_before_base64: string | null;
+  marker_before_mode: number;
+  marker_before_sha256: string | null;
+  marker_after_base64: string | null;
+  marker_after_sha256: string | null;
+};
+
+function optionalBytesHash(bytes: Buffer | null): string | null {
+  return bytes ? bytesHash(bytes) : null;
+}
+
+function mcpPendingJournalPath(agent: "kilo" | "qwen", serverName: string): string {
+  return `${canonicalOwnedMcpMarkerPath(agent, serverName)}.pending`;
+}
+
+function mcpConfigPendingJournalPath(configPath: string): string {
+  const canonicalPath = canonicalMcpConfigPath(configPath);
+  return join(dirname(canonicalPath), `.${basename(canonicalPath)}.caveman-mcp.pending.json`);
+}
+
+function mcpMarkerBytes(mcp: { command: string; args: string[] }, tool: string, configPath?: string): Buffer {
+  return Buffer.from(JSON.stringify({
+    ...(configPath ? { schema_version: 1 } : {}),
+    tool,
+    command: mcp.command,
+    args: mcp.args,
+    ...(configPath ? { config_path: canonicalMcpConfigPath(configPath) } : {}),
+  }, null, 2) + "\n");
+}
+
+function validMcpMarkerBytes(bytes: Buffer, agent: "kilo" | "qwen", serverName: string): boolean {
+  return parseMcpServerMarkerBytes(agent, serverName, bytes) !== null;
+}
+
+function decodePendingBytes(value: unknown, field: string): Buffer | null {
+  if (value === null) return null;
+  if (typeof value !== "string") throw new Error(`${field} must be base64 or null`);
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.toString("base64") !== value) throw new Error(`${field} is not canonical base64`);
+  return bytes;
+}
+
+function validOptionalHash(value: unknown): value is string | null {
+  return value === null || (typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value));
+}
+
+type ReadOwnedMcpPendingJournal = {
+  journal: OwnedMcpPendingJournal;
+  configBefore: Buffer | null;
+  markerBefore: Buffer | null;
+  markerAfter: Buffer | null;
+  path: string;
+  bytes: Buffer;
+};
+
+function ownedMcpPendingLabel(agent?: string, serverName?: string): string {
+  return agent && serverName ? `${agent} ${serverName} MCP` : "owned MCP";
+}
+
+function readOwnedMcpPendingJournalAt(
+  path: string,
+  expected: { agent?: "kilo" | "qwen"; serverName?: string; configPath?: string; locatorPath?: string } = {},
+): ReadOwnedMcpPendingJournal | null {
+  const label = ownedMcpPendingLabel(expected.agent, expected.serverName);
+  let bytes: Buffer;
+  let value: Record<string, unknown>;
   try {
-    atomicWriteFile(path, Buffer.from(JSON.stringify(root, null, 2) + "\n"));
-    return true;
-  } catch (e) {
-    console.error(`${mark("warn")} cannot write ${path}: ${(e as Error).message}`);
-    return false;
+    bytes = readFileSync(path);
+    value = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new Error(`cannot read pending ${label} transaction: ${(error as Error).message}`);
   }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`pending ${label} transaction is malformed; refusing recovery`);
+  }
+  if (process.platform !== "win32" && (statSync(path).mode & 0o077) !== 0) {
+    throw new Error(`pending ${label} transaction has unsafe permissions; refusing recovery`);
+  }
+  const keys = [
+    "action", "agent", "config_after_sha256", "config_before_base64", "config_before_mode", "config_path",
+    "config_before_sha256", "marker_after_base64", "marker_after_sha256", "marker_before_base64", "marker_before_mode",
+    "marker_before_sha256", "marker_path", "schema_version", "server_name", "transaction_id",
+  ].sort();
+  const journalAgent = value.agent;
+  const journalServer = value.server_name;
+  if (Object.keys(value).sort().join("\0") !== keys.join("\0")
+    || value.schema_version !== 1
+    || typeof value.transaction_id !== "string"
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.transaction_id)
+    || (journalAgent !== "kilo" && journalAgent !== "qwen")
+    || typeof journalServer !== "string"
+    || !mcpServerToolName(journalServer)
+    || (expected.agent !== undefined && journalAgent !== expected.agent)
+    || (expected.serverName !== undefined && journalServer !== expected.serverName)
+    || (value.action !== "install" && value.action !== "uninstall")
+    || typeof value.config_path !== "string"
+    || value.config_path !== canonicalMcpConfigPath(value.config_path)
+    || (expected.configPath !== undefined && value.config_path !== canonicalMcpConfigPath(expected.configPath))
+    || typeof value.marker_path !== "string"
+    || value.marker_path !== canonicalMcpConfigPath(value.marker_path)
+    || (expected.locatorPath !== undefined && `${value.marker_path}.pending` !== canonicalMcpConfigPath(expected.locatorPath))
+    || !Number.isInteger(value.config_before_mode) || (value.config_before_mode as number) < 0 || (value.config_before_mode as number) > 0o777
+    || !Number.isInteger(value.marker_before_mode) || (value.marker_before_mode as number) < 0 || (value.marker_before_mode as number) > 0o777
+    || !validOptionalHash(value.config_before_sha256)
+    || !validOptionalHash(value.config_after_sha256)
+    || !validOptionalHash(value.marker_before_sha256)
+    || !validOptionalHash(value.marker_after_sha256)) {
+    throw new Error(`pending ${label} transaction is malformed; refusing recovery`);
+  }
+  try {
+    const configBefore = decodePendingBytes(value.config_before_base64, "config_before_base64");
+    const markerBefore = decodePendingBytes(value.marker_before_base64, "marker_before_base64");
+    const markerAfter = decodePendingBytes(value.marker_after_base64, "marker_after_base64");
+    if (optionalBytesHash(configBefore) !== value.config_before_sha256
+      || optionalBytesHash(markerBefore) !== value.marker_before_sha256
+      || optionalBytesHash(markerAfter) !== value.marker_after_sha256
+      || (markerBefore !== null && !validMcpMarkerBytes(markerBefore, journalAgent, journalServer))
+      || (markerAfter !== null && !validMcpMarkerBytes(markerAfter, journalAgent, journalServer))
+      || (markerBefore !== null && parseMcpServerMarkerBytes(journalAgent, journalServer, markerBefore)?.config_path !== undefined
+        && parseMcpServerMarkerBytes(journalAgent, journalServer, markerBefore)?.config_path !== value.config_path)
+      || (markerAfter !== null && parseMcpServerMarkerBytes(journalAgent, journalServer, markerAfter)?.config_path !== value.config_path)
+      || (value.action === "install") !== (markerAfter !== null)) {
+      throw new Error("journal bytes do not match declared transaction state");
+    }
+    return {
+      journal: value as OwnedMcpPendingJournal,
+      configBefore,
+      markerBefore,
+      markerAfter,
+      path,
+      bytes,
+    };
+  } catch (error) {
+    throw new Error(`pending ${label} transaction is malformed: ${(error as Error).message}`);
+  }
+}
+
+function readOwnedMcpPendingLocator(agent: "kilo" | "qwen", serverName: string): ReadOwnedMcpPendingJournal | null {
+  const path = canonicalMcpConfigPath(mcpPendingJournalPath(agent, serverName));
+  return readOwnedMcpPendingJournalAt(path, { agent, serverName, locatorPath: path });
+}
+
+function readOwnedMcpConfigPending(configPath: string): ReadOwnedMcpPendingJournal | null {
+  const canonicalPath = canonicalMcpConfigPath(configPath);
+  return readOwnedMcpPendingJournalAt(mcpConfigPendingJournalPath(canonicalPath), { configPath: canonicalPath });
+}
+
+type OwnedMcpRecovery = "none" | "discarded" | "finalized" | "rolled-back";
+
+function recoverOwnedMcpTransaction(pending: ReadOwnedMcpPendingJournal | null): OwnedMcpRecovery {
+  if (!pending) return "none";
+  const { journal, configBefore, markerBefore } = pending;
+  const agent = journal.agent;
+  const serverName = journal.server_name;
+  const configPath = journal.config_path;
+  const markerPath = journal.marker_path;
+  const configPendingPath = mcpConfigPendingJournalPath(configPath);
+  const locatorPath = `${markerPath}.pending`;
+  const configPending = readOwnedMcpPendingJournalAt(configPendingPath, { agent, serverName, configPath });
+  const locatorPending = readOwnedMcpPendingJournalAt(locatorPath, { agent, serverName, configPath, locatorPath });
+  if (configPending && locatorPending && !configPending.bytes.equals(locatorPending.bytes)) {
+    throw new Error(`${agent} ${serverName} MCP transaction journals disagree; refusing recovery`);
+  }
+  const configCurrent = fileBytes(configPath);
+  const markerCurrent = fileBytes(markerPath);
+  const configHash = optionalBytesHash(configCurrent);
+  const markerHash = optionalBytesHash(markerCurrent);
+  const configIsBefore = configHash === journal.config_before_sha256;
+  const configIsAfter = configHash === journal.config_after_sha256;
+  const markerIsBefore = markerHash === journal.marker_before_sha256;
+  const markerIsAfter = markerHash === journal.marker_after_sha256;
+  const removePendingCopies = () => {
+    if (configPending) durableUnlink(configPendingPath);
+    if (locatorPending) durableUnlink(locatorPath);
+  };
+
+  if (configIsAfter && markerIsAfter) {
+    removePendingCopies();
+    process.stderr.write(`${mark("warn")} finalized interrupted ${agent} ${serverName} MCP transaction\n`);
+    return "finalized";
+  }
+  if (configIsBefore && markerIsBefore) {
+    removePendingCopies();
+    process.stderr.write(`${mark("warn")} discarded uncommitted ${agent} ${serverName} MCP transaction\n`);
+    return "discarded";
+  }
+  if ((!configIsBefore && !configIsAfter) || (!markerIsBefore && !markerIsAfter)) {
+    throw new Error(`${agent} ${serverName} MCP config or ownership journal changed during interrupted transaction; refusing destructive recovery`);
+  }
+  if (!configPending || !locatorPending) {
+    throw new Error(`${agent} ${serverName} MCP transaction lost one durable journal copy; refusing destructive recovery`);
+  }
+
+  if (!configIsBefore) {
+    durableReplaceFileIfUnchanged(configPath, configCurrent, configBefore, journal.config_before_mode);
+  }
+  if (!markerIsBefore) {
+    durableReplaceFileIfUnchanged(markerPath, markerCurrent, markerBefore, journal.marker_before_mode);
+  }
+  if (optionalBytesHash(fileBytes(configPath)) !== journal.config_before_sha256
+    || optionalBytesHash(fileBytes(markerPath)) !== journal.marker_before_sha256) {
+    throw new Error(`${agent} ${serverName} MCP rollback postflight mismatch`);
+  }
+  removePendingCopies();
+  process.stderr.write(`${mark("warn")} rolled back interrupted ${agent} ${serverName} MCP transaction\n`);
+  return "rolled-back";
+}
+
+function transactOwnedMcpConfig(
+  agent: "kilo" | "qwen",
+  serverName: string,
+  action: "install" | "uninstall",
+  mcp?: { command: string; args: string[] },
+  lockedConfigPath?: string,
+): boolean {
+  const plan = action === "install"
+    ? agent === "kilo" ? planMcpKiloJson(mcp!, serverName) : planMcpQwenJson(mcp!, serverName)
+    : agent === "kilo" ? planRemoveMcpKiloJson(serverName) : planRemoveMcpQwenJson(serverName);
+  if (!plan) return false;
+  if (lockedConfigPath && plan.path !== canonicalMcpConfigPath(lockedConfigPath)) {
+    throw new Error(`${agent} ${serverName} MCP config target changed while acquiring lock; refusing mutation`);
+  }
+
+  const markerPath = canonicalOwnedMcpMarkerPath(agent, serverName);
+  const markerBefore = fileBytes(markerPath);
+  if (markerBefore !== null && !validMcpMarkerBytes(markerBefore, agent, serverName)) {
+    throw new Error(`${markerPath} is not a valid Caveman ownership journal; refusing overwrite`);
+  }
+  const markerBeforeMode = markerBefore === null ? 0o600 : statSync(markerPath).mode & 0o777;
+  if (!optionalBytesEqual(fileBytes(markerPath), markerBefore)) {
+    throw new Error(`${markerPath} changed while planning MCP update; refusing overwrite`);
+  }
+  const markerAfter = action === "install" ? mcpMarkerBytes(mcp!, mcpServerToolName(serverName)!, plan.path) : null;
+  if (!plan.changed && optionalBytesEqual(markerBefore, markerAfter)) return true;
+
+  const journal: OwnedMcpPendingJournal = {
+    schema_version: 1,
+    transaction_id: randomUUID(),
+    agent,
+    server_name: serverName,
+    action,
+    config_path: plan.path,
+    marker_path: markerPath,
+    config_before_base64: plan.before?.toString("base64") ?? null,
+    config_before_mode: plan.beforeMode,
+    config_before_sha256: optionalBytesHash(plan.before),
+    config_after_sha256: optionalBytesHash(plan.after),
+    marker_before_base64: markerBefore?.toString("base64") ?? null,
+    marker_before_mode: markerBeforeMode,
+    marker_before_sha256: optionalBytesHash(markerBefore),
+    marker_after_base64: markerAfter?.toString("base64") ?? null,
+    marker_after_sha256: optionalBytesHash(markerAfter),
+  };
+  const locatorPath = `${markerPath}.pending`;
+  const configPendingPath = mcpConfigPendingJournalPath(plan.path);
+  const pendingBytes = Buffer.from(JSON.stringify(journal, null, 2) + "\n");
+  if (fileBytes(locatorPath) !== null || fileBytes(configPendingPath) !== null) {
+    throw new Error(`${agent} ${serverName} MCP transaction journal already exists; refusing overwrite`);
+  }
+  durableCreateFile(locatorPath, pendingBytes);
+  try {
+    durableCreateFile(configPendingPath, pendingBytes);
+  } catch (error) {
+    durableUnlink(locatorPath);
+    throw error;
+  }
+
+  try {
+    if (action === "install") {
+      if (plan.changed) durableReplaceFileIfUnchanged(plan.path, plan.before, plan.after, plan.beforeMode);
+      if (!optionalBytesEqual(markerBefore, markerAfter)) durableReplaceFileIfUnchanged(markerPath, markerBefore, markerAfter);
+    } else {
+      if (!optionalBytesEqual(markerBefore, markerAfter)) durableReplaceFileIfUnchanged(markerPath, markerBefore, markerAfter);
+      if (plan.changed) durableReplaceFileIfUnchanged(plan.path, plan.before, plan.after, plan.beforeMode);
+    }
+    if (optionalBytesHash(fileBytes(plan.path)) !== journal.config_after_sha256
+      || optionalBytesHash(fileBytes(markerPath)) !== journal.marker_after_sha256) {
+      throw new Error(`${agent} ${serverName} MCP transaction postflight mismatch`);
+    }
+    durableUnlink(configPendingPath);
+    durableUnlink(locatorPath);
+    return true;
+  } catch (error) {
+    try {
+      const recovery = recoverOwnedMcpTransaction(readOwnedMcpConfigPending(plan.path) ?? readOwnedMcpPendingLocator(agent, serverName));
+      if (recovery === "finalized") return true;
+    } catch (recoveryError) {
+      throw new Error(`${agent} ${serverName} MCP transaction failed and safe recovery was blocked: ${(recoveryError as Error).message}; original error: ${(error as Error).message}`);
+    }
+    throw new Error(`${agent} ${serverName} MCP transaction failed and rolled back: ${(error as Error).message}`);
+  }
+}
+
+function withOwnedMcpTransactionLock<T>(
+  agent: "kilo" | "qwen",
+  serverName: string,
+  run: (lockedConfigPath: string) => T,
+): T {
+  const markerPath = canonicalOwnedMcpMarkerPath(agent, serverName);
+  return withMcpConfigLock(markerPath, () => {
+    const activeConfigPath = () => canonicalMcpConfigPath(agent === "kilo" ? kiloConfigPath() : qwenConfigPath());
+    const resourcePath = () => readOwnedMcpPendingLocator(agent, serverName)?.journal.config_path
+      ?? readMcpServerMarker(agent, serverName)?.config_path
+      ?? activeConfigPath();
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const lockPath = canonicalMcpConfigPath(resourcePath());
+      const outcome = withMcpConfigLock<{ retry: true } | { retry: false; value: T }>(lockPath, () => {
+        const locatorPending = readOwnedMcpPendingLocator(agent, serverName);
+        if (locatorPending) {
+          if (locatorPending.journal.config_path !== lockPath) return { retry: true };
+          recoverOwnedMcpTransaction(locatorPending);
+          return { retry: true };
+        }
+        const configPending = readOwnedMcpConfigPending(lockPath);
+        if (configPending) {
+          recoverOwnedMcpTransaction(configPending);
+          return { retry: true };
+        }
+        if (canonicalMcpConfigPath(resourcePath()) !== lockPath) return { retry: true };
+        return { retry: false, value: run(lockPath) };
+      });
+      if (!outcome.retry) return outcome.value;
+    }
+    throw new Error(`${agent} ${serverName} MCP transaction state kept changing; refusing mutation`);
+  });
 }
 
 function mcpInstall(target?: string, serverName = "caveman"): number {
@@ -11191,17 +11874,32 @@ function mcpInstall(target?: string, serverName = "caveman"): number {
   }
   let installed = 0;
   for (const a of targets) {
-    if (installMcpForAgent(a, mcp, serverName)) {
-      if (serverName === "caveman") {
-        writeMcpMarker(a.id, mcp);
-      } else {
-        writeMcpServerMarker(
-          a.id,
-          serverName,
-          mcp,
-          serverName === "caveman-browse" ? "caveman_browse" : serverName === "caveman-delegate" ? "caveman_delegate" : "caveman_context",
-        );
+    preflightMcpServerMarker(a.id, serverName);
+    const installOne = (lockedConfigPath?: string): boolean => {
+      if (a.id === "kilo" || a.id === "qwen") {
+        return transactOwnedMcpConfig(a.id, serverName, "install", mcp, lockedConfigPath);
       }
+      if (!installMcpForAgent(a, mcp, serverName)) return false;
+      try {
+        if (serverName === "caveman") {
+          writeMcpMarker(a.id, mcp);
+        } else {
+          writeMcpServerMarker(
+            a.id,
+            serverName,
+            mcp,
+            serverName === "caveman-browse" ? "caveman_browse" : serverName === "caveman-delegate" ? "caveman_delegate" : "caveman_context",
+          );
+        }
+      } catch (error) {
+        throw new Error(`${a.display_name}: MCP ownership journal failed; native config may already contain the registration: ${(error as Error).message}`);
+      }
+      return true;
+    };
+    const installedForAgent = a.id === "kilo" || a.id === "qwen"
+      ? withOwnedMcpTransactionLock(a.id, serverName, installOne)
+      : installOne();
+    if (installedForAgent) {
       installed++;
       const tool = serverName === "caveman"
         ? "caveman_retrieve"
@@ -11235,9 +11933,8 @@ function installMcpForAgent(a: AgentProfile, mcp: { command: string; args: strin
         enabled: true,
       });
     case "kilo":
-      return installMcpKiloJson(mcp, serverName);
     case "qwen":
-      return installMcpQwenJson(mcp, serverName);
+      throw new Error(`${a.display_name} MCP changes require the ownership transaction`);
     case "gemini":
       return installMcpJson(join(homedir(), ".gemini", "settings.json"), ["mcpServers", serverName], {
         command: mcp.command,
@@ -11428,12 +12125,7 @@ function writeMcpMarker(agentId: string, mcp: { command: string; args: string[] 
 
 function writeMcpServerMarker(agentId: string, serverName: string, mcp: { command: string; args: string[] }, tool: string): void {
   const path = mcpServerMarkerPath(agentId, serverName);
-  try {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify({ tool, command: mcp.command, args: mcp.args }, null, 2) + "\n");
-  } catch {
-    // best-effort: without the marker, wrap simply tries the loadout again later.
-  }
+  durableAtomicWriteFile(path, mcpMarkerBytes(mcp, tool));
 }
 
 // compress streams stdin through the caveman-engine binary (resolved via

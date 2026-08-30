@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -152,6 +153,94 @@ function qwenMcpFixture() {
     },
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
+}
+
+function stateHash(bytes) {
+  return bytes === null ? null : `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+function canonicalPath(path) {
+  try { return realpathSync(path); }
+  catch { return join(realpathSync(dirname(path)), path.slice(dirname(path).length + 1)); }
+}
+
+function configPendingPath(configPath) {
+  const canonical = canonicalPath(configPath);
+  return join(dirname(canonical), `.${canonical.slice(dirname(canonical).length + 1)}.caveman-mcp.pending.json`);
+}
+
+function mcpLockPath(resourcePath) {
+  const canonical = canonicalPath(resourcePath);
+  const key = createHash("sha256").update(canonical).digest("hex").slice(0, 20);
+  return join(dirname(canonical), `.caveman-mcp-${key}.lock`);
+}
+
+function writePendingCopies(markerPath, configPath, journal) {
+  const bytes = JSON.stringify(journal, null, 2) + "\n";
+  writeFileSync(`${markerPath}.pending`, bytes, { mode: 0o600 });
+  writeFileSync(configPendingPath(configPath), bytes, { mode: 0o600 });
+}
+
+function ownedMarker(configPath, command, tool = "caveman_retrieve") {
+  return {
+    schema_version: 1,
+    tool,
+    command,
+    args: [],
+    config_path: canonicalPath(configPath),
+  };
+}
+
+function ownedMarkerBytes(configPath, command, tool = "caveman_retrieve") {
+  return Buffer.from(JSON.stringify(ownedMarker(configPath, command, tool), null, 2) + "\n");
+}
+
+function writePendingMcpInstall(agent, markerPath, configPath, configBefore, configAfter, markerAfter, configMode = 0o600) {
+  const canonicalConfig = canonicalPath(configPath);
+  const canonicalMarker = canonicalPath(markerPath);
+  const journal = {
+    schema_version: 1,
+    transaction_id: "00000000-0000-4000-8000-000000000001",
+    agent,
+    server_name: "caveman",
+    action: "install",
+    config_path: canonicalConfig,
+    marker_path: canonicalMarker,
+    config_before_base64: configBefore?.toString("base64") ?? null,
+    config_before_mode: configMode,
+    config_before_sha256: stateHash(configBefore),
+    config_after_sha256: stateHash(configAfter),
+    marker_before_base64: null,
+    marker_before_mode: 0o600,
+    marker_before_sha256: null,
+    marker_after_base64: markerAfter.toString("base64"),
+    marker_after_sha256: stateHash(markerAfter),
+  };
+  writePendingCopies(markerPath, configPath, journal);
+}
+
+function writePendingMcpUninstall(agent, markerPath, configPath, configBefore, configAfter, markerBefore, configMode = 0o600) {
+  const canonicalConfig = canonicalPath(configPath);
+  const canonicalMarker = canonicalPath(markerPath);
+  const journal = {
+    schema_version: 1,
+    transaction_id: "00000000-0000-4000-8000-000000000002",
+    agent,
+    server_name: "caveman",
+    action: "uninstall",
+    config_path: canonicalConfig,
+    marker_path: canonicalMarker,
+    config_before_base64: configBefore.toString("base64"),
+    config_before_mode: configMode,
+    config_before_sha256: stateHash(configBefore),
+    config_after_sha256: stateHash(configAfter),
+    marker_before_base64: markerBefore.toString("base64"),
+    marker_before_mode: 0o600,
+    marker_before_sha256: stateHash(markerBefore),
+    marker_after_base64: null,
+    marker_after_sha256: null,
+  };
+  writePendingCopies(markerPath, configPath, journal);
 }
 
 test("Qwen profile uses high-precedence system settings without static model args", () => {
@@ -782,7 +871,7 @@ test("Qwen MCP install is idempotent, marker-owned, upgradeable, and reversible"
   const fx = qwenMcpFixture();
   try {
     const sibling = { command: "sibling-mcp", args: ["serve"] };
-    writeFileSync(fx.configPath, JSON.stringify({ general: { vimMode: true }, mcpServers: { sibling } }, null, 2) + "\n");
+    writeFileSync(fx.configPath, JSON.stringify({ general: { vimMode: true }, mcpServers: { sibling } }, null, 2) + "\n", { mode: 0o640 });
 
     withEnv({
       HOME: fx.env.HOME,
@@ -799,15 +888,11 @@ test("Qwen MCP install is idempotent, marker-owned, upgradeable, and reversible"
     assert.equal(installed.code, 0, installed.stderr);
     const firstBytes = readFileSync(fx.configPath, "utf8");
     const first = JSON.parse(firstBytes);
-    assert.equal(statSync(fx.configPath).mode & 0o777, 0o600);
+    assert.equal(statSync(fx.configPath).mode & 0o777, 0o640);
     assert.equal(first.general.vimMode, true);
     assert.deepEqual(first.mcpServers.sibling, sibling);
     assert.deepEqual(first.mcpServers.caveman, { command: fx.mcpV1, args: [] });
-    assert.deepEqual(JSON.parse(readFileSync(fx.markerPath, "utf8")), {
-      tool: "caveman_retrieve",
-      command: fx.mcpV1,
-      args: [],
-    });
+    assert.deepEqual(JSON.parse(readFileSync(fx.markerPath, "utf8")), ownedMarker(fx.configPath, fx.mcpV1));
     withEnv({
       HOME: fx.env.HOME,
       CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
@@ -839,7 +924,498 @@ test("Qwen MCP install is idempotent, marker-owned, upgradeable, and reversible"
     const final = JSON.parse(readFileSync(fx.configPath, "utf8"));
     assert.equal(final.general.vimMode, true);
     assert.deepEqual(final.mcpServers, { sibling });
+    assert.equal(statSync(fx.configPath).mode & 0o777, 0o640);
     assert.equal(existsSync(fx.markerPath), false);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("Qwen MCP config and ownership journal commit together", async (t) => {
+  await t.test("unusable journal storage blocks native config mutation", async () => {
+    const fx = qwenMcpFixture();
+    try {
+      const source = JSON.stringify({ general: { vimMode: true } }, null, 2) + "\n";
+      writeFileSync(fx.configPath, source);
+      const blockedHome = join(fx.root, "caveman-home-is-a-file");
+      writeFileSync(blockedHome, "not a directory\n");
+
+      const installed = await runCli(["mcp", "install", "qwen"], { ...fx.env, CAVEMAN_HOME: blockedHome });
+      assert.equal(installed.code, 1, installed.stderr);
+      assert.match(installed.stderr, /cannot persist qwen caveman MCP ownership journal/);
+      assert.doesNotMatch(installed.stderr, /caveman_retrieve installed/);
+      assert.equal(readFileSync(fx.configPath, "utf8"), source);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  await t.test("foreign marker target blocks before native config mutation", async () => {
+    const fx = qwenMcpFixture();
+    try {
+      const source = JSON.stringify({ general: { vimMode: true } }, null, 2) + "\n";
+      writeFileSync(fx.configPath, source, { mode: 0o640 });
+      const originalMode = statSync(fx.configPath).mode & 0o777;
+      mkdirSync(fx.markerPath, { recursive: true });
+
+      const installed = await runCli(["mcp", "install", "qwen"], fx.env);
+      assert.equal(installed.code, 1, installed.stderr);
+      assert.match(installed.stderr, /EISDIR|directory/);
+      assert.doesNotMatch(installed.stderr, /caveman_retrieve installed/);
+      assert.equal(readFileSync(fx.configPath, "utf8"), source);
+      assert.equal(statSync(fx.configPath).mode & 0o777, originalMode);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  await t.test("dangling config symlink fails closed without replacing topology", async () => {
+    const fx = qwenMcpFixture();
+    try {
+      symlinkSync(join(fx.root, "missing-settings-target.json"), fx.configPath);
+      const installed = await runCli(["mcp", "install", "qwen"], fx.env);
+      assert.equal(installed.code, 1, installed.stderr);
+      assert.match(installed.stderr, /contains dangling symlink/);
+      assert.equal(lstatSync(fx.configPath).isSymbolicLink(), true);
+      assert.equal(existsSync(fx.markerPath), false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  await t.test("ownership marker symlink fails closed", async () => {
+    const fx = qwenMcpFixture();
+    try {
+      const source = "{}\n";
+      const markerTarget = join(fx.root, "external-marker.json");
+      writeFileSync(fx.configPath, source, { mode: 0o600 });
+      writeFileSync(markerTarget, "external\n", { mode: 0o600 });
+      mkdirSync(dirname(fx.markerPath), { recursive: true });
+      symlinkSync(markerTarget, fx.markerPath);
+
+      const installed = await runCli(["mcp", "install", "qwen"], fx.env);
+      assert.equal(installed.code, 1, installed.stderr);
+      assert.match(installed.stderr, /is a symlink; refusing transactional ownership mutation/);
+      assert.equal(readFileSync(fx.configPath, "utf8"), source);
+      assert.equal(readFileSync(markerTarget, "utf8"), "external\n");
+      assert.equal(lstatSync(fx.markerPath).isSymbolicLink(), true);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  await t.test("interrupted config commit rolls back then retries cleanly", async () => {
+    const fx = qwenMcpFixture();
+    try {
+      const before = Buffer.from(JSON.stringify({ general: { vimMode: true } }, null, 2) + "\n");
+      const after = Buffer.from(JSON.stringify({
+        general: { vimMode: true },
+        mcpServers: { caveman: { command: fx.mcpV1, args: [] } },
+      }, null, 2) + "\n");
+      const markerAfter = ownedMarkerBytes(fx.configPath, fx.mcpV1);
+      mkdirSync(dirname(fx.markerPath), { recursive: true });
+      writeFileSync(fx.configPath, after, { mode: 0o600 });
+      writePendingMcpInstall("qwen", fx.markerPath, fx.configPath, before, after, markerAfter);
+
+      const installed = await runCli(["mcp", "install", "qwen"], fx.env);
+      assert.equal(installed.code, 0, installed.stderr);
+      assert.match(installed.stderr, /rolled back interrupted qwen caveman MCP transaction/);
+      assert.equal(readFileSync(fx.configPath, "utf8"), after.toString("utf8"));
+      assert.equal(readFileSync(fx.markerPath, "utf8"), markerAfter.toString("utf8"));
+      assert.equal(existsSync(`${fx.markerPath}.pending`), false);
+      assert.equal(existsSync(configPendingPath(fx.configPath)), false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  await t.test("recovery stays bound to original QWEN_HOME", async () => {
+    const fx = qwenMcpFixture();
+    try {
+      const before = Buffer.from(JSON.stringify({ general: { vimMode: true } }, null, 2) + "\n");
+      const after = Buffer.from(JSON.stringify({
+        general: { vimMode: true },
+        mcpServers: { caveman: { command: fx.mcpV1, args: [] } },
+      }, null, 2) + "\n");
+      const markerAfter = ownedMarkerBytes(fx.configPath, fx.mcpV1);
+      mkdirSync(dirname(fx.markerPath), { recursive: true });
+      writeFileSync(fx.configPath, after, { mode: 0o600 });
+      writePendingMcpInstall("qwen", fx.markerPath, fx.configPath, before, after, markerAfter);
+      const shiftedHome = join(fx.root, "shifted-qwen-home");
+      const shiftedConfig = join(shiftedHome, "settings.json");
+
+      const installed = await runCli(["mcp", "install", "qwen"], { ...fx.env, QWEN_HOME: shiftedHome });
+      assert.equal(installed.code, 0, installed.stderr);
+      assert.match(installed.stderr, /rolled back interrupted qwen caveman MCP transaction/);
+      assert.equal(readFileSync(fx.configPath, "utf8"), before.toString("utf8"));
+      assert.deepEqual(JSON.parse(readFileSync(shiftedConfig, "utf8")).mcpServers.caveman, {
+        command: fx.mcpV1,
+        args: [],
+      });
+      assert.deepEqual(JSON.parse(readFileSync(fx.markerPath, "utf8")), ownedMarker(shiftedConfig, fx.mcpV1));
+      assert.equal(existsSync(`${fx.markerPath}.pending`), false);
+      assert.equal(existsSync(configPendingPath(fx.configPath)), false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  await t.test("foreign edit blocks interrupted-transaction rollback", async () => {
+    const fx = qwenMcpFixture();
+    try {
+      const before = Buffer.from(JSON.stringify({ general: { vimMode: true } }, null, 2) + "\n");
+      const after = Buffer.from(JSON.stringify({
+        general: { vimMode: true },
+        mcpServers: { caveman: { command: fx.mcpV1, args: [] } },
+      }, null, 2) + "\n");
+      const foreign = Buffer.from(JSON.stringify({ general: { vimMode: false } }, null, 2) + "\n");
+      const markerAfter = ownedMarkerBytes(fx.configPath, fx.mcpV1);
+      mkdirSync(dirname(fx.markerPath), { recursive: true });
+      writeFileSync(fx.configPath, foreign);
+      writePendingMcpInstall("qwen", fx.markerPath, fx.configPath, before, after, markerAfter);
+
+      const installed = await runCli(["mcp", "install", "qwen"], fx.env);
+      assert.equal(installed.code, 1, installed.stderr);
+      assert.match(installed.stderr, /changed during interrupted transaction; refusing destructive recovery/);
+      assert.equal(readFileSync(fx.configPath, "utf8"), foreign.toString("utf8"));
+      assert.equal(existsSync(`${fx.markerPath}.pending`), true);
+      assert.equal(existsSync(configPendingPath(fx.configPath)), true);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  await t.test("marker-only precommit intent is discarded before retry", async () => {
+    const fx = qwenMcpFixture();
+    try {
+      const before = Buffer.from("{}\n");
+      const after = Buffer.from(JSON.stringify({
+        mcpServers: { caveman: { command: fx.mcpV1, args: [] } },
+      }, null, 2) + "\n");
+      const markerAfter = ownedMarkerBytes(fx.configPath, fx.mcpV1);
+      mkdirSync(dirname(fx.markerPath), { recursive: true });
+      writeFileSync(fx.configPath, before, { mode: 0o600 });
+      writePendingMcpInstall("qwen", fx.markerPath, fx.configPath, before, after, markerAfter);
+      rmSync(configPendingPath(fx.configPath));
+
+      const installed = await runCli(["mcp", "install", "qwen"], fx.env);
+      assert.equal(installed.code, 0, installed.stderr);
+      assert.match(installed.stderr, /discarded uncommitted qwen caveman MCP transaction/);
+      assert.equal(readFileSync(fx.configPath, "utf8"), after.toString("utf8"));
+      assert.equal(existsSync(`${fx.markerPath}.pending`), false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  await t.test("mismatched durable journal copies fail closed", async () => {
+    const fx = qwenMcpFixture();
+    try {
+      const before = Buffer.from("{}\n");
+      const after = Buffer.from(JSON.stringify({
+        mcpServers: { caveman: { command: fx.mcpV1, args: [] } },
+      }, null, 2) + "\n");
+      const markerAfter = ownedMarkerBytes(fx.configPath, fx.mcpV1);
+      mkdirSync(dirname(fx.markerPath), { recursive: true });
+      writeFileSync(fx.configPath, after, { mode: 0o600 });
+      writePendingMcpInstall("qwen", fx.markerPath, fx.configPath, before, after, markerAfter);
+      const scopedPath = configPendingPath(fx.configPath);
+      const scoped = JSON.parse(readFileSync(scopedPath, "utf8"));
+      scoped.transaction_id = "00000000-0000-4000-8000-000000000099";
+      writeFileSync(scopedPath, JSON.stringify(scoped, null, 2) + "\n", { mode: 0o600 });
+
+      const installed = await runCli(["mcp", "install", "qwen"], fx.env);
+      assert.equal(installed.code, 1, installed.stderr);
+      assert.match(installed.stderr, /transaction journals disagree; refusing recovery/);
+      assert.equal(readFileSync(fx.configPath, "utf8"), after.toString("utf8"));
+      assert.equal(existsSync(fx.markerPath), false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  await t.test("completed transaction with locator cleanup lag finalizes safely", async () => {
+    const fx = qwenMcpFixture();
+    try {
+      const before = Buffer.from("{}\n");
+      const after = Buffer.from(JSON.stringify({
+        mcpServers: { caveman: { command: fx.mcpV1, args: [] } },
+      }, null, 2) + "\n");
+      const markerAfter = ownedMarkerBytes(fx.configPath, fx.mcpV1);
+      mkdirSync(dirname(fx.markerPath), { recursive: true });
+      writeFileSync(fx.configPath, after, { mode: 0o600 });
+      writeFileSync(fx.markerPath, markerAfter, { mode: 0o600 });
+      writePendingMcpInstall("qwen", fx.markerPath, fx.configPath, before, after, markerAfter);
+      rmSync(configPendingPath(fx.configPath));
+
+      const installed = await runCli(["mcp", "install", "qwen"], fx.env);
+      assert.equal(installed.code, 0, installed.stderr);
+      assert.match(installed.stderr, /finalized interrupted qwen caveman MCP transaction/);
+      assert.equal(readFileSync(fx.configPath, "utf8"), after.toString("utf8"));
+      assert.equal(readFileSync(fx.markerPath, "utf8"), markerAfter.toString("utf8"));
+      assert.equal(existsSync(`${fx.markerPath}.pending`), false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  await t.test("malformed pending journal fails closed", async () => {
+    const fx = qwenMcpFixture();
+    try {
+      const source = JSON.stringify({ general: { vimMode: true } }, null, 2) + "\n";
+      writeFileSync(fx.configPath, source);
+      mkdirSync(dirname(fx.markerPath), { recursive: true });
+      writeFileSync(`${fx.markerPath}.pending`, "{}\n", { mode: 0o600 });
+
+      const installed = await runCli(["mcp", "install", "qwen"], fx.env);
+      assert.equal(installed.code, 1, installed.stderr);
+      assert.match(installed.stderr, /pending qwen caveman MCP transaction is malformed/);
+      assert.equal(readFileSync(fx.configPath, "utf8"), source);
+      assert.equal(existsSync(fx.markerPath), false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  await t.test("interrupted uninstall restores ownership before retrying", async () => {
+    const fx = qwenMcpFixture();
+    try {
+      const installed = await runCli(["mcp", "install", "qwen"], fx.env);
+      assert.equal(installed.code, 0, installed.stderr);
+      const configBefore = readFileSync(fx.configPath);
+      const markerBefore = readFileSync(fx.markerPath);
+      const configAfter = Buffer.from("{}\n");
+      rmSync(fx.markerPath);
+      writePendingMcpUninstall("qwen", fx.markerPath, fx.configPath, configBefore, configAfter, markerBefore);
+
+      const removed = await runCli(["mcp", "uninstall"], fx.env);
+      assert.equal(removed.code, 0, removed.stderr);
+      assert.match(removed.stderr, /rolled back interrupted qwen caveman MCP transaction/);
+      assert.equal(readFileSync(fx.configPath, "utf8"), configAfter.toString("utf8"));
+      assert.equal(existsSync(fx.markerPath), false);
+      assert.equal(existsSync(`${fx.markerPath}.pending`), false);
+      assert.equal(existsSync(configPendingPath(fx.configPath)), false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+test("Qwen MCP config lock is shared across CAVEMAN_HOME values", async () => {
+  const fx = qwenMcpFixture();
+  try {
+    const caveOne = join(fx.root, "caveman-one");
+    const caveTwo = join(fx.root, "caveman-two");
+    const [one, two] = await Promise.all([
+      runCli(["mcp", "install", "qwen"], { ...fx.env, CAVEMAN_HOME: caveOne, CAVEMAN_MCP_BIN: fx.mcpV1 }),
+      runCli(["mcp", "install", "qwen"], { ...fx.env, CAVEMAN_HOME: caveTwo, CAVEMAN_MCP_BIN: fx.mcpV2 }),
+    ]);
+    const winners = [
+      { out: one, marker: join(caveOne, "mcp", "qwen.json"), command: fx.mcpV1 },
+      { out: two, marker: join(caveTwo, "mcp", "qwen.json"), command: fx.mcpV2 },
+    ].filter((item) => /caveman_retrieve installed/.test(item.out.stderr));
+    assert.equal(winners.length, 1, `writer results:\n${one.stderr}\n${two.stderr}`);
+    const winner = winners[0];
+    const loser = winner.command === fx.mcpV1
+      ? { out: two, marker: join(caveTwo, "mcp", "qwen.json") }
+      : { out: one, marker: join(caveOne, "mcp", "qwen.json") };
+    assert.equal(JSON.parse(readFileSync(fx.configPath, "utf8")).mcpServers.caveman.command, winner.command);
+    assert.equal(JSON.parse(readFileSync(winner.marker, "utf8")).command, winner.command);
+    assert.equal(existsSync(loser.marker), false);
+    assert.match(loser.out.stderr, /MCP config change already running|not Caveman-journaled/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("Qwen marker lock serializes distinct QWEN_HOME targets in one CAVEMAN_HOME", async () => {
+  const fx = qwenMcpFixture();
+  try {
+    const homeOne = fx.env.QWEN_HOME;
+    const homeTwo = join(fx.root, "second-qwen-home");
+    const configOne = join(homeOne, "settings.json");
+    const configTwo = join(homeTwo, "settings.json");
+    const [one, two] = await Promise.all([
+      runCli(["mcp", "install", "qwen"], { ...fx.env, QWEN_HOME: homeOne, CAVEMAN_MCP_BIN: fx.mcpV1 }),
+      runCli(["mcp", "install", "qwen"], { ...fx.env, QWEN_HOME: homeTwo, CAVEMAN_MCP_BIN: fx.mcpV2 }),
+    ]);
+    const installed = [
+      { out: one, config: configOne, other: configTwo, command: fx.mcpV1 },
+      { out: two, config: configTwo, other: configOne, command: fx.mcpV2 },
+    ].filter(({ out }) => /caveman_retrieve installed/.test(out.stderr));
+    assert.equal(installed.length, 1, `writer results:\n${one.stderr}\n${two.stderr}`);
+    const winner = installed[0];
+    assert.equal(JSON.parse(readFileSync(winner.config, "utf8")).mcpServers.caveman.command, winner.command);
+    assert.equal(existsSync(winner.other), false);
+    assert.deepEqual(JSON.parse(readFileSync(fx.markerPath, "utf8")), ownedMarker(winner.config, winner.command));
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("Qwen MCP lock reclamation never deletes malformed foreign state", async (t) => {
+  await t.test("old malformed lock stays untouched", async () => {
+    const fx = qwenMcpFixture();
+    try {
+      mkdirSync(dirname(fx.markerPath), { recursive: true });
+      const lock = mcpLockPath(fx.markerPath);
+      const sentinel = join(lock, "important.txt");
+      mkdirSync(lock, { mode: 0o700 });
+      writeFileSync(join(lock, "owner.json"), "{}\n", { mode: 0o600 });
+      writeFileSync(sentinel, "keep\n", { mode: 0o600 });
+      const old = new Date(Date.now() - 60_000);
+      utimesSync(lock, old, old);
+
+      const installed = await runCli(["mcp", "install", "qwen"], fx.env);
+      assert.equal(installed.code, 1, installed.stderr);
+      assert.match(installed.stderr, /MCP config change already running/);
+      assert.equal(readFileSync(sentinel, "utf8"), "keep\n");
+      assert.equal(existsSync(fx.markerPath), false);
+      assert.equal(existsSync(fx.configPath), false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  await t.test("exact dead-owner lock is reclaimed", async () => {
+    const fx = qwenMcpFixture();
+    try {
+      mkdirSync(dirname(fx.markerPath), { recursive: true });
+      const canonicalMarker = canonicalPath(fx.markerPath);
+      const lock = mcpLockPath(fx.markerPath);
+      mkdirSync(lock, { mode: 0o700 });
+      writeFileSync(join(lock, "owner.json"), JSON.stringify({
+        schema_version: 1,
+        pid: 2147483647,
+        token: "00000000-0000-4000-8000-000000000077",
+        config_path: canonicalMarker,
+        started_at: "2026-01-01T00:00:00.000Z",
+      }) + "\n", { mode: 0o600 });
+
+      const installed = await runCli(["mcp", "install", "qwen"], fx.env);
+      assert.equal(installed.code, 0, installed.stderr);
+      assert.match(installed.stderr, /reclaimed stale MCP config lock/);
+      assert.equal(JSON.parse(readFileSync(fx.markerPath, "utf8")).config_path, canonicalPath(fx.configPath));
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+test("Qwen config-scoped recovery crosses CAVEMAN_HOME boundaries", async () => {
+  const fx = qwenMcpFixture();
+  try {
+    const caveOne = join(fx.root, "caveman-one");
+    const caveTwo = join(fx.root, "caveman-two");
+    const markerOne = join(caveOne, "mcp", "qwen.json");
+    const markerTwo = join(caveTwo, "mcp", "qwen.json");
+    const before = Buffer.from("{}\n");
+    const after = Buffer.from(JSON.stringify({
+      mcpServers: { caveman: { command: fx.mcpV1, args: [] } },
+    }, null, 2) + "\n");
+    const markerAfter = ownedMarkerBytes(fx.configPath, fx.mcpV1);
+    mkdirSync(dirname(markerOne), { recursive: true });
+    writeFileSync(fx.configPath, after, { mode: 0o600 });
+    writePendingMcpInstall("qwen", markerOne, fx.configPath, before, after, markerAfter);
+
+    const installed = await runCli(["mcp", "install", "qwen"], { ...fx.env, CAVEMAN_HOME: caveTwo });
+    assert.equal(installed.code, 0, installed.stderr);
+    assert.match(installed.stderr, /rolled back interrupted qwen caveman MCP transaction/);
+    assert.equal(existsSync(`${markerOne}.pending`), false);
+    assert.equal(existsSync(markerOne), false);
+    assert.deepEqual(JSON.parse(readFileSync(markerTwo, "utf8")), ownedMarker(fx.configPath, fx.mcpV1));
+    assert.equal(readFileSync(fx.configPath, "utf8"), after.toString("utf8"));
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("Qwen ownership remains reversible after QWEN_HOME relocation", async () => {
+  const fx = qwenMcpFixture();
+  try {
+    writeFileSync(fx.configPath, "{}\n", { mode: 0o640 });
+    const installed = await runCli(["mcp", "install", "qwen"], fx.env);
+    assert.equal(installed.code, 0, installed.stderr);
+    assert.equal(JSON.parse(readFileSync(fx.markerPath, "utf8")).config_path, canonicalPath(fx.configPath));
+
+    const shiftedHome = join(fx.root, "shifted-qwen-home");
+    const shiftedConfig = join(shiftedHome, "settings.json");
+    const shiftedEnv = { ...fx.env, QWEN_HOME: shiftedHome };
+    const refused = await runCli(["mcp", "install", "qwen"], shiftedEnv);
+    assert.equal(refused.code, 0, refused.stderr);
+    assert.match(refused.stderr, /uninstall it before installing/);
+    assert.equal(existsSync(shiftedConfig), false);
+
+    const removed = await runCli(["mcp", "uninstall", "qwen"], shiftedEnv);
+    assert.equal(removed.code, 0, removed.stderr);
+    assert.equal(JSON.parse(readFileSync(fx.configPath, "utf8")).mcpServers, undefined);
+    assert.equal(statSync(fx.configPath).mode & 0o777, 0o640);
+    assert.equal(existsSync(fx.markerPath), false);
+
+    const reinstalled = await runCli(["mcp", "install", "qwen"], shiftedEnv);
+    assert.equal(reinstalled.code, 0, reinstalled.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(fx.markerPath, "utf8")), ownedMarker(shiftedConfig, fx.mcpV1));
+    assert.equal(JSON.parse(readFileSync(shiftedConfig, "utf8")).mcpServers.caveman.command, fx.mcpV1);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("Qwen ownership marker survives physical config relocation", async () => {
+  const fx = qwenMcpFixture();
+  try {
+    const installed = await runCli(["mcp", "install", "qwen"], fx.env);
+    assert.equal(installed.code, 0, installed.stderr);
+    const shiftedHome = join(fx.root, "physically-moved-qwen-home");
+    const shiftedConfig = join(shiftedHome, "settings.json");
+    mkdirSync(shiftedHome, { recursive: true });
+    renameSync(fx.configPath, shiftedConfig);
+    const shiftedEnv = { ...fx.env, QWEN_HOME: shiftedHome };
+
+    const removed = await runCli(["mcp", "uninstall", "qwen"], shiftedEnv);
+    assert.equal(removed.code, 0, removed.stderr);
+    assert.match(removed.stderr, /contains moved caveman state; retaining ownership marker/);
+    assert.equal(existsSync(fx.markerPath), true);
+    assert.equal(JSON.parse(readFileSync(shiftedConfig, "utf8")).mcpServers.caveman.command, fx.mcpV1);
+
+    const refused = await runCli(["mcp", "install", "qwen"], shiftedEnv);
+    assert.equal(refused.code, 0, refused.stderr);
+    assert.match(refused.stderr, /uninstall it before installing/);
+    assert.equal(existsSync(fx.markerPath), true);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("Qwen legacy ownership migrates only from matching active config", async () => {
+  const fx = qwenMcpFixture();
+  try {
+    const legacyMarker = { tool: "caveman_retrieve", command: fx.mcpV1, args: [] };
+    const config = { mcpServers: { caveman: { command: fx.mcpV1, args: [] } } };
+    mkdirSync(dirname(fx.markerPath), { recursive: true });
+    writeFileSync(fx.configPath, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+    writeFileSync(fx.markerPath, JSON.stringify(legacyMarker, null, 2) + "\n", { mode: 0o600 });
+
+    withEnv(fx.env, () => {
+      const wrapped = buildWrapEnv(qwen, "http://127.0.0.1:8787", "auto");
+      assert.deepEqual(readInjected(wrapped).config.mcpServers.caveman, config.mcpServers.caveman);
+    });
+    const migrated = await runCli(["mcp", "install", "qwen"], fx.env);
+    assert.equal(migrated.code, 0, migrated.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(fx.markerPath, "utf8")), ownedMarker(fx.configPath, fx.mcpV1));
+
+    writeFileSync(fx.markerPath, JSON.stringify(legacyMarker, null, 2) + "\n", { mode: 0o600 });
+    const shiftedConfig = join(fx.root, "legacy-shifted", "settings.json");
+    const shiftedEnv = { ...fx.env, QWEN_HOME: dirname(shiftedConfig) };
+    const refusedInstall = await runCli(["mcp", "install", "qwen"], shiftedEnv);
+    assert.equal(refusedInstall.code, 0, refusedInstall.stderr);
+    assert.match(refusedInstall.stderr, /legacy caveman ownership marker does not identify its Qwen config; refusing relocation/);
+    const refusedRemove = await runCli(["mcp", "uninstall", "qwen"], shiftedEnv);
+    assert.equal(refusedRemove.code, 0, refusedRemove.stderr);
+    assert.match(refusedRemove.stderr, /legacy caveman ownership marker does not identify its Qwen config; refusing removal/);
+    assert.equal(existsSync(fx.markerPath), true);
+    assert.deepEqual(JSON.parse(readFileSync(fx.configPath, "utf8")), config);
+    assert.equal(existsSync(shiftedConfig), false);
   } finally {
     fx.cleanup();
   }

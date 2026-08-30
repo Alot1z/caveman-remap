@@ -288,6 +288,8 @@ test("Kilo route guard accepts profile-backed model spellings", async (t) => {
     { name: "short equals", args: ["-m=caveman/gpt-5.4-mini", "run", "hello"] },
     { name: "global model before command", args: ["--model", "caveman/gpt-5.5", "run", "hello"] },
     { name: "value containing command before run", args: ["--dir", "run", "run", "hello"] },
+    { name: "spaced boolean before run", args: ["--pure", "false", "run", "hello"] },
+    { name: "inline boolean after run", args: ["run", "--thinking=false", "hello"] },
   ]) {
     await t.test(fixture.name, async () => {
       const out = await runKiloAlias("kilo", "kilo", fixture.args);
@@ -321,7 +323,12 @@ test("Kilo route guard launches direct for model and attach bypasses", async (t)
     { name: "cloud agent", surface: "cloud", args: ["--print-logs", "cloud", "run", "task"] },
     { name: "cloud after valued global", surface: "cloud", args: ["--log-level", "INFO", "cloud", "start"] },
     { name: "cloud after command option", surface: "cloud", args: ["--repo", "run", "cloud", "start"] },
+    { name: "cloud after spaced root boolean", surface: "cloud", args: ["--pure", "false", "cloud", "start"] },
+    { name: "cloud after spaced logging boolean", surface: "cloud", args: ["--print-logs", "false", "cloud", "start"] },
+    { name: "attach after spaced short boolean", surface: "attach", args: ["--continue", "false", "attach", "https://remote.example/session"] },
+    { name: "cloud after spaced command boolean", surface: "cloud", args: ["--stream", "false", "cloud", "start"] },
     { name: "roll call", surface: "roll-call", args: ["roll-call", "gpt"] },
+    { name: "roll call after spaced boolean", surface: "roll-call", args: ["--verbose", "false", "roll-call", "gpt"] },
     { name: "unknown option arity", surface: "arguments", args: ["--future-option", "run", "cloud", "start"] },
   ];
   for (const fixture of fixtures) {

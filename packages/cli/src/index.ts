@@ -11474,7 +11474,17 @@ function kiloRouteOverride(agent: AgentProfile, args: string[]): AgentRouteOverr
       }
       continue;
     }
-    if (booleanOptions.has(arg)) continue;
+    if (booleanOptions.has(optionName)) {
+      if (equals !== -1) {
+        const value = arg.slice(equals + 1);
+        if (value !== "true" && value !== "false") {
+          return { surface: optionName, reason: "has a non-boolean value and makes command routing ambiguous" };
+        }
+      } else if (parsedArgs[index + 1] === "true" || parsedArgs[index + 1] === "false") {
+        index++;
+      }
+      continue;
+    }
     if (arg.startsWith("-")) {
       return { surface: "arguments", reason: "cannot be parsed safely with Kilo 7.5.6 option arities" };
     }

@@ -13,6 +13,15 @@ const GENERATED_PATHS = new Set([
   "packages/cli/src/agents.generated.ts",
   "packages/cli/src/reserved-verbs.generated.ts",
 ]);
+const SCHEMA_SUPPORT_PATHS = new Set([
+  SCHEMA_PATH,
+  "agents/compile.mjs",
+  "agents/check-profile-scope.mjs",
+  "packages/cli/tests/agent-registry.runtime.mjs",
+  "tests/installer/agent-registry-compile.test.mjs",
+  "tests/installer/agent-registry-scope.test.mjs",
+  ...GENERATED_PATHS,
+]);
 
 function runGit(cwd, args, encoding = "utf8") {
   return spawnSync("git", args, { cwd, encoding, maxBuffer: 8 * 1024 * 1024 });
@@ -25,11 +34,11 @@ function requireGit(result, operation) {
 }
 
 function isConcreteProfile(path) {
-  return path !== SCHEMA_PATH && /^agents\/profiles\/[^/]+\.json$/.test(path);
+  return path !== SCHEMA_PATH && /^agents\/profiles\/[a-z0-9][a-z0-9-]*\.json$/.test(path);
 }
 
 function isAllowedConcreteProfileCommitPath(path) {
-  return path.startsWith("agents/profiles/") || GENERATED_PATHS.has(path);
+  return isConcreteProfile(path) || GENERATED_PATHS.has(path);
 }
 
 export function checkProfileScope({ base, head, cwd = process.cwd() }) {
@@ -54,8 +63,23 @@ export function checkProfileScope({ base, head, cwd = process.cwd() }) {
       `git diff-tree ${commit}`,
     );
     const changedFiles = changedBuffer.toString("utf8").split("\0").filter(Boolean);
+    const schemaTouched = changedFiles.includes(SCHEMA_PATH);
     const concreteProfileTouched = changedFiles.some(isConcreteProfile);
-    if (changedFiles.includes(SCHEMA_PATH) || concreteProfileTouched) contractTouched = true;
+    const invalidProfilePath = changedFiles.find((path) => path.startsWith("agents/profiles/")
+      && path !== SCHEMA_PATH
+      && !isConcreteProfile(path));
+    if (invalidProfilePath) {
+      return { ok: false, message: `profile lane rejects non-contract profile path in commit ${commit}: ${invalidProfilePath}` };
+    }
+    if (schemaTouched || concreteProfileTouched) contractTouched = true;
+
+    if (schemaTouched) {
+      const outside = changedFiles.find((path) => !SCHEMA_SUPPORT_PATHS.has(path));
+      if (outside) {
+        return { ok: false, message: `profile lane rejects out-of-scope schema-support path in commit ${commit}: ${outside}` };
+      }
+      continue;
+    }
     if (!concreteProfileTouched) continue;
 
     const outside = changedFiles.find((path) => !isAllowedConcreteProfileCommitPath(path));

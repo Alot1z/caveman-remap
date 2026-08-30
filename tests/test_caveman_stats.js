@@ -54,6 +54,47 @@ test('reads --session-file directly and sums output tokens', (tmp) => {
   assert.match(out, /Cache-read tokens:\s+250/);
 });
 
+test('counts a multi-block response once, not once per JSONL line (#793)', (tmp) => {
+  // A single API response can be written to the transcript as several JSONL
+  // lines sharing the same message.id (one per content block / streamed
+  // continuation), each repeating the full usage object. Naive per-line
+  // summing would report 3 turns and 270 output tokens; the response must
+  // count once (2 turns, 150 tokens).
+  const sess = makeSession(tmp, [
+    { type: 'assistant', requestId: 'req_7', message: { id: 'msg_1', usage: { output_tokens: 120, cache_read_input_tokens: 40 } } },
+    { type: 'assistant', requestId: 'req_7', message: { id: 'msg_1', usage: { output_tokens: 120, cache_read_input_tokens: 40 } } },
+    // Same message.id under a different requestId is a SEPARATE response (#794
+    // parity) and must still be counted — this is the key that distinguishes a
+    // dedupe from an over-count. It also has no requestId on purpose, to keep
+    // the legacy no-requestId fallback covered.
+    { type: 'assistant', requestId: 'req_8', message: { id: 'msg_1', usage: { output_tokens: 40, cache_read_input_tokens: 10 } } },
+  ]);
+  const out = execFileSync(process.execPath, [STATS, '--session-file', sess], {
+    encoding: 'utf8',
+    env: { ...process.env, CLAUDE_CONFIG_DIR: path.join(tmp, '.claude') },
+  });
+  // req_7:msg_1 deduped to one, req_8:msg_1 counted → 2 turns.
+  assert.match(out, /Turns:\s+2/);
+  assert.match(out, /Output tokens:\s+160/);
+  assert.match(out, /Cache-read tokens:\s+50/);
+});
+
+test('does not dedupe the same message.id across distinct requestIds (#794 parity)', (tmp) => {
+  const sess = makeSession(tmp, [
+    { type: 'assistant', requestId: 'req_1', message: { id: 'msg_x', usage: { output_tokens: 100, cache_read_input_tokens: 10 } } },
+    { type: 'assistant', requestId: 'req_2', message: { id: 'msg_x', usage: { output_tokens: 60, cache_read_input_tokens: 20 } } },
+    { type: 'assistant', requestId: 'req_2', message: { id: 'msg_x', usage: { output_tokens: 60, cache_read_input_tokens: 20 } } },
+  ]);
+  const out = execFileSync(process.execPath, [STATS, '--session-file', sess], {
+    encoding: 'utf8',
+    env: { ...process.env, CLAUDE_CONFIG_DIR: path.join(tmp, '.claude') },
+  });
+  // req_1:msg_x + req_2:msg_x (req_2 dup deduped) → 2 turns, 160 tokens.
+  assert.match(out, /Turns:\s+2/);
+  assert.match(out, /Output tokens:\s+160/);
+  assert.match(out, /Cache-read tokens:\s+30/);
+});
+
 test('shows full-mode savings estimate when flag is full', (tmp) => {
   const sess = makeSession(tmp, [
     { type: 'assistant', message: { usage: { output_tokens: 350 } } },
@@ -288,6 +329,41 @@ test('--since rejects malformed durations', (tmp) => {
   } catch (e) { err = e; }
   assert.ok(err, 'should exit non-zero');
   assert.match(err.stderr, /--since takes Nh or Nd/);
+});
+
+test('incremental aggregation stays correct across runs and history rotation (MEGA-1)', (tmp) => {
+  const { aggregateHistory } = require(path.join(ROOT, 'src', 'hooks', 'caveman-stats.js'));
+  const claudeDir = path.join(tmp, '.claude');
+  fs.mkdirSync(claudeDir, { recursive: true });
+  const histPath = path.join(claudeDir, '.caveman-history.jsonl');
+  const sumPath = histPath + '.summary.json';
+  const write = (rows) => fs.writeFileSync(histPath, rows.map(o => JSON.stringify(o)).join('\n') + '\n');
+  const row = (ts, sid, saved) => ({ ts, session_id: sid, mode: 'full', output_tokens: 100, turns: 1, est_saved_tokens: saved, est_saved_usd: 0.001 });
+
+  // First run → full rebuild + sidecar created.
+  write([row(1000, 'a', 185)]);
+  let agg = aggregateHistory(histPath, null);
+  assert.strictEqual(agg.sessions, 1);
+  assert.strictEqual(agg.estSavedTokens, 185);
+  assert.ok(fs.existsSync(sumPath), 'summary sidecar should be created');
+
+  // Second run after an append → incremental path parses only the new bytes.
+  fs.appendFileSync(histPath, JSON.stringify(row(2000, 'b', 92)) + '\n');
+  agg = aggregateHistory(histPath, null);
+  assert.strictEqual(agg.sessions, 2);
+  assert.strictEqual(agg.estSavedTokens, 277);
+
+  // Latest-wins inside a session still holds across increments.
+  fs.appendFileSync(histPath, JSON.stringify(row(3000, 'a', 300)) + '\n');
+  agg = aggregateHistory(histPath, null);
+  assert.strictEqual(agg.sessions, 2, 'still two distinct sessions');
+  assert.strictEqual(agg.estSavedTokens, 392, "a's latest 300 replaces 185");
+
+  // Rotation / truncation (size < watermark) → full rebuild from the file we have.
+  write([row(4000, 'c', 500)]);
+  agg = aggregateHistory(histPath, null);
+  assert.strictEqual(agg.sessions, 1);
+  assert.strictEqual(agg.estSavedTokens, 500);
 });
 
 test('--all reports empty when no history', (tmp) => {

@@ -137,6 +137,13 @@ function formatUsd(amount) {
   return `$${amount.toFixed(4)}`;
 }
 
+// Deterministic number formatting. toLocaleString() alone inherits the host OS
+// locale, which varies thousands separators between machines (1,250 vs 1.250)
+// and makes CLI output — and the test suite — locale-dependent (MEGA-4). Pin
+// en-US so caveman-stats prints the same numbers everywhere, matching the rest
+// of the tool's English output.
+const fmt = (n) => n.toLocaleString('en-US');
+
 function findRecentSession(claudeDir) {
   const projectsDir = path.join(claudeDir, 'projects');
   let entries;
@@ -170,6 +177,19 @@ function parseSession(filePath) {
   let turns = 0;
   let model = null;
   const messages = []; // per-message {ts, outputTokens} for mode attribution (#601)
+  // A single API response can land in the transcript as several JSONL lines
+  // sharing one message id (one per content block, or streamed continuations).
+  // Each such line repeats the full usage object, so naive per-line summing
+  // inflates output tokens AND turns ~2x on tool-heavy sessions (#793). Count
+  // each response once, keyed by message.id; lines without an id keep the
+  // legacy per-line behavior (they are indistinguishable from distinct turns).
+  // Each distinct API response counts once, keyed on (requestId, message.id)
+  // to match upstream PR #794: a multi-block response lands as several JSONL
+  // lines sharing one message.id (one per content block / streamed
+  // continuation), but the SAME message.id under a DIFFERENT requestId is a
+  // genuinely separate response and must still be counted. Lines without an id
+  // keep the legacy per-line behavior (indistinguishable from distinct turns).
+  const seenMessageKeys = new Set();
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
     let entry;
@@ -177,6 +197,13 @@ function parseSession(filePath) {
     if (entry.type !== 'assistant' || !entry.message) continue;
     const usage = entry.message.usage;
     if (!usage) continue;
+    const msgId = entry.message.id;
+    const requestId = typeof entry.requestId === 'string' ? entry.requestId : '';
+    if (typeof msgId === 'string' && msgId !== '') {
+      const key = requestId + ':' + msgId;
+      if (seenMessageKeys.has(key)) continue;
+      seenMessageKeys.add(key);
+    }
     outputTokens    += usage.output_tokens           || 0;
     cacheReadTokens += usage.cache_read_input_tokens || 0;
     turns++;
@@ -358,11 +385,11 @@ function deriveNet({ estSavedTokens, turns }) {
 function netLines({ estSavedTokens, turns }) {
   const perTurn = ruleOverheadPerTurn();
   const { overheadTokens, netTokens } = deriveNet({ estSavedTokens, turns });
-  const overhead = `Est. rule overhead:    ${overheadTokens.toLocaleString()} ` +
-    `(input, ~${perTurn.toLocaleString()}/turn over ${turns} turn${turns === 1 ? '' : 's'})`;
+  const overhead = `Est. rule overhead:    ${fmt(overheadTokens)} ` +
+    `(input, ~${fmt(perTurn)}/turn over ${turns} turn${turns === 1 ? '' : 's'})`;
   const net = netTokens >= 0
-    ? `Est. net:              +${netTokens.toLocaleString()} (net saving after rule overhead)`
-    : `Est. net:              ${netTokens.toLocaleString()} (caveman cost more than it saved for this workload — consider turning it off)`;
+    ? `Est. net:              +${fmt(netTokens)} (net saving after rule overhead)`
+    : `Est. net:              ${fmt(netTokens)} (caveman cost more than it saved for this workload — consider turning it off)`;
   return `${overhead}\n${net}`;
 }
 
@@ -375,21 +402,139 @@ function parseDuration(spec) {
   return m[2] === 'd' ? n * 86_400_000 : n * 3_600_000;
 }
 
+// ── Incremental lifetime aggregation (MEGA-1) ─────────────────────────────
+// The history file (.caveman-history.jsonl) is append-only and grows without
+// bound — a row is written on every /caveman-stats run, not per session. Naively
+// re-reading and re-parsing the WHOLE file on every stats call under the hook's
+// fixed 2.5s child watchdog eventually guarantees a timeout: once history
+// clearly exceeds the per-run budget, stats silently dies, the statusline
+// suffix stops updating, and no code trims the file to recover.
+//   Fix: an incremental, watermark-backed aggregation. A sidecar summary keeps
+// the latest-per-session entries; each run parses ONLY the bytes appended since
+// the last watermark and merges them in. The cost of a stats call is therefore
+// bounded by what was written since the previous call (usually a few lines),
+// not by total history length.
+const MAX_INCREMENTAL_BYTES = 8 * 1024 * 1024;
+
+// Symlink-safe byte-slice read (mirrors readHistory's safety contract). Returns
+// { entries, watermark } where entries are the parsed JSON objects from the
+// complete lines in [from, to) and watermark is the byte offset of the first
+// complete line after them (a partial trailing line is left for the next run).
+function readHistorySlice(filePath, from, to) {
+  try {
+    const st = fs.lstatSync(filePath);
+    if (st.isSymbolicLink() || !st.isFile()) return { entries: [], watermark: from };
+    const O_NOFOLLOW = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0;
+    const fd = fs.openSync(filePath, fs.constants.O_RDONLY | O_NOFOLLOW);
+    try {
+      const end = Math.min(to, st.size);
+      if (end <= from) return { entries: [], watermark: from };
+      const buf = Buffer.alloc(end - from);
+      const n = fs.readSync(fd, buf, 0, buf.length, from);
+      const data = buf.slice(0, n);
+      const nl = data.lastIndexOf('\n');
+      // No newline: the slice is a partial line (concurrent append, crash mid-
+      // write). Do not advance — that data may still be coming.
+      if (nl === -1) return { entries: [], watermark: from };
+      const newWatermark = from + nl + 1;
+      const entries = [];
+      for (const line of data.slice(0, nl + 1).toString('utf8').split('\n')) {
+        if (!line.trim()) continue;
+        try { entries.push(JSON.parse(line)); } catch (e) { /* skip malformed */ }
+      }
+      return { entries, watermark: newWatermark };
+    } finally { fs.closeSync(fd); }
+  } catch (e) {
+    return { entries: [], watermark: from };
+  }
+}
+
+function loadHistorySummary(path) {
+  try {
+    const data = JSON.parse(fs.readFileSync(path, 'utf8'));
+    if (data && data.version === 1 && typeof data.watermark === 'number'
+        && data.entries && typeof data.entries === 'object') return data;
+  } catch (e) { /* corrupt or missing — callers rebuild */ }
+  return null;
+}
+
+function saveHistorySummary(path, summary) {
+  try {
+    const tmp = path + '.' + process.pid + '.' + Date.now();
+    fs.writeFileSync(tmp, JSON.stringify(summary));
+    fs.renameSync(tmp, path);
+  } catch (e) { /* best-effort; a stale summary only costs a rebuild next run */ }
+}
+
+// Drop the latest snapshot for a session when the incoming row is newer.
+// Equivalent to aggregateHistory's old latest-per-session rule.
+function mergeSession(entries, id, row) {
+  const prev = entries[id];
+  if (!prev || (row.ts || 0) >= (prev.ts || 0)) entries[id] = row;
+  return entries;
+}
+
+// The rows stored per session are exactly the fields aggregation reads, so a
+// merged summary entry stays small and cheap to round-trip through JSON.
+function toRow(e) {
+  return {
+    ts: e.ts || 0,
+    output_tokens: e.output_tokens || 0,
+    est_saved_tokens: e.est_saved_tokens || 0,
+    est_saved_usd: e.est_saved_usd || 0,
+    turns: e.turns == null ? undefined : e.turns,
+  };
+}
+
 // Aggregate history into latest-per-session totals, optionally filtered to a
 // time window. Returns { sessions, outputTokens, estSavedTokens, estSavedUsd }.
 function aggregateHistory(historyPath, sinceMs) {
-  const lines = readHistory(historyPath);
   const cutoff = sinceMs ? Date.now() - sinceMs : null;
-  const latestPerSession = new Map();
-  for (const line of lines) {
-    let entry;
-    try { entry = JSON.parse(line); } catch { continue; }
-    if (!entry || typeof entry !== 'object') continue;
-    if (cutoff !== null && (entry.ts || 0) < cutoff) continue;
-    const id = entry.session_id || '_';
-    const prev = latestPerSession.get(id);
-    if (!prev || (entry.ts || 0) >= (prev.ts || 0)) latestPerSession.set(id, entry);
+  const summaryPath = historyPath + '.summary.json';
+  const empty = () => ({ sessions: 0, outputTokens: 0, estSavedTokens: 0, estSavedUsd: 0, netSavedTokens: 0, netTurns: 0 });
+
+  let st;
+  try { st = fs.lstatSync(historyPath); } catch (e) { st = null; }
+  if (!st || st.isSymbolicLink() || !st.isFile()) {
+    // No usable history: drop a stale sidecar so a later recreation starts clean
+    // and never serves numbers from a previous lifetime.
+    try { fs.unlinkSync(summaryPath); } catch (e) {}
+    return empty();
   }
+
+  let summary = loadHistorySummary(summaryPath);
+  const fullSize = st.size;
+  const gapTooBig = summary != null && (fullSize - summary.watermark) > MAX_INCREMENTAL_BYTES;
+  if (!summary || summary.watermark > fullSize || gapTooBig) {
+    // First run, sidecar corrupt, the history was truncated/rotated, or the gap
+    // since the last run is pathological — one full rebuild.
+    const entries = {};
+    for (const line of readHistory(historyPath)) {
+      let e; try { e = JSON.parse(line); } catch (x) { continue; }
+      if (!e || typeof e !== 'object') continue;
+      mergeSession(entries, e.session_id || '_', toRow(e));
+    }
+    summary = { version: 1, watermark: fullSize, entries };
+    saveHistorySummary(summaryPath, summary);
+  } else {
+    // Incremental: parse only the bytes appended since the last watermark.
+    const slice = readHistorySlice(historyPath, summary.watermark, fullSize);
+    for (const e of slice.entries) {
+      if (!e || typeof e !== 'object') continue;
+      mergeSession(summary.entries, e.session_id || '_', toRow(e));
+    }
+    summary.watermark = slice.watermark;
+    saveHistorySummary(summaryPath, summary);
+  }
+
+  // Filter the merged latest-per-session map to the requested window.
+  const latestPerSession = summary.entries;
+  const timeFiltered = {};
+  for (const [id, row] of Object.entries(latestPerSession)) {
+    if (cutoff !== null && (row.ts || 0) < cutoff) continue;
+    timeFiltered[id] = row;
+  }
+
   let outputTokens = 0, estSavedTokens = 0, estSavedUsd = 0;
   // Net (rule-overhead) figures only ever sum rows that actually logged a
   // turn count. Legacy history rows predate #145's `turns` field — folding
@@ -397,7 +542,7 @@ function aggregateHistory(historyPath, sinceMs) {
   // over- or under-state the overhead, so they're excluded from net entirely
   // (they still count toward the plain gross totals above, unchanged).
   let netSavedTokens = 0, netTurns = 0;
-  for (const e of latestPerSession.values()) {
+  for (const e of Object.values(timeFiltered)) {
     outputTokens   += e.output_tokens     || 0;
     estSavedTokens += e.est_saved_tokens  || 0;
     estSavedUsd    += e.est_saved_usd     || 0;
@@ -406,7 +551,7 @@ function aggregateHistory(historyPath, sinceMs) {
       netTurns       += e.turns            || 0;
     }
   }
-  return { sessions: latestPerSession.size, outputTokens, estSavedTokens, estSavedUsd, netSavedTokens, netTurns };
+  return { sessions: Object.keys(timeFiltered).length, outputTokens, estSavedTokens, estSavedUsd, netSavedTokens, netTurns };
 }
 
 // Output-reduction share: saved / (saved + used) = the fraction of the
@@ -447,9 +592,9 @@ function formatHistory({ sessions, outputTokens, estSavedTokens, estSavedUsd, ne
   // predate #145) — omit rather than understate the overhead.
   const netBlock = netTurns > 0 ? netLines({ estSavedTokens: netSavedTokens, turns: netTurns }) + '\n' : '';
   return `\nCaveman Stats — Lifetime${window}\n${sep}\n` +
-    `Sessions:   ${sessions.toLocaleString()}\n${sep}\n` +
-    `Output tokens:         ${outputTokens.toLocaleString()}\n` +
-    `Est. tokens saved:     ${estSavedTokens.toLocaleString()}\n` +
+    `Sessions:   ${fmt(sessions)}\n${sep}\n` +
+    `Output tokens:         ${fmt(outputTokens)}\n` +
+    `Est. tokens saved:     ${fmt(estSavedTokens)}\n` +
     netBlock + budgetLine + usdLine + sep + '\n';
 }
 
@@ -465,9 +610,9 @@ function formatShare({ outputTokens, turns, mode, model, attribution }) {
 
   if (estSavedTokens > 0) {
     const usd = estSavedUsd > 0 ? ` (~${formatUsd(estSavedUsd)})` : '';
-    return `🪨 Saved ${estSavedTokens.toLocaleString()} output tokens${usd} across ${turns} turns this session — caveman.sh`;
+    return `🪨 Saved ${fmt(estSavedTokens)} output tokens${usd} across ${turns} turns this session — caveman.sh`;
   }
-  return `🪨 ${turns} turns, ${outputTokens.toLocaleString()} output tokens this session — caveman.sh`;
+  return `🪨 ${turns} turns, ${fmt(outputTokens)} output tokens this session — caveman.sh`;
 }
 
 // Pure formatter — separated from main() so tests can pass synthetic inputs.
@@ -506,14 +651,14 @@ function formatStats({ outputTokens, cacheReadTokens, turns, mode, model, sessio
       const r = COMPRESSION[key];
       const label = key === 'none' ? 'caveman off' : key;
       const note = r != null
-        ? `est. ${(Math.round(tokens / (1 - r)) - tokens).toLocaleString()} saved`
+        ? `est. ${fmt(Math.round(tokens / (1 - r)) - tokens)} saved`
         : 'no benchmark estimate';
-      lines.push(`  ${label}: ${tokens.toLocaleString()} tokens (${note})`);
+      lines.push(`  ${label}: ${fmt(tokens)} tokens (${note})`);
     }
     if (attr.unknownTokens > 0) {
-      lines.push(`  unattributed: ${attr.unknownTokens.toLocaleString()} tokens (mode unknown — excluded from estimate)`);
+      lines.push(`  unattributed: ${fmt(attr.unknownTokens)} tokens (mode unknown — excluded from estimate)`);
     }
-    lines.push(`Est. tokens saved:     ${estSavedTokens.toLocaleString()}`);
+    lines.push(`Est. tokens saved:     ${fmt(estSavedTokens)}`);
     if (estSavedUsd > 0) lines.push(`Est. saved (USD):      ~${formatUsd(estSavedUsd)}`);
     savings = lines.join('\n');
 
@@ -543,9 +688,9 @@ function formatStats({ outputTokens, cacheReadTokens, turns, mode, model, sessio
     // any session-usage % would overstate real limit relief. See
     // docs/HONEST-NUMBERS.md.
     footer += ' Reduction is of output tokens only; input/cache usage is unchanged.';
-    footer += ` Net subtracts the rules' est. input cost (~${ruleOverheadPerTurn().toLocaleString()}/turn — docs/HONEST-NUMBERS.md).`;
-    savings = (`Est. without caveman:  ${estNormal.toLocaleString()}\n` +
-              `Est. tokens saved:     ${estSaved.toLocaleString()} (~${Math.round(ratio * 100)}% of output)\n` +
+    footer += ` Net subtracts the rules' est. input cost (~${fmt(ruleOverheadPerTurn())}/turn — docs/HONEST-NUMBERS.md).`;
+    savings = (`Est. without caveman:  ${fmt(estNormal)}\n` +
+              `Est. tokens saved:     ${fmt(estSaved)} (~${Math.round(ratio * 100)}% of output)\n` +
               usdLine).replace(/\n$/, '');
     // Net only makes sense where the savings figure above is unambiguous: a
     // single benchmarked mode ran the whole span (uniform) with a known turn
@@ -560,7 +705,7 @@ function formatStats({ outputTokens, cacheReadTokens, turns, mode, model, sessio
 
   let memoryLine = '';
   if (compressed && compressed.count > 0) {
-    const tokensApprox = compressed.tokensSaved.toLocaleString();
+    const tokensApprox = fmt(compressed.tokensSaved);
     memoryLine = `${sep}\nMemory compressed:     ${compressed.count} file${compressed.count === 1 ? '' : 's'}, ` +
       `~${tokensApprox} tokens saved per session start (approx)\n`;
   }
@@ -568,8 +713,8 @@ function formatStats({ outputTokens, cacheReadTokens, turns, mode, model, sessio
   return `\nCaveman Stats\n${sep}\n` +
     (shortPath ? `Session:  ${shortPath}\n` : '') +
     `Turns:    ${turns}\n${sep}\n` +
-    `Output tokens:         ${outputTokens.toLocaleString()}\n` +
-    `Cache-read tokens:     ${cacheReadTokens.toLocaleString()}\n${sep}\n` +
+    `Output tokens:         ${fmt(outputTokens)}\n` +
+    `Cache-read tokens:     ${fmt(cacheReadTokens)}\n${sep}\n` +
     `${savings}\n` +
     memoryLine +
     (footer ? footer + '\n' : '');

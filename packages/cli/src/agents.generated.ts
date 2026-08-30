@@ -552,7 +552,7 @@ export const PROFILES: AgentProfile[] = [
                 "baseUrl": "{{cave_base_url}}/v1",
                 "generationConfig": {
                   "customHeaders": {
-                    "x-cave-upstream-key": "$OPENAI_API_KEY",
+                    "x-cave-upstream-key": "{{cave_optional_openai_key_env}}",
                     "X-Cave-Agent": "qwen"
                   }
                 }
@@ -564,7 +564,7 @@ export const PROFILES: AgentProfile[] = [
                 "baseUrl": "{{cave_base_url}}/v1",
                 "generationConfig": {
                   "customHeaders": {
-                    "x-cave-upstream-key": "$OPENAI_API_KEY",
+                    "x-cave-upstream-key": "{{cave_optional_openai_key_env}}",
                     "X-Cave-Agent": "qwen"
                   }
                 }

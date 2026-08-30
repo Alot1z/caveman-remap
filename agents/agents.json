@@ -505,7 +505,7 @@
                   "baseUrl": "{{cave_base_url}}/v1",
                   "generationConfig": {
                     "customHeaders": {
-                      "x-cave-upstream-key": "$OPENAI_API_KEY",
+                      "x-cave-upstream-key": "{{cave_optional_openai_key_env}}",
                       "X-Cave-Agent": "qwen"
                     }
                   }
@@ -517,7 +517,7 @@
                   "baseUrl": "{{cave_base_url}}/v1",
                   "generationConfig": {
                     "customHeaders": {
-                      "x-cave-upstream-key": "$OPENAI_API_KEY",
+                      "x-cave-upstream-key": "{{cave_optional_openai_key_env}}",
                       "X-Cave-Agent": "qwen"
                     }
                   }

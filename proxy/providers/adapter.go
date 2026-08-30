@@ -356,11 +356,15 @@ type RewritableBlock struct {
 	ID string
 }
 
-// recoveryToolSuffix identifies the caveman recovery tool in any namespace an
-// agent host may register it under: bare `caveman_retrieve` for the server-side
-// injected tool, `mcp__caveman__caveman_retrieve` under Claude Code's MCP
-// naming, and whatever prefix another host chooses.
-const recoveryToolSuffix = "caveman_retrieve"
+// Recovery tool names stay a closed allowlist. Bare spelling belongs to
+// server-side injection; Claude/Qwen and Kilo expose two verified MCP spellings.
+// Accepting arbitrary suffixes would let caller-owned namespaces falsely prove
+// recovery and make otherwise unrecoverable compression possible.
+const (
+	recoveryToolName     = "caveman_retrieve"
+	mcpRecoveryToolName  = "mcp__caveman__caveman_retrieve"
+	kiloRecoveryToolName = "caveman_caveman_retrieve"
+)
 
 // IsRecoveryToolName reports whether a tool call is a caveman recovery call.
 //
@@ -372,7 +376,7 @@ const recoveryToolSuffix = "caveman_retrieve"
 // elision it was trying to escape. Measured on 2026-08-06: the agent called
 // retrieve, reported "Same truncation", and re-read the same file seven times.
 func IsRecoveryToolName(name string) bool {
-	return name == recoveryToolSuffix || strings.HasSuffix(name, "__"+recoveryToolSuffix)
+	return name == recoveryToolName || name == mcpRecoveryToolName || name == kiloRecoveryToolName
 }
 
 type Base struct {

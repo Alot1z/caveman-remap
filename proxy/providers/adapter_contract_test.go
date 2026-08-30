@@ -32,6 +32,28 @@ func TestMatchRoute(t *testing.T) {
 	}
 }
 
+func TestIsRecoveryToolName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{name: "caveman_retrieve", want: true},
+		{name: "mcp__caveman__caveman_retrieve", want: true},
+		{name: "caveman_caveman_retrieve", want: true}, // Kilo CLI 7.5.6
+		{name: "mcp__evil__caveman_retrieve", want: false},
+		{name: "user_caveman_retrieve", want: false},
+		{name: "caveman_caveman_retrieve_extra", want: false},
+		{name: "prefix_caveman_caveman_retrieve", want: false},
+		{name: "caveman-retrieve", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsRecoveryToolName(tc.name); got != tc.want {
+				t.Fatalf("IsRecoveryToolName(%q) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestInspectRequestFailsPricingClosedForNonTokenCharges(t *testing.T) {
 	tests := []struct {
 		name, provider, body, reason string

@@ -60,8 +60,9 @@ function kiloMcpFixture() {
   const root = mkdtempSync(join(tmpdir(), "cave-kilo-mcp-"));
   const home = join(root, "home");
   const cavemanHome = join(root, "caveman-home");
-  const configPath = join(home, ".config", "kilo", "kilo.json");
-  const jsoncPath = join(home, ".config", "kilo", "kilo.jsonc");
+  const xdgConfigHome = join(home, ".config");
+  const configPath = join(xdgConfigHome, "kilo", "kilo.json");
+  const jsoncPath = join(xdgConfigHome, "kilo", "kilo.jsonc");
   const markerPath = join(cavemanHome, "mcp", "kilo.json");
   const mcpV1 = join(root, "caveman-mcp-v1");
   const mcpV2 = join(root, "caveman-mcp-v2");
@@ -69,10 +70,13 @@ function kiloMcpFixture() {
   const env = {
     ...process.env,
     HOME: home,
+    XDG_CONFIG_HOME: xdgConfigHome,
     CAVEMAN_HOME: cavemanHome,
     CAVEMAN_MCP_BIN: mcpV1,
     NO_COLOR: "1",
   };
+  delete env.KILO_CONFIG;
+  delete env.KILO_CONFIG_DIR;
   return {
     root,
     configPath,
@@ -442,6 +446,78 @@ test("Kilo MCP install is idempotent, marker-owned, upgradeable, and reversible"
   }
 });
 
+test("Kilo MCP follows XDG_CONFIG_HOME instead of writing the fallback path", async () => {
+  const fx = kiloMcpFixture();
+  try {
+    const xdgConfigHome = join(fx.root, "xdg-config");
+    const activePath = join(xdgConfigHome, "kilo", "kilo.json");
+    mkdirSync(dirname(activePath), { recursive: true });
+    writeFileSync(activePath, JSON.stringify({ theme: "xdg" }, null, 2) + "\n");
+    const env = { ...fx.env, XDG_CONFIG_HOME: xdgConfigHome };
+
+    const installed = await runCli(["mcp", "install", "kilo"], env);
+    assert.equal(installed.code, 0, installed.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(activePath, "utf8")).mcp.caveman, {
+      type: "local",
+      command: [fx.mcpV1],
+      enabled: true,
+    });
+    assert.equal(existsSync(fx.configPath), false);
+    assert.equal(JSON.parse(readFileSync(fx.markerPath, "utf8")).config_path, canonicalTestPath(activePath));
+
+    const removed = await runCli(["mcp", "uninstall", "kilo"], env);
+    assert.equal(removed.code, 0, removed.stderr);
+    assert.equal(JSON.parse(readFileSync(activePath, "utf8")).mcp, undefined);
+    assert.equal(existsSync(fx.markerPath), false);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("Kilo MCP gives explicit KILO_CONFIG precedence over XDG", async () => {
+  const fx = kiloMcpFixture();
+  try {
+    const xdgConfigHome = join(fx.root, "unused-xdg");
+    const activePath = join(fx.root, "custom", "settings.json");
+    mkdirSync(dirname(activePath), { recursive: true });
+    writeFileSync(activePath, JSON.stringify({ theme: "explicit" }, null, 2) + "\n");
+    const env = { ...fx.env, XDG_CONFIG_HOME: xdgConfigHome, KILO_CONFIG: activePath };
+
+    const installed = await runCli(["mcp", "install", "kilo"], env);
+    assert.equal(installed.code, 0, installed.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(activePath, "utf8")).mcp.caveman, {
+      type: "local",
+      command: [fx.mcpV1],
+      enabled: true,
+    });
+    assert.equal(existsSync(join(xdgConfigHome, "kilo", "kilo.json")), false);
+    assert.equal(JSON.parse(readFileSync(fx.markerPath, "utf8")).config_path, canonicalTestPath(activePath));
+
+    const removed = await runCli(["mcp", "uninstall", "kilo"], env);
+    assert.equal(removed.code, 0, removed.stderr);
+    assert.equal(JSON.parse(readFileSync(activePath, "utf8")).mcp, undefined);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("Kilo MCP refuses comment-destructive explicit JSONC mutation", async () => {
+  const fx = kiloMcpFixture();
+  try {
+    const activePath = join(fx.root, "custom", "settings.jsonc");
+    const source = "{\n  // owned by user\n  \"theme\": \"dark\"\n}\n";
+    mkdirSync(dirname(activePath), { recursive: true });
+    writeFileSync(activePath, source);
+    const installed = await runCli(["mcp", "install", "kilo"], { ...fx.env, KILO_CONFIG: activePath });
+    assert.equal(installed.code, 0, installed.stderr);
+    assert.match(installed.stderr, /KILO_CONFIG points to JSONC .* refusing comment-destructive mutation/);
+    assert.equal(readFileSync(activePath, "utf8"), source);
+    assert.equal(existsSync(fx.markerPath), false);
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("Kilo MCP config and ownership journal commit together", async (t) => {
   await t.test("unusable journal storage blocks native config mutation", async () => {
     const fx = kiloMcpFixture();
@@ -641,7 +717,7 @@ test("Kilo MCP config and ownership journal commit together", async (t) => {
     }
   });
 
-  await t.test("installed marker binds original Kilo HOME until explicit uninstall", async () => {
+  await t.test("installed marker binds original Kilo config root until explicit uninstall", async () => {
     const fx = kiloMcpFixture();
     try {
       writeFileSync(fx.configPath, JSON.stringify({ theme: "original" }, null, 2) + "\n");
@@ -654,7 +730,7 @@ test("Kilo MCP config and ownership journal commit together", async (t) => {
       mkdirSync(dirname(relocatedConfig), { recursive: true });
       const relocatedBytes = JSON.stringify({ theme: "relocated" }, null, 2) + "\n";
       writeFileSync(relocatedConfig, relocatedBytes);
-      const relocatedEnv = { ...fx.env, HOME: relocatedHome };
+      const relocatedEnv = { ...fx.env, HOME: relocatedHome, XDG_CONFIG_HOME: join(relocatedHome, ".config") };
 
       const blocked = await runCli(["mcp", "install", "kilo"], relocatedEnv);
       assert.equal(blocked.code, 0, blocked.stderr);
@@ -682,7 +758,7 @@ test("Kilo MCP config and ownership journal commit together", async (t) => {
       const relocatedConfig = join(relocatedHome, ".config", "kilo", "kilo.json");
       mkdirSync(dirname(relocatedConfig), { recursive: true });
       renameSync(fx.configPath, relocatedConfig);
-      const relocatedEnv = { ...fx.env, HOME: relocatedHome };
+      const relocatedEnv = { ...fx.env, HOME: relocatedHome, XDG_CONFIG_HOME: join(relocatedHome, ".config") };
 
       const removed = await runCli(["mcp", "uninstall", "kilo"], relocatedEnv);
       assert.equal(removed.code, 0, removed.stderr);

@@ -16,6 +16,26 @@ Each run also writes a lifetime-savings suffix file used by the statusline badge
 /caveman-stats
 ```
 
+## Lifetime view
+
+Every `/caveman-stats` run appends a snapshot of the current session's totals
+to `$CLAUDE_CONFIG_DIR/.caveman-history.jsonl`. The lifetime view aggregates
+those rows incrementally — a small `.summary.json` sidecar keeps the
+latest-per-session totals so each run only re-reads the bytes appended since
+the last call, never the whole (unbounded) file. Pass a flag to switch from
+the session view to lifetime:
+
+```
+/caveman-stats --all          # lifetime totals across every session
+/caveman-stats --since 7d      # sessions active in the last 7d (also 24h, 2h…)
+/caveman-stats --reset         # archive lifetime history and start clean
+```
+
+`--since` takes `Nh`/`Nd` durations. `--reset` rotates `.caveman-history.jsonl`
+to a dated `.bak` and clears both the summary sidecar and the statusline
+suffix — history is archived, never deleted, so nothing is unrecoverable. A
+direct `node src/hooks/caveman-stats.js --…` invocation accepts the same flags.
+
 ## Example output
 
 ```
@@ -29,6 +49,12 @@ Est. net: -51,394 (caveman cost more than it saved for this workload — conside
 ```
 
 (Numbers above are illustrative — see `docs/HONEST-NUMBERS.md` for why short, terse-reply sessions tend to land net-negative even at a healthy output-savings percentage.)
+
+## Integrity
+
+Because `src/hooks/` is integrity-pinned, changing `caveman-stats.js` (or any
+hook) requires regenerating `src/hooks/checksums.sha256` — see
+`docs/testing-session-modes.md`. `tests/verify_repo.py` enforces it.
 
 ## See also
 

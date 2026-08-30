@@ -186,6 +186,7 @@ function handle(raw) {
         if (sessionId) argv.push('--session-id', sessionId);
         if (tailArgs.includes('--share')) argv.push('--share');
         if (tailArgs.includes('--all')) argv.push('--all');
+        if (tailArgs.includes('--reset')) argv.push('--reset');
         const sinceIdx = tailArgs.indexOf('--since');
         if (sinceIdx !== -1 && tailArgs[sinceIdx + 1]) {
           argv.push('--since', tailArgs[sinceIdx + 1]);

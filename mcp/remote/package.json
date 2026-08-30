@@ -1,0 +1,11 @@
+{
+  "name": "caveman-mcp-remote",
+  "version": "1.0.0",
+  "description": "Remote-MCP (Streamable HTTP) server for the caveman engine — registration-accessible to ChatGPT.com, Claude, Gemini and pi, reusing the 5 stdio tools. Local-first, inferred-only.",
+  "license": "MIT",
+  "type": "module",
+  "bin": { "caveman-mcp-remote": "server.mjs" },
+  "files": ["server.mjs", "schema.mjs", "README.md", "BINARY_LICENSE.md"],
+  "scripts": { "test": "node --test tests/*.test.mjs" },
+  "engines": { "node": ">=18" }
+}

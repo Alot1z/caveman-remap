@@ -337,7 +337,7 @@ class TestOuterWrapperStripping(unittest.TestCase):
 class FirstTextBlockTests(unittest.TestCase):
     """first_text_block extracts the first TEXT block from an Anthropic content
     array. A tool_use block can order BEFORE the text on tool-heavy sessions,
-    and the old ``msg.content[0].text`` crashed after a paid call (MEGA-2)."""
+    and the old ``msg.content[0].text`` crashed after a paid call."""
 
     _tool_use = mock.Mock(type="tool_use", id="toolu_1", name="bash")
     _text = mock.Mock(type="text", text="  body  ")

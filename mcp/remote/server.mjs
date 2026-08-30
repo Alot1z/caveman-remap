@@ -38,6 +38,12 @@ function corsHeaders() {
 }
 
 // -- engine bridge ---------------------------------------------------------
+// The reviewed engine already speaks MCP stdio and returns standard ToolResult
+// shapes: successful calls give `{ content: [{type:"text",text:"<payload>"}],
+// isError:false }`, tool failures give `isError:true` with a cave_* code in the
+// text (never a JSON-RPC error). So the bridge's job is purely to relay the
+// engine's `result` verbatim — text payload and isError flag — without wrapping
+// it a second time. No compression logic lives here.
 function callEngine(toolName, input) {
   // Spawn the reviewed engine server and exchange one tools/call over its stdio.
   return new Promise((resolve) => {
@@ -58,7 +64,13 @@ function callEngine(toolName, input) {
       }).find((m) => m && m.jsonrpc && (m.id === "caveman-remote" || (m.id && typeof m.id === "number")));
       if (!match) return resolve({ ok: false, error: "no engine response" });
       if (match.error) return resolve({ ok: false, error: String(match.error.message ?? match.error) });
-      resolve({ ok: true, content: match.result });
+      // Relay the engine's ToolResult verbatim: text payload + isError flag.
+      const content = Array.isArray(match.result?.content) ? match.result.content : [];
+      resolve({
+        ok: true,
+        isError: !!match.result?.isError,
+        text: content[0]?.type === "text" ? (content[0].text ?? "") : "",
+      });
     });
     const req = {
       jsonrpc: "2.0",
@@ -108,8 +120,9 @@ async function dispatch(msg) {
       if (!tool) return jsonRpcError(id, -32602, `unknown tool: ${name}`);
       const r = await callEngine(name, params?.arguments);
       if (!r.ok) return jsonRpcError(id, -32603, r.error);
-      const text = typeof r.content === "string" ? r.content : JSON.stringify(r.content ?? {});
-      return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }] } };
+      // Pass the engine's ToolResult through verbatim so hosts see the same
+      // payload and isError flag they would from the stdio server.
+      return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: r.text }], isError: r.isError } };
     }
     default:
       return jsonRpcError(id, -32601, `method not found: ${method}`);

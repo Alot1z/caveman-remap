@@ -1,0 +1,35 @@
+name: mcp-remote-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  remote-mcp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
+        with:
+          go-version-file: go.mod
+      # Build the real engine binary so the conditional integration tests in
+      # mcp/remote/tests/engine.test.mjs run (not skip) on CI: they exercise a
+      # genuine toon_encode -> decode round-trip over tools/call.
+      - name: Build caveman-mcp engine binary
+        run: go build -o "$RUNNER_TEMP/caveman-mcp" ./mcp/cmd/caveman-mcp
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      # mcp/remote is zero-dependency (Node stdlib only): no install needed.
+      - name: Run Remote-MCP unit + engine-binary + drift tests
+        working-directory: mcp/remote
+        run: node --test tests/*.test.mjs
+        env:
+          CAVEMAN_MCP_BIN: ${{ runner.temp }}/caveman-mcp

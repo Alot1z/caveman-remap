@@ -348,10 +348,24 @@ def verify_package_contents() -> None:
     ensure(npm is not None, "npm missing — cannot audit launch tarball")
     with tempfile.TemporaryDirectory(prefix="caveman-pack-audit-") as tmp:
         result = run(
-            [npm, "pack", "--dry-run", "--json", "--ignore-scripts"],
+            [npm, "pack", "--dry-run", "--json", "--silent", "--ignore-scripts"],
             env={"npm_config_cache": str(Path(tmp) / "npm-cache")},
         )
-    payload = json.loads(result.stdout)
+    # npm.CMD shims (e.g. a "custom paths" wrapper) may echo a banner line
+    # onto stdout ahead of the pack manifest, so locate the JSON array instead
+    # of assuming stdout is pure JSON.
+    stdout = result.stdout
+    decoder = json.JSONDecoder()
+    payload = None
+    probe = stdout.find("[")
+    while probe >= 0:
+        try:
+            payload, _ = decoder.raw_decode(stdout, probe)
+            break
+        except json.JSONDecodeError:
+            probe = stdout.find("[", probe + 1)
+    if payload is None:
+        raise CheckFailure(f"npm pack produced no JSON array on stdout:\n{stdout[:500]}")
     ensure(isinstance(payload, list) and len(payload) == 1, "unexpected npm pack manifest")
     files = {entry["path"] for entry in payload[0]["files"]}
     required = {

@@ -23,7 +23,7 @@ import {
 } from "node:fs";
 import { chmod, mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir, hostname, tmpdir } from "node:os";
-import { basename, delimiter, dirname, extname, isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, dirname, extname, isAbsolute, join, normalize, parse, relative, resolve, sep } from "node:path";
 import { connect as netConnect, createServer as netCreateServer, isIP, type AddressInfo } from "node:net";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -8604,10 +8604,14 @@ export function buildWrapEnv(agent?: AgentProfile, gw = gatewayURL(), mcpMode: M
   }
   if (!agent) return env;
   if (applyClaudeBedrockWrap(env, agent, renderedGw, gw)) return env;
-  if (agent.id === "qwen" && qwenSafeModeEnabled(agentArgs) !== false) {
-    // Qwen safe mode discards system settings, including Caveman's provider
-    // route. Do not launch a child that would silently bypass the proxy.
-    throw new Error("Qwen safe mode ignores Caveman system settings");
+  if (agent.id === "qwen") {
+    const safeMode = qwenSafeModeEnabled(agentArgs);
+    if (safeMode === null) throw new Error("cannot safely resolve Qwen's effective settings");
+    if (safeMode) {
+      // Qwen safe mode discards system settings, including Caveman's provider
+      // route. Do not launch a child that would silently bypass the proxy.
+      throw new Error("Qwen safe mode ignores Caveman system settings");
+    }
   }
   const inj = agent.injection;
   if (inj.method === "env") {
@@ -10585,6 +10589,68 @@ function qwenSettingsLayerPaths(): string[] | null {
   ];
 }
 
+function qwenMergedSettings(layers: JsonObject[]): JsonObject {
+  let merged: unknown = {};
+  for (const layer of layers) merged = deepMerge(merged, layer);
+  return merged as JsonObject;
+}
+
+function qwenPathVariants(rawPath: string): Set<string> {
+  const variants = new Set<string>([normalize(resolve(rawPath))]);
+  try {
+    variants.add(normalize(realpathSync(rawPath)));
+  } catch {
+    // Qwen compares a lexical absolute path when a target cannot be resolved.
+  }
+  return variants;
+}
+
+function qwenPathWithinRoot(childPath: string, parentPath: string): boolean {
+  const remainder = relative(parentPath, childPath);
+  return remainder === "" || (!remainder.startsWith(`..${sep}`) && remainder !== ".." && !isAbsolute(remainder));
+}
+
+function qwenPathDepth(path: string): number {
+  const remainder = relative(parse(path).root, path);
+  return remainder === "" ? 0 : remainder.split(sep).filter(Boolean).length;
+}
+
+// Mirror Qwen 0.22.3's persisted trust-rule precedence. Unknown workspaces are
+// trusted by Qwen's initial settings load; malformed trust state is ambiguous
+// here and must fail closed before an optional credential reference is emitted.
+function qwenWorkspaceTrusted(settings: JsonObject, workspacePath: string): boolean | null {
+  const enabled = jsonValueAt(settings, ["security", "folderTrust", "enabled"]);
+  if (enabled === undefined || enabled === false) return true;
+  if (enabled !== true) return null;
+  const configuredPath = process.env.QWEN_CODE_TRUSTED_FOLDERS_PATH;
+  const trustedPath = configuredPath || join(qwenHomeState().root, "trustedFolders.json");
+  const config = readOptionalJsonObject(trustedPath);
+  if (!config) return null;
+
+  const workspaceVariants = qwenPathVariants(workspacePath);
+  let winnerDepth = -1;
+  let winnerTrusted: boolean | undefined;
+  for (const [rulePath, rawLevel] of Object.entries(config)) {
+    if (rawLevel !== "TRUST_FOLDER" && rawLevel !== "TRUST_PARENT" && rawLevel !== "DO_NOT_TRUST") return null;
+    const rootPath = rawLevel === "TRUST_PARENT" ? dirname(rulePath) : rulePath;
+    let matchDepth = -1;
+    for (const workspaceVariant of workspaceVariants) {
+      for (const ruleVariant of qwenPathVariants(rootPath)) {
+        if (qwenPathWithinRoot(workspaceVariant, ruleVariant)) {
+          matchDepth = Math.max(matchDepth, qwenPathDepth(ruleVariant));
+        }
+      }
+    }
+    if (matchDepth < 0) continue;
+    const trusted = rawLevel !== "DO_NOT_TRUST";
+    if (matchDepth > winnerDepth || (matchDepth === winnerDepth && !trusted && winnerTrusted !== false)) {
+      winnerDepth = matchDepth;
+      winnerTrusted = trusted;
+    }
+  }
+  return winnerTrusted ?? true;
+}
+
 function qwenSettingsLayers(): JsonObject[] | null {
   const paths = qwenSettingsLayerPaths();
   if (!paths) return null;
@@ -10594,6 +10660,12 @@ function qwenSettingsLayers(): JsonObject[] | null {
     if (!layer) return null;
     layers.push(layer);
   }
+  // Qwen decides workspace trust from System + User settings (User wins in
+  // this initial check), then drops the entire workspace layer when untrusted.
+  const initialTrustSettings = deepMerge(layers[3], layers[1]) as JsonObject;
+  const workspaceTrusted = qwenWorkspaceTrusted(initialTrustSettings, process.cwd());
+  if (workspaceTrusted === null) return null;
+  if (!workspaceTrusted) layers[2] = {};
   return layers;
 }
 
@@ -10626,13 +10698,22 @@ function qwenSettingsPermitRecovery(marker: McpServerMarker, layers: JsonObject[
   return !allowedConfigured || allowed;
 }
 
-function qwenEnvironmentFilePaths(): string[] {
+function qwenEnvironmentFilePaths(layers: JsonObject[]): string[] | null {
   const state = qwenHomeState();
   const home = homedir();
   const legacy = join(home, ".qwen");
+  const effectiveSettings = qwenMergedSettings(layers);
   const found: string[] = [];
   const push = (path: string) => {
     if (existsSync(path) && !found.includes(path)) found.push(path);
+  };
+  const pushWorkspace = (path: string, workspacePath: string): boolean | null => {
+    if (!existsSync(path)) return false;
+    const trusted = qwenWorkspaceTrusted(effectiveSettings, workspacePath);
+    if (trusted === null) return null;
+    if (!trusted) return false;
+    push(path);
+    return true;
   };
   const pushHome = () => {
     push(join(state.root, ".env"));
@@ -10651,14 +10732,16 @@ function qwenEnvironmentFilePaths(): string[] {
       break;
     }
     const scoped = join(current, ".qwen", ".env");
-    if (existsSync(scoped)) {
-      push(scoped);
+    const scopedAdded = pushWorkspace(scoped, current);
+    if (scopedAdded === null) return null;
+    if (scopedAdded) {
       pushHome();
       break;
     }
     const plain = join(current, ".env");
-    if (existsSync(plain)) {
-      push(plain);
+    const plainAdded = pushWorkspace(plain, current);
+    if (plainAdded === null) return null;
+    if (plainAdded) {
       pushHome();
       break;
     }
@@ -10676,7 +10759,9 @@ function qwenEffectiveEnvValue(layers: JsonObject[], key: string): string | unde
   const inherited = process.env[key];
   if (inherited) return inherited;
   let value: string | undefined;
-  for (const path of qwenEnvironmentFilePaths()) {
+  const envPaths = qwenEnvironmentFilePaths(layers);
+  if (!envPaths) return null;
+  for (const path of envPaths) {
     const parsed = qwenReadDotEnv(path);
     if (!parsed) return null;
     if (parsed[key] !== undefined) value = parsed[key];

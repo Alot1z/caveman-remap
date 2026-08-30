@@ -43,6 +43,16 @@ function withEnv(patch, fn) {
   }
 }
 
+function withCwd(path, fn) {
+  const previous = process.cwd();
+  process.chdir(path);
+  try {
+    return fn();
+  } finally {
+    process.chdir(previous);
+  }
+}
+
 function readInjected(env) {
   const path = env.QWEN_CODE_SYSTEM_SETTINGS_PATH;
   assert.ok(path, "Qwen system settings path must be injected");
@@ -270,6 +280,74 @@ test("managed Qwen retains native key reference for effective dotenv and setting
         fx.cleanup();
       }
     });
+  }
+});
+
+test("managed Qwen follows workspace trust for project credential sources", async (t) => {
+  for (const trust of ["DO_NOT_TRUST", "TRUST_FOLDER"]) {
+    for (const source of ["project dotenv", "workspace settings env"]) {
+      await t.test(`${trust}: ${source}`, () => {
+        const fx = qwenFixture();
+        const workspace = join(fx.root, "workspace");
+        const workspaceConfigDir = join(workspace, ".qwen");
+        const secret = `sk-${trust.toLowerCase()}-${source.replaceAll(" ", "-")}`;
+        try {
+          mkdirSync(workspaceConfigDir, { recursive: true });
+          writeFileSync(
+            join(dirname(fx.userConfig), "trustedFolders.json"),
+            JSON.stringify({ [fx.root]: "TRUST_FOLDER", [workspace]: trust }),
+          );
+          if (source === "project dotenv") {
+            writeFileSync(join(workspaceConfigDir, ".env"), `OPENAI_API_KEY=${secret}\n`);
+          } else {
+            writeFileSync(join(workspaceConfigDir, "settings.json"), JSON.stringify({ env: { OPENAI_API_KEY: secret } }));
+          }
+          withEnv({
+            HOME: fx.env.HOME,
+            CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+            QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfig,
+            CAVE_API_KEY: "cave-managed-secret",
+            OPENAI_API_KEY: undefined,
+          }, () => withCwd(workspace, () => {
+            const injected = readInjected(buildWrapEnv(qwen, "https://gateway.example"));
+            for (const model of injected.config.modelProviders.openai) {
+              if (trust === "TRUST_FOLDER") {
+                assert.equal(model.generationConfig.customHeaders["x-cave-upstream-key"], "$OPENAI_API_KEY");
+              } else {
+                assert.equal(Object.hasOwn(model.generationConfig.customHeaders, "x-cave-upstream-key"), false);
+              }
+            }
+            assert.doesNotMatch(injected.raw, new RegExp(secret));
+            if (trust === "DO_NOT_TRUST") assert.doesNotMatch(injected.raw, /\$OPENAI_API_KEY/);
+          }));
+        } finally {
+          fx.cleanup();
+        }
+      });
+    }
+  }
+});
+
+test("managed Qwen fails closed when workspace trust state is malformed", () => {
+  const fx = qwenFixture();
+  const workspace = join(fx.root, "workspace");
+  try {
+    mkdirSync(workspace, { recursive: true });
+    writeFileSync(join(dirname(fx.userConfig), "trustedFolders.json"), JSON.stringify({ [workspace]: "NOT_A_TRUST_LEVEL" }));
+    withEnv({
+      HOME: fx.env.HOME,
+      CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+      QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfig,
+      CAVE_API_KEY: "cave-managed-secret",
+      OPENAI_API_KEY: undefined,
+    }, () => withCwd(workspace, () => {
+      assert.throws(
+        () => buildWrapEnv(qwen, "https://gateway.example"),
+        /cannot safely resolve Qwen's effective settings/,
+      );
+    }));
+  } finally {
+    fx.cleanup();
   }
 });
 

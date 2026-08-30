@@ -495,7 +495,7 @@ export const PROFILES: AgentProfile[] = [
       "qwen"
     ],
     "args": [],
-    "install": "npm i -g @qwen-code/qwen-code",
+    "install": "npm i -g @qwen-code/qwen-code@0.22.3",
     "wire_protocol": "openai-chat",
     "injection": {
       "method": "config-file",
@@ -535,12 +535,14 @@ export const PROFILES: AgentProfile[] = [
           },
           "security": {
             "auth": {
-              "selectedType": "openai"
+              "selectedType": "openai",
+              "enforcedType": "openai"
             }
           },
           "model": {
             "name": "gpt-5.5"
-          }
+          },
+          "modelFallbacks": ""
         },
         "managed": {
           "modelProviders": {
@@ -573,12 +575,14 @@ export const PROFILES: AgentProfile[] = [
           },
           "security": {
             "auth": {
-              "selectedType": "openai"
+              "selectedType": "openai",
+              "enforcedType": "openai"
             }
           },
           "model": {
             "name": "gpt-5.5"
-          }
+          },
+          "modelFallbacks": ""
         }
       }
     },

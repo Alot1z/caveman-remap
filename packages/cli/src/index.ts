@@ -10536,34 +10536,47 @@ function removeMcpJson(path: string, keyPath: string[]): boolean {
 
 type KiloConfigLocation = {
   path: string;
-  jsoncPath?: string;
-  explicit: boolean;
+  jsonc: boolean;
+  source: "KILO_CONFIG_DIR" | "KILO_CONFIG" | "XDG_CONFIG_HOME";
 };
 
-// Kilo 7.5.6 builds Global.Path.config from xdg-basedir and then loads an
-// explicit KILO_CONFIG after every global file. Native MCP ownership must bind
-// that same active location; ~/.config is only the XDG fallback.
+function kiloPathFromEnv(value: string, name: string): string {
+  if (/[\0\r\n]/.test(value)) throw new Error(`${name} contains an invalid path character`);
+  // Kilo passes env paths directly to its loader. Shell-style "~/" expansion
+  // does not occur inside an environment value; relative paths resolve from cwd.
+  return normalize(isAbsolute(value) ? value : resolve(value));
+}
+
+function kiloConfigInDirectory(directory: string, source: KiloConfigLocation["source"]): KiloConfigLocation {
+  // Mirror pinned Kilo's native global writer: prefer an existing canonical
+  // config in this order, otherwise create kilo.json. JSONC stays read-only here
+  // because a JSON stringify would destroy comments.
+  const candidates = ["kilo.jsonc", "kilo.json", "opencode.jsonc", "opencode.json"];
+  const selected = candidates.map((name) => join(directory, name)).find((path) => existsSync(path))
+    ?? join(directory, "kilo.json");
+  return { path: selected, jsonc: extname(selected).toLowerCase() === ".jsonc", source };
+}
+
+// Kilo 7.5.6's native config writer targets KILO_CONFIG_DIR when present. That
+// directory is also loaded after KILO_CONFIG, so it must win for effective MCP
+// ownership. Explicit KILO_CONFIG wins only without a custom config directory;
+// xdg-basedir is the final fallback.
 function kiloConfigLocation(): KiloConfigLocation {
+  const configuredDirectory = process.env.KILO_CONFIG_DIR;
+  if (configuredDirectory) {
+    return kiloConfigInDirectory(kiloPathFromEnv(configuredDirectory, "KILO_CONFIG_DIR"), "KILO_CONFIG_DIR");
+  }
   const explicit = process.env.KILO_CONFIG;
   if (explicit) {
-    if (/[\0\r\n]/.test(explicit)) throw new Error("KILO_CONFIG contains an invalid path character");
-    const expanded = expandTilde(explicit);
-    const path = normalize(isAbsolute(expanded) ? expanded : resolve(expanded));
-    return extname(path).toLowerCase() === ".jsonc"
-      ? { path, jsoncPath: path, explicit: true }
-      : { path, explicit: true };
+    const path = kiloPathFromEnv(explicit, "KILO_CONFIG");
+    return { path, jsonc: extname(path).toLowerCase() === ".jsonc", source: "KILO_CONFIG" };
   }
   // Pinned Kilo strips accidental newlines from xdg-basedir output before use.
   const configuredRoot = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
   const cleanedRoot = configuredRoot.replace(/[\r\n]+/g, "");
   if (!cleanedRoot) throw new Error("Kilo config root resolves to an empty path");
   const root = normalize(isAbsolute(cleanedRoot) ? cleanedRoot : resolve(cleanedRoot));
-  const directory = join(root, "kilo");
-  return {
-    path: join(directory, "kilo.json"),
-    jsoncPath: join(directory, "kilo.jsonc"),
-    explicit: false,
-  };
+  return kiloConfigInDirectory(join(root, "kilo"), "XDG_CONFIG_HOME");
 }
 
 function kiloConfigPath(): string {
@@ -10698,16 +10711,13 @@ function movedOwnedMcpRemovalBlocked(agent: "kilo" | "qwen", serverName: string,
   return true;
 }
 
-function kiloJsoncBlocksMutation(path: string, exists: boolean): boolean {
+function kiloJsoncBlocksMutation(path: string): boolean {
   const location = kiloConfigLocation();
-  if (location.explicit && location.jsoncPath && canonicalMcpConfigPath(location.jsoncPath) === path) {
-    console.error(`${mark("warn")} KILO_CONFIG points to JSONC ${path}; refusing comment-destructive mutation`);
+  if (location.jsonc && canonicalMcpConfigPath(location.path) === path) {
+    console.error(`${mark("warn")} ${location.source} selects JSONC ${path}; refusing comment-destructive mutation`);
     return true;
   }
-  const jsoncPath = location.jsoncPath;
-  if (location.explicit || exists || !jsoncPath || !existsSync(jsoncPath)) return false;
-  console.error(`${mark("warn")} ${jsoncPath} exists while ${path} does not; refusing to create a second Kilo config or rewrite JSONC`);
-  return true;
+  return false;
 }
 
 function planMcpKiloJson(mcp: { command: string; args: string[] }, serverName = "caveman"): OwnedMcpConfigPlan | null {
@@ -10717,7 +10727,7 @@ function planMcpKiloJson(mcp: { command: string; args: string[] }, serverName = 
     console.error(`${mark("warn")} ${serverName} is owned in ${marker.config_path}; uninstall it before installing into ${path}`);
     return null;
   }
-  if (kiloJsoncBlocksMutation(path, existsSync(path))) return null;
+  if (kiloJsoncBlocksMutation(path)) return null;
   const loaded = readStrictMcpJsonRoot(path);
   if (!loaded) return null;
   const { root } = loaded;

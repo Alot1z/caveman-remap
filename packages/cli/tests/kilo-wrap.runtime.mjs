@@ -27,9 +27,9 @@ const kilo = PROFILES.find((profile) => profile.id === "kilo");
 
 assert.ok(kilo, "compiled registry must contain Kilo Code");
 
-function runCli(args, env) {
+function runCli(args, env, cwd) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [cli, ...args], { env });
+    const child = spawn(process.execPath, [cli, ...args], { env, cwd });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk));
@@ -509,6 +509,68 @@ test("Kilo MCP gives explicit KILO_CONFIG precedence over XDG", async () => {
   }
 });
 
+test("Kilo MCP gives KILO_CONFIG_DIR precedence over explicit and XDG config", async () => {
+  const fx = kiloMcpFixture();
+  try {
+    const configDirectory = join(fx.root, "config-dir");
+    const activePath = join(configDirectory, "kilo.json");
+    const explicitPath = join(fx.root, "explicit", "settings.json");
+    const xdgPath = join(fx.root, "unused-xdg", "kilo", "kilo.json");
+    for (const path of [activePath, explicitPath, xdgPath]) {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, JSON.stringify({ source: basename(dirname(path)) }, null, 2) + "\n");
+    }
+    const env = {
+      ...fx.env,
+      KILO_CONFIG_DIR: configDirectory,
+      KILO_CONFIG: explicitPath,
+      XDG_CONFIG_HOME: join(fx.root, "unused-xdg"),
+    };
+
+    const installed = await runCli(["mcp", "install", "kilo"], env);
+    assert.equal(installed.code, 0, installed.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(activePath, "utf8")).mcp.caveman, {
+      type: "local",
+      command: [fx.mcpV1],
+      enabled: true,
+    });
+    assert.equal(JSON.parse(readFileSync(explicitPath, "utf8")).mcp, undefined);
+    assert.equal(JSON.parse(readFileSync(xdgPath, "utf8")).mcp, undefined);
+    assert.equal(JSON.parse(readFileSync(fx.markerPath, "utf8")).config_path, canonicalTestPath(activePath));
+
+    const removed = await runCli(["mcp", "uninstall", "kilo"], env);
+    assert.equal(removed.code, 0, removed.stderr);
+    assert.equal(JSON.parse(readFileSync(activePath, "utf8")).mcp, undefined);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("Kilo MCP resolves tilde in KILO_CONFIG literally from cwd", async () => {
+  const fx = kiloMcpFixture();
+  try {
+    const cwd = join(fx.root, "cwd");
+    const literalPath = join(cwd, "~", "custom.json");
+    const expandedPath = join(fx.env.HOME, "custom.json");
+    mkdirSync(dirname(literalPath), { recursive: true });
+    writeFileSync(literalPath, JSON.stringify({ source: "literal" }, null, 2) + "\n");
+    writeFileSync(expandedPath, JSON.stringify({ source: "home" }, null, 2) + "\n");
+    const env = { ...fx.env, KILO_CONFIG: "~/custom.json" };
+
+    const installed = await runCli(["mcp", "install", "kilo"], env, cwd);
+    assert.equal(installed.code, 0, installed.stderr);
+    assert.ok(JSON.parse(readFileSync(literalPath, "utf8")).mcp.caveman);
+    assert.equal(JSON.parse(readFileSync(expandedPath, "utf8")).mcp, undefined);
+    assert.equal(JSON.parse(readFileSync(fx.markerPath, "utf8")).config_path, canonicalTestPath(literalPath));
+
+    const removed = await runCli(["mcp", "uninstall", "kilo"], env, cwd);
+    assert.equal(removed.code, 0, removed.stderr);
+    assert.equal(JSON.parse(readFileSync(literalPath, "utf8")).mcp, undefined);
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("Kilo MCP refuses comment-destructive explicit JSONC mutation", async () => {
   const fx = kiloMcpFixture();
   try {
@@ -518,8 +580,28 @@ test("Kilo MCP refuses comment-destructive explicit JSONC mutation", async () =>
     writeFileSync(activePath, source);
     const installed = await runCli(["mcp", "install", "kilo"], { ...fx.env, KILO_CONFIG: activePath });
     assert.equal(installed.code, 0, installed.stderr);
-    assert.match(installed.stderr, /KILO_CONFIG points to JSONC .* refusing comment-destructive mutation/);
+    assert.match(installed.stderr, /KILO_CONFIG selects JSONC .* refusing comment-destructive mutation/);
     assert.equal(readFileSync(activePath, "utf8"), source);
+    assert.equal(existsSync(fx.markerPath), false);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("Kilo MCP refuses JSONC selected inside KILO_CONFIG_DIR", async () => {
+  const fx = kiloMcpFixture();
+  try {
+    const configDirectory = join(fx.root, "config-dir");
+    const activePath = join(configDirectory, "kilo.jsonc");
+    const lowerPath = join(configDirectory, "kilo.json");
+    const source = "{\n  // custom directory\n  \"theme\": \"dark\"\n}\n";
+    mkdirSync(configDirectory, { recursive: true });
+    writeFileSync(activePath, source);
+    const installed = await runCli(["mcp", "install", "kilo"], { ...fx.env, KILO_CONFIG_DIR: configDirectory });
+    assert.equal(installed.code, 0, installed.stderr);
+    assert.match(installed.stderr, /KILO_CONFIG_DIR selects JSONC .* refusing comment-destructive mutation/);
+    assert.equal(readFileSync(activePath, "utf8"), source);
+    assert.equal(existsSync(lowerPath), false);
     assert.equal(existsSync(fx.markerPath), false);
   } finally {
     fx.cleanup();
@@ -911,7 +993,7 @@ test("Kilo MCP preserves JSONC when kilo.json is absent", async () => {
     writeFileSync(fx.jsoncPath, source);
     const installed = await runCli(["mcp", "install", "kilo"], fx.env);
     assert.equal(installed.code, 0, installed.stderr);
-    assert.match(installed.stderr, /refusing to create a second Kilo config or rewrite JSONC/);
+    assert.match(installed.stderr, /XDG_CONFIG_HOME selects JSONC .* refusing comment-destructive mutation/);
     assert.equal(existsSync(fx.configPath), false);
     assert.equal(readFileSync(fx.jsoncPath, "utf8"), source);
     assert.equal(existsSync(fx.markerPath), false);

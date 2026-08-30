@@ -116,6 +116,15 @@ test("deepMerge recursively merges plain objects and replaces arrays and scalars
   );
 });
 
+test("deepMerge skips prototype-chain keys at every object depth", () => {
+  const base = JSON.parse('{"safe":{"keep":1,"constructor":{"base":true}}}');
+  const overlay = JSON.parse('{"safe":{"add":2,"__proto__":{"polluted":true}},"prototype":{"bad":true}}');
+  const merged = deepMerge(base, overlay);
+
+  assert.deepEqual(merged, { safe: { keep: 1, add: 2 } });
+  assert.equal(Object.prototype.polluted, undefined);
+});
+
 test("platform config defaults resolve only closed vendor settings paths", () => {
   assert.equal(platformDefaultConfigPath("qwen-system-settings", "linux", {}), "/etc/qwen-code/settings.json");
   assert.equal(

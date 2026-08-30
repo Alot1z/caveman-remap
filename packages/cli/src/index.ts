@@ -5745,18 +5745,26 @@ function stripJson5Comments(s: string): string {
       continue;
     }
     if (ch === "/" && next === "/") {
+      out += "  ";
       i += 2;
-      while (i < s.length && s[i] !== "\n" && s[i] !== "\r") i++;
+      while (i < s.length && s[i] !== "\n" && s[i] !== "\r") {
+        out += /\s/.test(s[i]!) ? s[i]! : " ";
+        i++;
+      }
       if (i < s.length) out += s[i]!;
       continue;
     }
     if (ch === "/" && next === "*") {
+      out += "  ";
       i += 2;
       while (i < s.length && !(s[i] === "*" && s[i + 1] === "/")) {
-        if (s[i] === "\n" || s[i] === "\r") out += s[i];
+        out += /\s/.test(s[i]!) ? s[i]! : " ";
         i++;
       }
-      if (i < s.length) i++;
+      if (i < s.length) {
+        out += "  ";
+        i++;
+      }
       continue;
     }
     out += ch;
@@ -5807,10 +5815,21 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
+function isSafeObjectKey(key: string): boolean {
+  return key !== "__proto__" && key !== "constructor" && key !== "prototype";
+}
+
 export function deepMerge(base: unknown, overlay: unknown): unknown {
-  if (isPlainObject(base) && isPlainObject(overlay)) {
-    const out: Record<string, unknown> = { ...base };
-    for (const [k, v] of Object.entries(overlay)) out[k] = deepMerge(out[k], v);
+  if (isPlainObject(overlay)) {
+    const out: Record<string, unknown> = {};
+    if (isPlainObject(base)) {
+      for (const [k, v] of Object.entries(base)) {
+        if (isSafeObjectKey(k)) out[k] = isPlainObject(v) ? deepMerge({}, v) : v;
+      }
+    }
+    for (const [k, v] of Object.entries(overlay)) {
+      if (isSafeObjectKey(k)) out[k] = deepMerge(out[k], v);
+    }
     return out;
   }
   return overlay;
@@ -10543,6 +10562,7 @@ const qwenV1PolicyMigrationMap: Record<string, string> = {
 
 function qwenSetNestedPropertySafe(root: JsonObject, path: string, value: unknown): void {
   const keys = path.split(".");
+  if (keys.some((key) => !isSafeObjectKey(key))) return;
   const last = keys.pop();
   if (!last) return;
   let current = root;

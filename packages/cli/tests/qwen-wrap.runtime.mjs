@@ -487,7 +487,7 @@ test("managed Qwen accepts comments but rejects trailing-comma policy files", as
       mkdirSync(join(workspace, ".qwen"), { recursive: true });
       writeFileSync(
         join(workspace, ".qwen", "settings.json"),
-        `{\n  // Qwen accepts comments.\n  "env": { "OPENAI_API_KEY": "${secret}" }\n}\n`,
+        `{\n  // Qwen accepts line comments.\n  /* Qwen accepts block comments too. */\n  "env": { "OPENAI_API_KEY": "${secret}" }\n}\n`,
       );
       withEnv({
         HOME: fx.env.HOME,
@@ -501,6 +501,61 @@ test("managed Qwen accepts comments but rejects trailing-comma policy files", as
           assert.equal(model.generationConfig.customHeaders["x-cave-upstream-key"], "$OPENAI_API_KEY");
         }
         assert.doesNotMatch(injected.raw, new RegExp(secret));
+      }));
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  await t.test("block comments cannot join otherwise invalid JSON tokens", () => {
+    const fx = qwenFixture();
+    const workspace = join(fx.root, "workspace");
+    try {
+      mkdirSync(join(workspace, ".qwen"), { recursive: true });
+      writeFileSync(
+        join(workspace, ".qwen", "settings.json"),
+        '{"$version":2/* joining this comment would change syntax */.0,"env":{"OPENAI_API_KEY":"sk-comment-join"}}\n',
+      );
+      withEnv({
+        HOME: fx.env.HOME,
+        CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+        QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfig,
+        CAVE_API_KEY: "cave-managed-secret",
+        OPENAI_API_KEY: undefined,
+      }, () => withCwd(workspace, () => {
+        assert.throws(
+          () => buildWrapEnv(qwen, "https://gateway.example"),
+          /cannot safely resolve Qwen's effective settings/,
+        );
+      }));
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  await t.test("prototype-chain keys cannot create an effective upstream credential", () => {
+    const fx = qwenFixture();
+    const workspace = join(fx.root, "workspace");
+    try {
+      mkdirSync(join(workspace, ".qwen"), { recursive: true });
+      writeFileSync(fx.userConfig, '{"env":{"SAFE":"x"}}\n');
+      writeFileSync(
+        join(workspace, ".qwen", "settings.json"),
+        '{"env":{"__proto__":{"OPENAI_API_KEY":"sk-prototype"}}}\n',
+      );
+      withEnv({
+        HOME: fx.env.HOME,
+        CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+        QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfig,
+        CAVE_API_KEY: "cave-managed-secret",
+        OPENAI_API_KEY: undefined,
+      }, () => withCwd(workspace, () => {
+        const injected = readInjected(buildWrapEnv(qwen, "https://gateway.example"));
+        for (const model of injected.config.modelProviders.openai) {
+          assert.equal(Object.hasOwn(model.generationConfig.customHeaders, "x-cave-upstream-key"), false);
+        }
+        assert.doesNotMatch(injected.raw, /\$OPENAI_API_KEY|sk-prototype/);
+        assert.equal(Object.prototype.OPENAI_API_KEY, undefined);
       }));
     } finally {
       fx.cleanup();

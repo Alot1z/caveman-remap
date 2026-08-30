@@ -10,14 +10,14 @@
 
 import { readFileSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const PROBE_SCHEMA = "caveman.agent-probe.v1";
 const MAX_PROBE_BYTES = 1024 * 1024;
 const MAX_RESULTS = 64;
-const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/;
+const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 function invalid(message) {
   process.stderr.write(`drift-report: invalid probe artifact: ${message}\n`);
@@ -39,18 +39,41 @@ function boundedString(value, max, { empty = false, controls = false } = {}) {
 }
 
 function cmpVersion(a, b) {
-  const norm = (value) => value.split(/[.+-]/).map((part) => (/^\d+$/.test(part) ? Number(part) : part));
-  const left = norm(a);
-  const right = norm(b);
-  for (let index = 0; index < Math.max(left.length, right.length); index++) {
-    const x = left[index];
-    const y = right[index];
+  const parse = (value) => {
+    const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.exec(value);
+    if (!match) return null;
+    return {
+      core: [BigInt(match[1]), BigInt(match[2]), BigInt(match[3])],
+      prerelease: match[4]?.split(".") ?? null,
+    };
+  };
+  const left = parse(a);
+  const right = parse(b);
+  if (!left || !right) return Number.NaN;
+  for (let index = 0; index < left.core.length; index++) {
+    if (left.core[index] !== right.core[index]) return left.core[index] < right.core[index] ? -1 : 1;
+  }
+  // SemVer precedence: a release outranks its prerelease; prerelease identifiers
+  // compare numeric-before-text, then by length when every shared identifier ties.
+  if (left.prerelease === null || right.prerelease === null) {
+    if (left.prerelease === right.prerelease) return 0;
+    return left.prerelease === null ? 1 : -1;
+  }
+  for (let index = 0; index < Math.max(left.prerelease.length, right.prerelease.length); index++) {
+    const x = left.prerelease[index];
+    const y = right.prerelease[index];
     if (x === undefined) return -1;
     if (y === undefined) return 1;
-    if (typeof x === "number" && typeof y === "number") {
-      if (x !== y) return x < y ? -1 : 1;
-    } else if (String(x) !== String(y)) {
-      return String(x) < String(y) ? -1 : 1;
+    const xNumeric = /^\d+$/.test(x);
+    const yNumeric = /^\d+$/.test(y);
+    if (xNumeric && yNumeric) {
+      const xNumber = BigInt(x);
+      const yNumber = BigInt(y);
+      if (xNumber !== yNumber) return xNumber < yNumber ? -1 : 1;
+    } else if (xNumeric !== yNumeric) {
+      return xNumeric ? -1 : 1;
+    } else if (x !== y) {
+      return x < y ? -1 : 1;
     }
   }
   return 0;
@@ -70,7 +93,8 @@ for (const profile of registry.agents) {
   if (!profile || typeof profile !== "object" || typeof profile.id !== "string" || profiles.has(profile.id)) {
     invalid("trusted registry contains an invalid or duplicate profile id");
   }
-  if (typeof profile.tested_agent_version !== "string" || (profile.tested_agent_version !== "x" && !VERSION_RE.test(profile.tested_agent_version))) {
+  if (!boundedString(profile.tested_agent_version, 128)
+    || (profile.tested_agent_version !== "x" && !VERSION_RE.test(profile.tested_agent_version))) {
     invalid(`trusted registry profile ${profile.id} has an invalid tested_agent_version`);
   }
   profiles.set(profile.id, profile);
@@ -78,9 +102,14 @@ for (const profile of registry.agents) {
 if (profiles.size === 0 || profiles.size > MAX_RESULTS) invalid(`trusted registry profile count must be between 1 and ${MAX_RESULTS}`);
 
 const args = process.argv.slice(2);
-if (args.length !== 2 || args[0] !== "--input" || !args[1]) {
-  process.stderr.write("usage: node agents/drift-report.mjs --input <probe.json>\n");
+if (args.length !== 4 || args[0] !== "--input" || !args[1] || args[2] !== "--expected-id" || !args[3]) {
+  process.stderr.write("usage: node agents/drift-report.mjs --input <probe.json> --expected-id <profile-id>\n");
   process.exit(2);
+}
+const expectedId = args[3];
+if (!profiles.has(expectedId)) invalid(`--expected-id must name a known profile (got ${JSON.stringify(expectedId)})`);
+if (basename(args[1]) !== `${expectedId}.json`) {
+  invalid(`input basename must exactly match expected profile id (${expectedId}.json)`);
 }
 
 let parsed;
@@ -97,8 +126,8 @@ try {
 if (!exactKeys(parsed, ["schema", "results"]) || parsed.schema !== PROBE_SCHEMA || !Array.isArray(parsed.results)) {
   invalid(`top level must contain exactly schema=${JSON.stringify(PROBE_SCHEMA)} and results[]`);
 }
-if (parsed.results.length === 0 || parsed.results.length > profiles.size || parsed.results.length > MAX_RESULTS) {
-  invalid(`results count must be between 1 and ${Math.min(profiles.size, MAX_RESULTS)}`);
+if (parsed.results.length !== profiles.size || parsed.results.length > MAX_RESULTS) {
+  invalid(`results must contain the complete ${profiles.size}-profile registry set`);
 }
 
 const seen = new Set();
@@ -125,7 +154,7 @@ for (const [index, result] of parsed.results.entries()) {
   if (typeof result.version_ok !== "boolean" || typeof result.help_ok !== "boolean" || typeof result.version_matches !== "boolean") {
     invalid(`${label} probe flags must be booleans`);
   }
-  if (typeof result.observed !== "string" || (result.observed !== "" && !VERSION_RE.test(result.observed))) {
+  if (!boundedString(result.observed, 128, { empty: true }) || (result.observed !== "" && !VERSION_RE.test(result.observed))) {
     invalid(`${label}.observed must be empty or a strict version`);
   }
   const expectedMatch = result.tested === "x" || result.observed === result.tested;
@@ -140,6 +169,7 @@ for (const [index, result] of parsed.results.entries()) {
       || !VERSION_RE.test(result.observed) || cmpVersion(result.observed, result.tested) <= 0) {
       invalid(`${label} drift status requires a strict observed version newer than tested`);
     }
+    if (result.id !== expectedId) invalid(`${label} cannot report drift for ${result.id}; artifact is bound to ${expectedId}`);
   } else {
     if (result.version_ok && result.help_ok && result.version_matches) invalid(`${label} broken status contradicts successful matching probes`);
     if (!boundedString(result.version_error, 131072, { empty: true, controls: true })
@@ -149,9 +179,17 @@ for (const [index, result] of parsed.results.entries()) {
   }
 }
 
+for (const id of profiles.keys()) {
+  if (!seen.has(id)) invalid(`results omit expected registry profile ${id}`);
+}
+const expectedResult = parsed.results.find((result) => result.id === expectedId);
+if (!expectedResult || expectedResult.status === "not-installed") {
+  invalid(`expected profile ${expectedId} must carry its required-probe result`);
+}
+
 // No issue-write-capable subprocess runs before every byte of the downloaded artifact
 // has passed the closed validation above.
-const drifted = parsed.results.filter((r) => r.status === "drift");
+const drifted = expectedResult.status === "drift" ? [expectedResult] : [];
 if (drifted.length === 0) {
   process.stdout.write("drift-report: no drift observed\n");
   process.exit(0);

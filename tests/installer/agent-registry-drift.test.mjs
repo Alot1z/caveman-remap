@@ -21,23 +21,35 @@ function nextPatch(version) {
 function validDrift() {
   return {
     schema: "caveman.agent-probe.v1",
-    results: [{
-      id: profile.id,
-      status: "drift",
-      binary: "/tmp/kilo",
-      tested: profile.tested_agent_version,
-      observed: nextPatch(profile.tested_agent_version),
-      version_ok: true,
-      help_ok: true,
-      version_matches: false,
-    }],
+    results: registry.agents.map((candidate) => candidate.id === profile.id
+      ? {
+          id: candidate.id,
+          status: "drift",
+          binary: "/tmp/kilo",
+          tested: candidate.tested_agent_version,
+          observed: nextPatch(candidate.tested_agent_version),
+          version_ok: true,
+          help_ok: true,
+          version_matches: false,
+        }
+      : {
+          id: candidate.id,
+          status: "not-installed",
+          tested: candidate.tested_agent_version,
+        }),
   };
 }
 
-function runReporter(t, artifact) {
+function resultFor(artifact, id = profile.id) {
+  const result = artifact.results.find((candidate) => candidate.id === id);
+  if (!result) throw new Error(`artifact result missing for ${id}`);
+  return result;
+}
+
+function runReporter(t, artifact, { expectedId = profile.id, inputBasename = `${expectedId}.json`, includeExpectedId = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "caveman-drift-report-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const input = join(dir, "probe.json");
+  const input = join(dir, inputBasename);
   const calls = join(dir, "gh-called");
   const bin = join(dir, "bin");
   mkdirSync(bin);
@@ -45,7 +57,9 @@ function runReporter(t, artifact) {
   const gh = join(bin, "gh");
   writeFileSync(gh, `#!/bin/sh\nprintf '%s\\n' "$*" >> "$GH_CALLED_FILE"\nif [ "$1 $2" = "issue list" ]; then printf '[]'; fi\n`);
   chmodSync(gh, 0o755);
-  const result = spawnSync(process.execPath, [reporter, "--input", input], {
+  const argv = [reporter, "--input", input];
+  if (includeExpectedId) argv.push("--expected-id", expectedId);
+  const result = spawnSync(process.execPath, argv, {
     encoding: "utf8",
     env: {
       ...process.env,
@@ -66,48 +80,116 @@ test("validated drift artifact may call gh only after validation", (t) => {
   assert.match(result.ghCalls, /^issue create/m);
 });
 
+test("complete matching non-drift artifact performs no gh operation", (t) => {
+  const artifact = validDrift();
+  const expected = resultFor(artifact);
+  expected.status = "ok";
+  expected.observed = expected.tested;
+  expected.version_matches = true;
+  const result = runReporter(t, artifact);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /no drift observed/);
+  assert.equal(result.ghCalls, "");
+});
+
+test("release version outranks matching prerelease", (t) => {
+  const prereleaseProfile = registry.agents.find((candidate) => candidate.tested_agent_version.includes("-"));
+  if (!prereleaseProfile) throw new Error("prerelease profile pin missing from registry fixture");
+  const artifact = validDrift();
+  const kiloIndex = artifact.results.findIndex((candidate) => candidate.id === profile.id);
+  artifact.results[kiloIndex] = { id: profile.id, status: "not-installed", tested: profile.tested_agent_version };
+  const expected = resultFor(artifact, prereleaseProfile.id);
+  Object.assign(expected, {
+    status: "drift",
+    binary: `/tmp/${prereleaseProfile.id}`,
+    observed: prereleaseProfile.tested_agent_version.split("-")[0],
+    version_ok: true,
+    help_ok: true,
+    version_matches: false,
+  });
+  const result = runReporter(t, artifact, { expectedId: prereleaseProfile.id });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.ghCalls, /^issue create/m);
+});
+
+test("workflow passes trusted artifact basename as expected profile id", () => {
+  const workflow = readFileSync(join(root, ".github", "workflows", "agent-conformance.yml"), "utf8");
+  assert.match(workflow, /expected_id="\$\(basename "\$probe" \.json\)"/);
+  assert.match(workflow, /drift-report\.mjs --input "\$probe" --expected-id "\$expected_id"/);
+});
+
 const invalidCases = [
   ["wrong top-level schema", () => ({ ...validDrift(), schema: "caveman.agent-probe.v2" }), /top level must contain exactly/],
   ["extra top-level field", () => ({ ...validDrift(), attacker: true }), /top level must contain exactly/],
-  ["result count above registry bound", () => ({
+  ["result count outside exact registry set", () => ({
     schema: "caveman.agent-probe.v1",
-    results: Array.from({ length: registry.agents.length + 1 }, () => structuredClone(validDrift().results[0])),
-  }), /results count must be between/],
-  ["duplicate profile id", () => ({
-    schema: "caveman.agent-probe.v1",
-    results: [structuredClone(validDrift().results[0]), structuredClone(validDrift().results[0])],
-  }), /duplicates profile/],
+    results: [...validDrift().results, structuredClone(validDrift().results[0])],
+  }), /results must contain the complete/],
+  ["duplicate profile id", () => {
+    const artifact = validDrift();
+    artifact.results.at(-1).id = artifact.results[0].id;
+    return artifact;
+  }, /duplicates profile/],
   ["unknown profile id", () => {
     const artifact = validDrift();
-    artifact.results[0].id = "unknown-agent";
+    artifact.results.at(-1).id = "unknown-agent";
     return artifact;
   }, /id must name a known profile/],
   ["tested version mismatch", () => {
     const artifact = validDrift();
-    artifact.results[0].tested = "0.0.1";
+    resultFor(artifact).tested = "0.0.1";
     return artifact;
   }, /tested must exactly equal registry tested_agent_version/],
   ["unknown status", () => {
     const artifact = validDrift();
-    artifact.results[0].status = "newer";
+    resultFor(artifact).status = "newer";
     return artifact;
   }, /unknown status or fields outside its exact status schema/],
   ["unsafe observed version", () => {
     const artifact = validDrift();
-    artifact.results[0].observed = `${artifact.results[0].observed}\n--body=forged`;
+    const expected = resultFor(artifact);
+    expected.observed = `${expected.observed}\n--body=forged`;
     return artifact;
   }, /observed must be empty or a strict version/],
   ["non-newer drift version", () => {
     const artifact = validDrift();
-    artifact.results[0].observed = artifact.results[0].tested;
-    artifact.results[0].version_matches = true;
+    const expected = resultFor(artifact);
+    expected.observed = expected.tested;
+    expected.version_matches = true;
+    return artifact;
+  }, /drift status requires a strict observed version newer than tested/],
+  ["prerelease does not outrank matching release", () => {
+    const artifact = validDrift();
+    const expected = resultFor(artifact);
+    expected.observed = `${expected.tested}-beta`;
     return artifact;
   }, /drift status requires a strict observed version newer than tested/],
   ["extra result field", () => {
     const artifact = validDrift();
-    artifact.results[0].title = "forged";
+    resultFor(artifact).title = "forged";
     return artifact;
   }, /unknown status or fields outside its exact status schema/],
+  ["another lifecycle profile reports drift", () => {
+    const artifact = validDrift();
+    const otherProfile = registry.agents.find((candidate) => candidate.id !== profile.id && /^\d+\.\d+\.\d+$/.test(candidate.tested_agent_version));
+    if (!otherProfile) throw new Error("second semver profile missing from registry fixture");
+    const other = resultFor(artifact, otherProfile.id);
+    Object.assign(other, {
+      status: "drift",
+      binary: `/tmp/${otherProfile.id}`,
+      observed: nextPatch(otherProfile.tested_agent_version),
+      version_ok: true,
+      help_ok: true,
+      version_matches: false,
+    });
+    return artifact;
+  }, /cannot report drift.*artifact is bound to kilo/],
+  ["required expected profile marked not installed", () => {
+    const artifact = validDrift();
+    const index = artifact.results.findIndex((candidate) => candidate.id === profile.id);
+    artifact.results[index] = { id: profile.id, status: "not-installed", tested: profile.tested_agent_version };
+    return artifact;
+  }, /must carry its required-probe result/],
 ];
 
 for (const [name, artifact, message] of invalidCases) {
@@ -118,3 +200,24 @@ for (const [name, artifact, message] of invalidCases) {
     assert.equal(result.ghCalls, "", "gh must not run before full artifact validation");
   });
 }
+
+test("drift reporter requires trusted expected profile id", (t) => {
+  const result = runReporter(t, validDrift(), { includeExpectedId: false, inputBasename: `${profile.id}.json` });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /usage:.*--expected-id/);
+  assert.equal(result.ghCalls, "");
+});
+
+test("drift reporter binds input basename to expected profile id", (t) => {
+  const result = runReporter(t, validDrift(), { inputBasename: "qwen.json" });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /input basename must exactly match expected profile id/);
+  assert.equal(result.ghCalls, "");
+});
+
+test("drift reporter rejects unknown expected profile id", (t) => {
+  const result = runReporter(t, validDrift(), { expectedId: "unknown-agent" });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /--expected-id must name a known profile/);
+  assert.equal(result.ghCalls, "");
+});

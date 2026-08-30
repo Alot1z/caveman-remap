@@ -190,7 +190,8 @@ jobs:
             exit 0
           fi
           for probe in "${probes[@]}"; do
-            if ! node agents/drift-report.mjs --input "$probe"; then
+            expected_id="$(basename "$probe" .json)"
+            if ! node agents/drift-report.mjs --input "$probe" --expected-id "$expected_id"; then
               echo "::warning file=$probe::invalid agent drift probe"
             fi
           done

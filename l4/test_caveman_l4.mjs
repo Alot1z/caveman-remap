@@ -147,5 +147,19 @@ test('a live lock is honored as busy (never double-write)', (dir) => {
   assert.strictEqual(out.status, 'busy', 'a live owner pid must not be stolen');
 });
 
+test('a live but OLD lock is still honored as busy (never double-write)', (dir) => {
+  const sess = join(dir, 's.jsonl');
+  writeFileSync(sess, JSON.stringify({ type: 'assistant', message: { id: 'm1', usage: { output_tokens: 50 } } }) + '\n');
+  // Old enough to be past LOCK_STALE_MS, but the recorded owner pid is LIVE: a
+  // hung-but-alive run must not be stolen into a second writer.
+  const lock = join(dir, 'state', 'default__s.lock');
+  mkdirSync(lock, { recursive: true });
+  writeFileSync(join(lock, 'owner'), `${process.pid} ${new Date().toISOString()}`);
+  const past = Date.now() / 1000 - 120;
+  utimesSync(lock, past, past);
+  const out = run(dir, ['auto-measure', '--session-file', sess]);
+  assert.strictEqual(out.status, 'busy', 'a live owner pid is not stolen, even when the lock is old');
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

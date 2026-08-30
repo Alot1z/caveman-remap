@@ -88,7 +88,11 @@ function stealLock(lockPath) {
   try {
     const alive = ownerPidAlive(ownerFile);
     const tooOld = Date.now() - fs.statSync(lockPath).mtimeMs > LOCK_STALE_MS;
-    if (alive === false || tooOld) {
+    // Never steal a PROVABLY-LIVE lock, even if old: a >60s lock with a live
+    // owner means a hung/slow run, and stealing it would create a second writer
+    // (double-write) while the first is still alive. Steal only when the owner
+    // is provably dead, or the owner is unknown AND the lock has aged out.
+    if (alive === false || (alive !== true && tooOld)) {
       fs.rmSync(lockPath, { recursive: true, force: true });
       return true;
     }

@@ -139,7 +139,7 @@ function formatUsd(amount) {
 
 // Deterministic number formatting. toLocaleString() alone inherits the host OS
 // locale, which varies thousands separators between machines (1,250 vs 1.250)
-// and makes CLI output — and the test suite — locale-dependent (MEGA-4). Pin
+// and makes CLI output — and the test suite — locale-dependent. Pin
 // en-US so caveman-stats prints the same numbers everywhere, matching the rest
 // of the tool's English output.
 const fmt = (n) => n.toLocaleString('en-US');
@@ -402,7 +402,7 @@ function parseDuration(spec) {
   return m[2] === 'd' ? n * 86_400_000 : n * 3_600_000;
 }
 
-// ── Incremental lifetime aggregation (MEGA-1) ─────────────────────────────
+// ── Incremental lifetime aggregation ─────────────────────────────────────
 // The history file (.caveman-history.jsonl) is append-only and grows without
 // bound — a row is written on every /caveman-stats run, not per session. Naively
 // re-reading and re-parsing the WHOLE file on every stats call under the hook's

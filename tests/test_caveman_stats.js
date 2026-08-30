@@ -331,7 +331,7 @@ test('--since rejects malformed durations', (tmp) => {
   assert.match(err.stderr, /--since takes Nh or Nd/);
 });
 
-test('incremental aggregation stays correct across runs and history rotation (MEGA-1)', (tmp) => {
+test('incremental aggregation stays correct across runs and history rotation', (tmp) => {
   const { aggregateHistory } = require(path.join(ROOT, 'src', 'hooks', 'caveman-stats.js'));
   const claudeDir = path.join(tmp, '.claude');
   fs.mkdirSync(claudeDir, { recursive: true });

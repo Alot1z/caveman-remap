@@ -5,7 +5,7 @@
   "vendor": "QwenLM",
   "homepage": "https://github.com/QwenLM/qwen-code",
   "binary_names": ["qwen"],
-  "args": ["--extensions", "none"],
+  "args": ["--extensions=none"],
   "install": "npm i -g @qwen-code/qwen-code@0.22.3",
   "wire_protocol": "openai-chat",
   "injection": {

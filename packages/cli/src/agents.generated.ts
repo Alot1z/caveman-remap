@@ -501,8 +501,7 @@ export const PROFILES: AgentProfile[] = [
       "qwen"
     ],
     "args": [
-      "--extensions",
-      "none"
+      "--extensions=none"
     ],
     "install": "npm i -g @qwen-code/qwen-code@0.22.3",
     "wire_protocol": "openai-chat",

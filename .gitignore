@@ -33,3 +33,7 @@ bin/cave
 .claude/skills/preflight/SKILL.md
 docs/GITHUB_OPEN_TRIAGE_2026-08-19.md
 docs/plans/
+
+# caveman L4 runtime state (measurements + locks)
+l4/state/
+l4/profiles/

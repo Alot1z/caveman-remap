@@ -10380,6 +10380,12 @@ function removeMcpKiloJson(serverName = "caveman"): boolean {
 }
 
 type QwenHomeState = { root: string; env: NodeJS.ProcessEnv; ambiguous: boolean };
+const qwenHomeBootstrapKeys = [
+  "QWEN_HOME",
+  "QWEN_RUNTIME_DIR",
+  "QWEN_CODE_MCP_APPROVALS_PATH",
+  "QWEN_CODE_TRUSTED_FOLDERS_PATH",
+] as const;
 
 function qwenReadDotEnv(path: string): Record<string, string> | null {
   try {
@@ -10409,17 +10415,24 @@ function qwenHomeState(): QwenHomeState {
   const candidates = [join(initialRoot, ".env")];
   if (!initialHome) candidates.push(join(homedir(), ".env"));
   let ambiguous = false;
-  for (const path of candidates) {
+  const load = (path: string) => {
     const parsed = qwenReadDotEnv(path);
     if (!parsed) {
       ambiguous = true;
-      continue;
+      return;
     }
-    for (const key of ["QWEN_HOME", "QWEN_RUNTIME_DIR"] as const) {
+    for (const key of qwenHomeBootstrapKeys) {
       if (parsed[key] && !Object.hasOwn(env, key)) env[key] = parsed[key];
     }
+  };
+  for (const path of candidates) load(path);
+  const discoveredRoot = qwenResolveHomeRoot(env.QWEN_HOME);
+  if (env.QWEN_HOME && env.QWEN_HOME !== initialHome && discoveredRoot !== initialRoot) {
+    // Pinned Qwen performs a second pass through a newly discovered QWEN_HOME.
+    // Trust and approval paths can live there, not only QWEN_RUNTIME_DIR.
+    load(join(discoveredRoot, ".env"));
   }
-  return { root: qwenResolveHomeRoot(env.QWEN_HOME), env, ambiguous };
+  return { root: discoveredRoot, env, ambiguous };
 }
 
 function qwenHomeEnvFallback(state: QwenHomeState = qwenHomeState()): Record<string, string> | null {
@@ -10468,6 +10481,18 @@ function jsonValueAt(root: unknown, path: string[]): unknown {
 function readOptionalJsonObject(path: string): JsonObject | null {
   try {
     const value = readJson5Lenient(path);
+    return asJsonObject(value) ?? null;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? {} : null;
+  }
+}
+
+// Qwen settings and trust files are JSON-with-comments, not JSON5: trailing
+// commas are corruption in 0.22.3. Read-only safety checks must not accept a
+// policy or credential source the pinned binary will discard during recovery.
+function readQwenJsonObject(path: string): JsonObject | null {
+  try {
+    const value = JSON.parse(stripJson5Comments(readFileSync(path, "utf8")));
     return asJsonObject(value) ?? null;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT" ? {} : null;
@@ -10672,7 +10697,8 @@ function qwenConfigFileInjection(): ConfigFileInjection | undefined {
 function qwenSettingsLayerPaths(): string[] | null {
   const injection = qwenConfigFileInjection();
   if (!injection?.base_config) return null;
-  if (qwenHomeState().ambiguous) return null;
+  const state = qwenHomeState();
+  if (state.ambiguous) return null;
   const system = baseConfigPath(injection.base_config);
   const configuredDefaults = process.env.QWEN_CODE_SYSTEM_DEFAULTS_PATH?.trim();
   const defaultsRoot = configuredDefaults ? expandTilde(configuredDefaults) : join(dirname(system), "system-defaults.json");
@@ -10681,7 +10707,7 @@ function qwenSettingsLayerPaths(): string[] | null {
   // last-layer identity matters for enterprise MCP server shadow checks.
   return [
     defaults,
-    qwenConfigPath(),
+    join(state.root, "settings.json"),
     join(process.cwd(), ".qwen", "settings.json"),
     system,
   ];
@@ -10720,9 +10746,11 @@ function qwenWorkspaceTrusted(settings: JsonObject, workspacePath: string): bool
   const enabled = jsonValueAt(settings, ["security", "folderTrust", "enabled"]);
   if (enabled === undefined || enabled === false) return true;
   if (enabled !== true) return null;
-  const configuredPath = process.env.QWEN_CODE_TRUSTED_FOLDERS_PATH;
-  const trustedPath = configuredPath || join(qwenHomeState().root, "trustedFolders.json");
-  const config = readOptionalJsonObject(trustedPath);
+  const state = qwenHomeState();
+  if (state.ambiguous) return null;
+  const configuredPath = state.env.QWEN_CODE_TRUSTED_FOLDERS_PATH;
+  const trustedPath = configuredPath || join(state.root, "trustedFolders.json");
+  const config = readQwenJsonObject(trustedPath);
   if (!config) return null;
 
   const workspaceVariants = qwenPathVariants(workspacePath);
@@ -10756,7 +10784,7 @@ function qwenSettingsLayers(): JsonObject[] | null {
   if (!fallback) return null;
   const layers: JsonObject[] = [];
   for (const path of paths) {
-    const layer = readOptionalJsonObject(path);
+    const layer = readQwenJsonObject(path);
     if (!layer) return null;
     const migrated = qwenMigratePolicySettings(layer);
     layers.push(qwenResolveSettingValue(migrated, fallback) as JsonObject);
@@ -11012,7 +11040,7 @@ function ownedMcpRegistration(agentId: string, agentArgs: string[] = []): McpSer
   if (agentId === "qwen") {
     const layers = qwenSettingsLayers();
     if (!layers || !qwenArgsPermitRecovery(agentArgs, layers)) return null;
-    const config = readOptionalJsonObject(qwenConfigPath());
+    const config = readQwenJsonObject(qwenConfigPath());
     if (!config || !qwenMcpEntryMatches(jsonValueAt(config, ["mcpServers", "caveman"]), marker)) return null;
     return qwenSettingsPermitRecovery(marker, layers) ? marker : null;
   }

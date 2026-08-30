@@ -120,7 +120,21 @@ function validateEnvVariableName(value, need, label) {
   need(typeof value === "string" && ENV_VAR_RE.test(value) && !loaderControlKey(value), `${label} is not a safe environment variable name`);
 }
 
-function validateConfigStrings(value, need, path = "injection config") {
+function optionalOpenAIKeyEnvPathAllowed(profileId, segments) {
+  return profileId === "qwen"
+    && segments.length === 9
+    && segments[0] === "injection"
+    && segments[1] === "config_overlay"
+    && segments[2] === "managed"
+    && segments[3] === "modelProviders"
+    && segments[4] === "openai"
+    && Number.isInteger(segments[5])
+    && segments[6] === "generationConfig"
+    && segments[7] === "customHeaders"
+    && segments[8] === "x-cave-upstream-key";
+}
+
+function validateConfigStrings(value, need, path = "injection config", profileId = "", segments = []) {
   if (typeof value === "string") {
     const tokens = value.match(/\{\{[^}]+\}\}/g) ?? [];
     const knownTokens = value.match(TEMPLATE_RE) ?? [];
@@ -129,7 +143,10 @@ function validateConfigStrings(value, need, path = "injection config") {
     const key = path.split(".").at(-1) ?? "";
     if (value.includes(OPTIONAL_OPENAI_KEY_ENV_TEMPLATE)) {
       need(value === OPTIONAL_OPENAI_KEY_ENV_TEMPLATE, `${path} must use ${OPTIONAL_OPENAI_KEY_ENV_TEMPLATE} as the entire value`);
-      need(key.toLowerCase() === "x-cave-upstream-key", `${path} may use ${OPTIONAL_OPENAI_KEY_ENV_TEMPLATE} only as x-cave-upstream-key`);
+      need(
+        optionalOpenAIKeyEnvPathAllowed(profileId, segments),
+        `${path} may use ${OPTIONAL_OPENAI_KEY_ENV_TEMPLATE} only as Qwen's managed OpenAI provider x-cave-upstream-key`,
+      );
       return;
     }
     if (/^(baseurl|base_url|api_base|host|endpoint|url)$/i.test(key)) {
@@ -141,11 +158,13 @@ function validateConfigStrings(value, need, path = "injection config") {
     return;
   }
   if (Array.isArray(value)) {
-    value.forEach((item, index) => validateConfigStrings(item, need, `${path}[${index}]`));
+    value.forEach((item, index) => validateConfigStrings(item, need, `${path}[${index}]`, profileId, [...segments, index]));
     return;
   }
   if (value && typeof value === "object") {
-    for (const [key, item] of Object.entries(value)) validateConfigStrings(item, need, `${path}.${key}`);
+    for (const [key, item] of Object.entries(value)) {
+      validateConfigStrings(item, need, `${path}.${key}`, profileId, [...segments, key]);
+    }
   }
 }
 
@@ -279,7 +298,7 @@ function validate(p, file) {
     validateEnvVariableName(inj.env_var, need, "injection.env_var");
     need(inj.config_content && typeof inj.config_content === "object", "injection.config_content must be an object");
     need(inj.config_content.local && typeof inj.config_content.local === "object", "injection.config_content.local is required");
-    validateConfigStrings(inj.config_content, need, "injection.config_content");
+    validateConfigStrings(inj.config_content, need, "injection.config_content", p.id, ["injection", "config_content"]);
   } else if (inj.method === "config-file") {
     validateEnvVariableName(inj.env_var, need, "injection.env_var");
     if (inj.base_config !== undefined) {
@@ -298,7 +317,7 @@ function validate(p, file) {
     }
     need(inj.config_overlay && typeof inj.config_overlay === "object" && !Array.isArray(inj.config_overlay), "injection.config_overlay must be an object");
     need(Object.prototype.hasOwnProperty.call(inj.config_overlay, "local"), "injection.config_overlay.local is required");
-    validateConfigStrings(inj.config_overlay, need, "injection.config_overlay");
+    validateConfigStrings(inj.config_overlay, need, "injection.config_overlay", p.id, ["injection", "config_overlay"]);
   } else if (inj.method === "native-extension") {
     need(NATIVE_EXTENSION_HOSTS.has(inj.host), `injection.host "${inj.host}" is not an allowlisted native-extension host (fail-closed)`);
     need(inj.host === p.id, `injection.host must equal the profile id (got "${inj.host}" for "${p.id}")`);

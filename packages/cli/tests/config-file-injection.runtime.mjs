@@ -274,11 +274,15 @@ test("optional upstream-key references omit unavailable credentials without seri
     config_overlay: {
       local: {},
       managed: {
-        generationConfig: {
-          customHeaders: {
-            "x-cave-upstream-key": "{{cave_optional_openai_key_env}}",
-            "X-Cave-Agent": "fake-optional-upstream",
-          },
+        modelProviders: {
+          openai: [{
+            generationConfig: {
+              customHeaders: {
+                "x-cave-upstream-key": "{{cave_optional_openai_key_env}}",
+                "X-Cave-Agent": "fake-optional-upstream",
+              },
+            },
+          }],
         },
       },
     },
@@ -294,12 +298,28 @@ test("optional upstream-key references omit unavailable credentials without seri
       const env = buildWrapEnv(agent, "https://gateway.example");
       const raw = readFileSync(env.FAKE_OPTIONAL_UPSTREAM_CONFIG, "utf8");
       const cfg = JSON.parse(raw);
-      assert.equal(cfg.generationConfig.customHeaders["x-cave-upstream-key"], scenario.expected, scenario.name);
-      assert.equal(cfg.generationConfig.customHeaders["X-Cave-Agent"], "fake-optional-upstream");
+      const headers = cfg.modelProviders.openai[0].generationConfig.customHeaders;
+      assert.equal(headers["x-cave-upstream-key"], scenario.expected, scenario.name);
+      assert.equal(headers["X-Cave-Agent"], "fake-optional-upstream");
       assert.doesNotMatch(raw, /sk-upstream-secret|sk-invalid/);
     });
   }
 });
+
+test("optional credential references fail closed inside arrays", () => withEnv({
+  OPENAI_API_KEY: undefined,
+  FAKE_OPTIONAL_ARRAY_CONFIG: undefined,
+}, () => {
+  const agent = fakeProfile("fake-optional-array", {
+    method: "config-file",
+    env_var: "FAKE_OPTIONAL_ARRAY_CONFIG",
+    base_config: { path: join(tmpdir(), "caveman-missing-optional-array.json") },
+    config_overlay: { local: { invalid: ["{{cave_optional_openai_key_env}}"] } },
+  });
+  const { result: env, stderr } = captureStderr(() => buildWrapEnv(agent, "http://127.0.0.1:19007"));
+  assert.equal(env.FAKE_OPTIONAL_ARRAY_CONFIG, undefined);
+  assert.match(stderr, /optional profile credentials cannot be array elements/);
+}));
 
 test("openclaw config-file injection keeps attribution header and uses path-attributed gateway", () => {
   const dir = mkdtempSync(join(tmpdir(), "cave-openclaw-config-file-"));

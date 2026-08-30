@@ -5705,7 +5705,13 @@ function renderDeep(v: unknown, gw = gatewayURL(), env: NodeJS.ProcessEnv = proc
     return typeof key === "string" && key.trim() && !/[\r\n]/.test(key) ? "$OPENAI_API_KEY" : undefined;
   }
   if (typeof v === "string") return renderTemplate(v, gw);
-  if (Array.isArray(v)) return v.map((item) => renderDeep(item, gw, env)).filter((item) => item !== undefined);
+  if (Array.isArray(v)) {
+    return v.map((item) => {
+      const rendered = renderDeep(item, gw, env);
+      if (rendered === undefined) throw new Error("optional profile credentials cannot be array elements");
+      return rendered;
+    });
+  }
   if (v && typeof v === "object") {
     const out: Record<string, unknown> = {};
     for (const [k, val] of Object.entries(v as Record<string, unknown>)) {

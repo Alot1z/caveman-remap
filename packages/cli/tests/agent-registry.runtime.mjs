@@ -18,9 +18,10 @@ const profilesDir = join(agentsDir, "profiles");
 const generatedAgents = join(here, "..", "src", "agents.generated.ts");
 const generatedReserved = join(here, "..", "src", "reserved-verbs.generated.ts");
 const base = JSON.parse(readFileSync(join(profilesDir, "claude.json"), "utf8"));
+const qwenBase = JSON.parse(readFileSync(join(profilesDir, "qwen.json"), "utf8"));
 
-function checkProfile(mutator) {
-  const profile = structuredClone(base);
+function checkProfile(mutator, fixture = base) {
+  const profile = structuredClone(fixture);
   mutator(profile);
   const dir = mkdtempSync(join(tmpdir(), "caveman-profile-"));
   const file = join(dir, "profile.json");
@@ -28,9 +29,9 @@ function checkProfile(mutator) {
   return spawnSync(process.execPath, [compiler, "--check-profile", file], { encoding: "utf8" });
 }
 
-function rejects(label, mutator, message) {
+function rejects(label, mutator, message, fixture = base) {
   test(`profile compiler rejects ${label}`, () => {
-    const out = checkProfile(mutator);
+    const out = checkProfile(mutator, fixture);
     assert.notEqual(out.status, 0, `${label} unexpectedly compiled`);
     assert.match(out.stderr, message);
   });
@@ -74,41 +75,52 @@ rejects("unknown top-level key", (profile) => {
 
 test("profile compiler accepts optional upstream-key reference only as a whole header value", () => {
   const out = checkProfile((profile) => {
-    profile.injection = {
-      method: "config-file",
-      env_var: "CLAUDE_CONFIG_PATH",
-      base_config: { path: "~/.claude/settings.json" },
-      config_overlay: {
-        local: {
-          generationConfig: {
-            customHeaders: { "x-cave-upstream-key": "{{cave_optional_openai_key_env}}" },
-          },
-        },
-      },
-    };
-  });
+    profile.injection.config_overlay.managed.modelProviders.openai[0]
+      .generationConfig.customHeaders["x-cave-upstream-key"] = "{{cave_optional_openai_key_env}}";
+  }, qwenBase);
   assert.equal(out.status, 0, out.stderr);
 });
 
 rejects("composed optional upstream-key reference", (profile) => {
+  profile.injection.config_overlay.managed.modelProviders.openai[0]
+    .generationConfig.customHeaders["x-cave-upstream-key"] = "Bearer {{cave_optional_openai_key_env}}";
+}, /must use \{\{cave_optional_openai_key_env\}\} as the entire value/, qwenBase);
+
+rejects("optional upstream-key reference outside its closed header", (profile) => {
+  profile.injection.config_overlay.managed.modelProviders.openai[0].apiKey = "{{cave_optional_openai_key_env}}";
+}, /only as Qwen's managed OpenAI provider/, qwenBase);
+
+rejects("optional upstream-key reference for another agent", (profile) => {
   profile.injection = {
     method: "config-file",
     env_var: "CLAUDE_CONFIG_PATH",
     base_config: { path: "~/.claude/settings.json" },
     config_overlay: {
-      local: { customHeaders: { "x-cave-upstream-key": "Bearer {{cave_optional_openai_key_env}}" } },
+      local: {},
+      managed: {
+        modelProviders: {
+          openai: [{
+            generationConfig: {
+              customHeaders: { "x-cave-upstream-key": "{{cave_optional_openai_key_env}}" },
+            },
+          }],
+        },
+      },
     },
   };
-}, /must use \{\{cave_optional_openai_key_env\}\} as the entire value/);
+}, /only as Qwen's managed OpenAI provider/);
 
-rejects("optional upstream-key reference outside its closed header", (profile) => {
-  profile.injection = {
-    method: "config-file",
-    env_var: "CLAUDE_CONFIG_PATH",
-    base_config: { path: "~/.claude/settings.json" },
-    config_overlay: { local: { apiKey: "{{cave_optional_openai_key_env}}" } },
+rejects("optional upstream-key reference in Qwen local config", (profile) => {
+  profile.injection.config_overlay.local.modelProviders.openai[0]
+    .generationConfig.customHeaders["x-cave-upstream-key"] = "{{cave_optional_openai_key_env}}";
+}, /only as Qwen's managed OpenAI provider/, qwenBase);
+
+rejects("optional upstream-key reference through a path-shaped JSON key", (profile) => {
+  profile.injection.config_overlay = {
+    local: {},
+    "managed.modelProviders.openai[0].generationConfig.customHeaders.x-cave-upstream-key": "{{cave_optional_openai_key_env}}",
   };
-}, /only as x-cave-upstream-key/);
+}, /only as Qwen's managed OpenAI provider/, qwenBase);
 
 rejects("literal nested gateway URL", (profile) => {
   profile.injection = {

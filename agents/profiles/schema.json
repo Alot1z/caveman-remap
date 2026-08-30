@@ -99,7 +99,7 @@
               "required": ["local"],
               "properties": {
                 "local": { "description": "overlay merged over the base config for local BYOK mode (caveman start)" },
-                "managed": { "description": "overlay merged over the base config when CAVE_GATEWAY_URL points off-loopback; x-cave-upstream-key may use {{cave_optional_openai_key_env}} as its whole value so the property is omitted when OPENAI_API_KEY is unavailable" }
+                "managed": { "description": "overlay merged over the base config when CAVE_GATEWAY_URL points off-loopback; Qwen OpenAI provider x-cave-upstream-key may use {{cave_optional_openai_key_env}} as its whole value so the property is omitted when OPENAI_API_KEY is unavailable" }
               }
             }
           }

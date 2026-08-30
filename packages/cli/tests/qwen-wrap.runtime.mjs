@@ -209,6 +209,37 @@ test("managed Qwen config separates gateway bearer from upstream credential", ()
   }
 });
 
+test("managed Qwen omits upstream header when only stored gateway credentials are available", () => {
+  const fx = qwenFixture();
+  try {
+    const base = JSON.parse(fx.systemBytes);
+    base.modelProviders.openai = [{
+      id: "stale-provider",
+      generationConfig: { customHeaders: { "x-cave-upstream-key": "stale-literal" } },
+    }];
+    writeFileSync(fx.systemConfig, JSON.stringify(base));
+    for (const upstreamKey of [undefined, "  "]) {
+      withEnv({
+        HOME: fx.env.HOME,
+        CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+        QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfig,
+        CAVE_API_KEY: "cave-managed-secret",
+        OPENAI_API_KEY: upstreamKey,
+      }, () => {
+        const injected = readInjected(buildWrapEnv(qwen, "https://gateway.example"));
+        for (const model of injected.config.modelProviders.openai) {
+          assert.equal(model.envKey, "CAVE_API_KEY");
+          assert.equal(Object.hasOwn(model.generationConfig.customHeaders, "x-cave-upstream-key"), false);
+          assert.equal(model.generationConfig.customHeaders["X-Cave-Agent"], "qwen");
+        }
+        assert.doesNotMatch(injected.raw, /\$OPENAI_API_KEY|cave_optional_openai_key_env|cave-managed-secret|stale-literal/);
+      });
+    }
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("caveman qwen passes user args and never mutates Qwen settings", async () => {
   const fx = qwenFixture();
   try {

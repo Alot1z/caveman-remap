@@ -23,12 +23,13 @@ import {
 } from "node:fs";
 import { chmod, mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir, hostname, tmpdir } from "node:os";
-import { basename, delimiter, dirname, extname, isAbsolute, join, resolve, win32 } from "node:path";
+import { basename, delimiter, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { connect as netConnect, createServer as netCreateServer, isIP, type AddressInfo } from "node:net";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { createHash, createHmac, createPublicKey, randomBytes, randomUUID, verify as edVerify, type KeyObject } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { parseEnv } from "node:util";
 import { PROFILES, type AgentProfile } from "./agents.generated.js";
 import {
   BINARY_RELEASE,
@@ -2578,10 +2579,23 @@ function readPendingAgentNativeBundleRemoval(agent: "claude" | "codex"): AgentNa
   }
 }
 
-function readMcpServerMarker(agent: string, serverName: string): { command: string; args: string[] } | null {
+type McpServerMarker = { command: string; args: string[] };
+
+function mcpServerToolName(serverName: string): string | undefined {
+  if (serverName === "caveman") return "caveman_retrieve";
+  if (serverName === "caveman-browse") return "caveman_browse";
+  if (serverName === "caveman-cloud") return "caveman_context";
+  if (serverName === "caveman-delegate") return "caveman_delegate";
+  return undefined;
+}
+
+function readMcpServerMarker(agent: string, serverName: string): McpServerMarker | null {
   try {
     const value = JSON.parse(readFileSync(mcpServerMarkerPath(agent, serverName), "utf8")) as Record<string, unknown>;
-    if (typeof value.command !== "string" || !Array.isArray(value.args) || !value.args.every((arg) => typeof arg === "string")) return null;
+    const expectedTool = mcpServerToolName(serverName);
+    if (!expectedTool || value.tool !== expectedTool) return null;
+    if (Object.keys(value).sort().join("\0") !== ["args", "command", "tool"].join("\0")) return null;
+    if (typeof value.command !== "string" || !value.command.trim() || /[\r\n]/.test(value.command) || !Array.isArray(value.args) || !value.args.every((arg) => typeof arg === "string")) return null;
     return { command: value.command, args: value.args as string[] };
   } catch {
     return null;
@@ -3031,11 +3045,12 @@ type WrapRuntimeMode = "compress" | "record" | "pixel";
 //   auto        — install the caveman MCP server when a real binary resolves
 //                 (today's behavior); the agent gets caveman_retrieve and the
 //                 proxy may compress streams marker-only.
-//   marker-only — inject NOTHING. Wrap stops managing the MCP surface: it does
-//                 not install, and it does not uninstall what is already there.
-//                 Recovery is then answered purely by what the agent actually
-//                 has (see wrapMcpRecoveryAvailable), so the proxy is never told
-//                 a retrieval tool exists when none does.
+//   marker-only — install NOTHING new and strip profile-owned automatic MCP.
+//                 Wrap does not uninstall a prior explicit install; agents whose
+//                 highest-precedence config can shadow that install may receive
+//                 an ephemeral copy only after marker + native entry validation.
+//                 Recovery is answered from that effective registration (see
+//                 wrapMcpRecoveryAvailable), never marker existence alone.
 //   off         — the pre-existing `execute.mcp: false`; same install behavior
 //                 as marker-only, kept as its own name for config compatibility.
 type McpSurfaceMode = "auto" | "marker-only" | "off";
@@ -5162,7 +5177,7 @@ async function spawnWrapped(
     : null;
   if (ephemeralMcp && !ephemeralMcp.probe.current) queueStaleMcpBinary(ephemeralMcp.probe);
   const ephemeralMcpBinary = ephemeralMcp?.probe.current ? ephemeralMcp.binary : undefined;
-  const mcpRecovery = Boolean(ephemeralMcpBinary) || wrapMcpRecoveryAvailable(agent, opts);
+  const mcpRecovery = Boolean(ephemeralMcpBinary) || wrapMcpRecoveryAvailable(agent, opts, cmdArgs);
   const delegateAlreadyInstalled = Boolean(agent && mcpServerInstalled(agent.id, "caveman-delegate"));
   const ephemeralDelegateMcp = agent && (agent.id === "claude" || agent.id === "codex")
     && !opts.minimal && opts.delegate && !delegateAlreadyInstalled
@@ -5371,7 +5386,7 @@ async function spawnWrapped(
       ? { ...process.env }
       : agent?.id === "codex"
         ? buildCodexEphemeralWrapEnv(gw, codexSubscription, ephemeralMcpBinary, includeShrink, ephemeralDelegateMcp)
-        : buildWrapEnv(agent, gw, opts.mcpMode);
+        : buildWrapEnv(agent, gw, opts.mcpMode, cmdArgs);
     if (!direct && agent?.id === "claude") {
       const pluginDir = buildClaudeEphemeralPlugin(ephemeralMcpBinary, includeShrink, Boolean(opts.autoRecall), ephemeralDelegateMcp);
       childArgs = ["--plugin-dir", pluginDir, ...cmdArgs];
@@ -5786,14 +5801,12 @@ type ConfigFileInjection = Extract<AgentProfile["injection"], { method: "config-
 export function platformDefaultConfigPath(
   kind: NonNullable<NonNullable<ConfigFileInjection["base_config"]>["platform_default"]>,
   platform: NodeJS.Platform = process.platform,
-  env: NodeJS.ProcessEnv = process.env,
+  _env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
   if (kind !== "qwen-system-settings") return undefined;
   if (platform === "darwin") return "/Library/Application Support/QwenCode/settings.json";
-  if (platform === "win32") {
-    const programData = env.ProgramData || env.PROGRAMDATA || "C:\\ProgramData";
-    return win32.join(programData, "qwen-code", "settings.json");
-  }
+  // Qwen 0.22.3 deliberately does not consult %ProgramData% here.
+  if (platform === "win32") return "C:\\ProgramData\\qwen-code\\settings.json";
   if (platform === "linux") return "/etc/qwen-code/settings.json";
   return undefined;
 }
@@ -8367,12 +8380,32 @@ function withoutCavemanMcpServer(overlay: JsonObject): JsonObject {
   return next;
 }
 
-function applyConfigFileInjection(env: NodeJS.ProcessEnv, agent: AgentProfile, inj: ConfigFileInjection, gw: string, modeGw = gw, mcpMode: McpSurfaceMode = "auto") {
+function applyConfigFileInjection(env: NodeJS.ProcessEnv, agent: AgentProfile, inj: ConfigFileInjection, gw: string, modeGw = gw, mcpMode: McpSurfaceMode = "auto", agentArgs: string[] = []) {
   const baseConfig = readBaseConfig(inj);
   const mode = wrapMode(modeGw);
   const staticOverlay = mode === "managed" && inj.config_overlay.managed !== undefined ? inj.config_overlay.managed : inj.config_overlay.local;
   const builder = overlayBuilders[agent.id];
-	const rawOverlay = renderDeep(builder ? builder(agent, baseConfig, { mode, gatewayUrl: gw, env }) : staticOverlay, gw);
+  let rawOverlay = renderDeep(builder ? builder(agent, baseConfig, { mode, gatewayUrl: gw, env }) : staticOverlay, gw);
+  if (agent.id === "qwen") {
+    const ownedMcp = ownedMcpRegistration(agent.id, agentArgs);
+    if (ownedMcp) {
+      // Qwen merges system settings last. Mirror only a still-journaled native
+      // entry into this temporary system overlay so project settings cannot
+      // replace the recovery server after Caveman has claimed it is available.
+      rawOverlay = deepMerge(rawOverlay, { mcpServers: { caveman: qwenMcpEntry(ownedMcp) } });
+    } else {
+      // Qwen can advertise MCP schemas even when enterprise policy blocks calls.
+      // Suppress the exact server in this highest-precedence temporary overlay
+      // whenever native registration + journal + effective policy do not agree.
+      const configured = jsonValueAt(baseConfig, ["mcp", "excluded"]);
+      const preserved = Array.isArray(configured)
+        ? configured.filter((item): item is string => typeof item === "string")
+        : [];
+      rawOverlay = deepMerge(rawOverlay, {
+        mcp: { excluded: [...new Set([...preserved, "caveman"])] },
+      });
+    }
+  }
   const overlay = mcpMode === "auto" ? rawOverlay : withoutCavemanMcpServer(rawOverlay as JsonObject);
   const merged = deepMerge(baseConfig, overlay);
   const rendered = JSON.stringify(merged, null, 2);
@@ -8525,7 +8558,7 @@ function applyClaudeBedrockWrap(env: NodeJS.ProcessEnv, agent: AgentProfile, ren
 // one production caller passes the SAME opts.mcpMode that wrapMcpRecoveryAvailable
 // reads, which is what keeps "what we inject" and "what we tell the proxy" from
 // ever disagreeing.
-export function buildWrapEnv(agent?: AgentProfile, gw = gatewayURL(), mcpMode: McpSurfaceMode = "auto"): NodeJS.ProcessEnv {
+export function buildWrapEnv(agent?: AgentProfile, gw = gatewayURL(), mcpMode: McpSurfaceMode = "auto", agentArgs: string[] = []): NodeJS.ProcessEnv {
   if (agent?.id === "gemini" && wrapMode(gw) === "managed") {
     throw new Error("managed Gemini CLI routing is unsupported because Gemini CLI cannot send separate Caveman and upstream credentials");
   }
@@ -8540,6 +8573,11 @@ export function buildWrapEnv(agent?: AgentProfile, gw = gatewayURL(), mcpMode: M
   }
   if (!agent) return env;
   if (applyClaudeBedrockWrap(env, agent, renderedGw, gw)) return env;
+  if (agent.id === "qwen" && qwenSafeModeEnabled(agentArgs) !== false) {
+    // Qwen safe mode discards system settings, including Caveman's provider
+    // route. Do not launch a child that would silently bypass the proxy.
+    throw new Error("Qwen safe mode ignores Caveman system settings");
+  }
   const inj = agent.injection;
   if (inj.method === "env") {
     for (const [k, raw] of Object.entries(inj.env)) {
@@ -8549,15 +8587,24 @@ export function buildWrapEnv(agent?: AgentProfile, gw = gatewayURL(), mcpMode: M
   } else if (inj.method === "config-env-content") {
     const cc = inj.config_content;
     const content = wrapMode(gw) === "managed" && cc.managed !== undefined ? cc.managed : cc.local;
-    env[inj.env_var] = JSON.stringify(renderDeep(content, renderedGw));
+    let rendered = renderDeep(content, renderedGw);
+    if (agent.id === "kilo") {
+      const ownedMcp = ownedMcpRegistration(agent.id, agentArgs);
+      if (ownedMcp) {
+        // KILO_CONFIG_CONTENT has highest precedence. Project the exact owned
+        // registration into it so recovery evidence and effective config agree.
+        rendered = deepMerge(rendered, { mcp: { caveman: kiloMcpEntry(ownedMcp) } });
+      }
+    }
+    env[inj.env_var] = JSON.stringify(rendered);
   } else if (inj.method === "config-file") {
     try {
-      applyConfigFileInjection(env, agent, inj, renderedGw, gw, mcpMode);
+      applyConfigFileInjection(env, agent, inj, renderedGw, gw, mcpMode, agentArgs);
     } catch (e) {
       // OpenClaw ignores the generic base-URL union. Config injection is its only
       // provider redirect, so a failed/missing route must abort the wrapped path;
       // spawnWrapped then launches direct with an explicit warning.
-      if (agent.id === "openclaw") throw e;
+      if (agent.id === "openclaw" || agent.id === "qwen") throw e;
       process.stderr.write(`caveman: ${agent.id} config-file injection failed; using generic env wrap (${(e as Error).message})\n`);
     }
   }
@@ -8566,7 +8613,7 @@ export function buildWrapEnv(agent?: AgentProfile, gw = gatewayURL(), mcpMode: M
   // says recovery is installed. Proxy compression must never outrun recovery,
   // so marker-backed Qwen wraps use Qwen's compatibility switch to finish MCP
   // discovery before the first model request.
-  if (agent.id === "qwen" && mcpInstalled(agent.id)) {
+  if (agent.id === "qwen" && mcpInstalled(agent.id, agentArgs)) {
     env.QWEN_CODE_LEGACY_MCP_BLOCKING = "1";
   }
   if (agent.id === "hermes") applyHermesAuthEnv(env, renderedGw, gw);
@@ -9738,7 +9785,8 @@ function mcpServerInstalled(agentId: string, serverName: string): boolean {
     return false;
   }
 }
-function mcpInstalled(agentId: string): boolean {
+function mcpInstalled(agentId: string, agentArgs: string[] = []): boolean {
+  if (agentId === "kilo" || agentId === "qwen") return ownedMcpRegistration(agentId, agentArgs) !== null;
   return mcpServerInstalled(agentId, "caveman");
 }
 
@@ -9778,7 +9826,7 @@ function queueStaleMcpBinary(probe: VersionedBinaryProbe): void {
 // that is — the proxy would otherwise either elide bytes nothing can expand, or
 // pass through while the agent still pays for tools it isn't allowed to use.
 // (honesty rule: no-placeholder)
-function wrapMcpRecoveryAvailable(agent: AgentProfile | undefined, opts: WrapOptions): boolean {
+function wrapMcpRecoveryAvailable(agent: AgentProfile | undefined, opts: WrapOptions, agentArgs: string[] = []): boolean {
   if (!wrapRecoveryEligible(opts) || !agent) return false;
   if (agent.id === "pi") {
     const compatibility = probeMcpBinary();
@@ -9786,13 +9834,18 @@ function wrapMcpRecoveryAvailable(agent: AgentProfile | undefined, opts: WrapOpt
     if (!compatibility.probe.current) queueStaleMcpBinary(compatibility.probe);
     return compatibility.probe.current;
   }
+  // Kilo and Qwen can apply policy after user-owned config. Never turn their
+  // durable marker into a proxy-wide recovery assertion: each request must
+  // carry the exact namespaced retrieve tool and prove recovery in band. The
+  // validated registration below still drives launch-time projection/blocking.
+  if (agent.id === "kilo" || agent.id === "qwen") return false;
   // Two independent sources of a real caveman_retrieve: a marker from
   // `caveman tools mcp install`, or the profile's own config-file overlay. The
   // second only counts under `auto`, because that is exactly when buildWrapEnv
   // still merges it — under marker-only/false the overlay is stripped, so
   // counting it here would tell the proxy about a tool this launch removed.
   const overlayInjects = opts.mcpMode === "auto" && configFileOverlayHasCavemanMcp(agent);
-  if (!mcpInstalled(agent.id) && !overlayInjects) return false;
+  if (!mcpInstalled(agent.id, agentArgs) && !overlayInjects) return false;
   const compatibility = probeMcpBinary();
   if (!compatibility) return false;
   if (!compatibility.probe.current) {
@@ -10291,8 +10344,66 @@ function removeMcpKiloJson(serverName = "caveman"): boolean {
   }
 }
 
+type QwenHomeState = { root: string; env: NodeJS.ProcessEnv; ambiguous: boolean };
+
+function qwenReadDotEnv(path: string): Record<string, string> | null {
+  try {
+    const parsed = parseEnv(readFileSync(path, "utf8"));
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    return null;
+  }
+}
+
+function qwenResolveHomeRoot(value: string | undefined): string {
+  const configured = value?.trim();
+  const root = configured ? expandTilde(configured) : join(homedir(), ".qwen");
+  return isAbsolute(root) ? root : resolve(root);
+}
+
+// Qwen resolves QWEN_HOME from user-level dotenv before reading settings.
+// Mirror that bootstrap so install, uninstall, and recovery checks all inspect
+// the same settings file as pinned Qwen 0.22.3.
+function qwenHomeState(): QwenHomeState {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  const initialHome = env.QWEN_HOME;
+  const initialRoot = qwenResolveHomeRoot(initialHome);
+  const candidates = [join(initialRoot, ".env")];
+  if (!initialHome) candidates.push(join(homedir(), ".env"));
+  let ambiguous = false;
+  for (const path of candidates) {
+    const parsed = qwenReadDotEnv(path);
+    if (!parsed) {
+      ambiguous = true;
+      continue;
+    }
+    for (const key of ["QWEN_HOME", "QWEN_RUNTIME_DIR"] as const) {
+      if (parsed[key] && !Object.hasOwn(env, key)) env[key] = parsed[key];
+    }
+  }
+  return { root: qwenResolveHomeRoot(env.QWEN_HOME), env, ambiguous };
+}
+
+function qwenHomeEnvFallback(state: QwenHomeState = qwenHomeState()): Record<string, string> | null {
+  if (state.ambiguous) return null;
+  const candidates = [join(state.root, ".env")];
+  if (!state.env.QWEN_HOME) candidates.push(join(homedir(), ".env"));
+  const fallback: Record<string, string> = {};
+  for (const path of candidates) {
+    const parsed = qwenReadDotEnv(path);
+    if (!parsed) return null;
+    for (const [key, value] of Object.entries(parsed)) {
+      if (!Object.hasOwn(state.env, key) && fallback[key] === undefined) fallback[key] = value;
+    }
+  }
+  return fallback;
+}
+
 function qwenConfigPath(): string {
-  return join(homedir(), ".qwen", "settings.json");
+  return join(qwenHomeState().root, "settings.json");
 }
 
 function qwenMcpEntry(mcp: { command: string; args: string[] }): Record<string, unknown> {
@@ -10308,6 +10419,339 @@ function qwenMcpEntryMatches(value: unknown, mcp: { command: string; args: strin
     && Array.isArray(entry.args)
     && entry.args.length === mcp.args.length
     && entry.args.every((arg, index) => typeof arg === "string" && arg === mcp.args[index]);
+}
+
+function jsonValueAt(root: unknown, path: string[]): unknown {
+  let current = root;
+  for (const key of path) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return undefined;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current;
+}
+
+function readOptionalJsonObject(path: string): JsonObject | null {
+  try {
+    const value = readJson5Lenient(path);
+    return asJsonObject(value) ?? null;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? {} : null;
+  }
+}
+
+function qwenResolvedSettingString(value: string, fallback: Record<string, string> = {}): string {
+  return value.replace(/\$(?:(\w+)|{([^}]+)})/g, (match, bare: string | undefined, braced: string | undefined) => {
+    const name = bare || braced || "";
+    if (typeof process.env[name] === "string") return process.env[name]!;
+    return typeof fallback[name] === "string" ? fallback[name]! : match;
+  });
+}
+
+const qwenEnvReference = /\$(?:(\w+)|{([^}]+)})/;
+
+function qwenStringList(root: JsonObject, path: string[], fallback: Record<string, string> | null): string[] | undefined | null {
+  const value = jsonValueAt(root, path);
+  if (value === undefined) return undefined;
+  if (!fallback) return null;
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) return null;
+  const resolved = value.map((item) => qwenResolvedSettingString(item as string, fallback)).filter(Boolean);
+  // Qwen loads .env files after this wrapper starts. An unresolved reference
+  // can therefore become a restrictive rule later; unknown policy fails closed.
+  if (resolved.some((item) => qwenEnvReference.test(item))) return null;
+  return resolved;
+}
+
+// Exact wildcard matcher used by Qwen 0.22 for mcp.allowed/mcp.excluded:
+// `*` spans any run, `?` spans one character, everything else is literal.
+function qwenMcpServerPatternMatches(name: string, pattern: string): boolean {
+  let nameIndex = 0;
+  let patternIndex = 0;
+  let starNameIndex = -1;
+  let starPatternIndex = -1;
+  while (nameIndex < name.length) {
+    if (patternIndex < pattern.length && (pattern[patternIndex] === "?" || pattern[patternIndex] === name[nameIndex])) {
+      nameIndex++;
+      patternIndex++;
+    } else if (patternIndex < pattern.length && pattern[patternIndex] === "*") {
+      starPatternIndex = patternIndex++;
+      starNameIndex = nameIndex;
+    } else if (starPatternIndex !== -1) {
+      patternIndex = starPatternIndex + 1;
+      nameIndex = ++starNameIndex;
+    } else {
+      return false;
+    }
+  }
+  while (patternIndex < pattern.length && pattern[patternIndex] === "*") patternIndex++;
+  return patternIndex === pattern.length;
+}
+
+const qwenCavemanToolName = "mcp__caveman__caveman_retrieve";
+
+function qwenSanitizeToolName(value: string): string {
+  const sanitized = value.replace(/[^A-Za-z0-9_-]/g, "_");
+  return /^[A-Za-z]/.test(sanitized) ? sanitized : `tool_${sanitized}`;
+}
+
+function qwenNormalizeToolName(value: string): string {
+  if (value.length <= 63 && /^[A-Za-z][A-Za-z0-9_-]*$/.test(value)) return value;
+  const sanitized = qwenSanitizeToolName(value);
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) hash = Math.imul(hash ^ value.charCodeAt(index), 16777619);
+  const suffix = `_${(hash >>> 0).toString(36).padStart(7, "0")}`;
+  return `${sanitized.slice(0, 63 - suffix.length)}${suffix}`;
+}
+
+// Port of Qwen 0.22.3's MCP permission matcher for one exact target tool.
+function qwenCavemanToolDenied(rule: string): boolean {
+  let pattern = rule.trim();
+  const open = pattern.indexOf("(");
+  if (open !== -1) {
+    if (!pattern.endsWith(")") || pattern.slice(open + 1, -1).trim() !== "") return false;
+    pattern = pattern.slice(0, open).trim();
+  } else if (pattern.includes(")")) {
+    return false;
+  }
+  if (pattern === qwenCavemanToolName) return true;
+  if (!pattern.endsWith("*") && pattern.split("__").length >= 3) {
+    const normalized = pattern.startsWith("mcp__") ? qwenNormalizeToolName(pattern) : pattern;
+    if (normalized === qwenCavemanToolName) return true;
+  }
+  if (pattern.endsWith("*")) {
+    return qwenCavemanToolName.startsWith(qwenSanitizeToolName(pattern.slice(0, -1)));
+  }
+  const patternParts = pattern.split("__");
+  const toolParts = qwenCavemanToolName.split("__");
+  return patternParts.length === 2
+    && patternParts[0] === toolParts[0]
+    && qwenSanitizeToolName(patternParts[1]!) === qwenSanitizeToolName(toolParts[1]!);
+}
+
+function qwenCavemanToolDisabled(name: string): boolean {
+  return name.trim() === qwenCavemanToolName;
+}
+
+function qwenConfigFileInjection(): ConfigFileInjection | undefined {
+  const profile = AGENTS.find((agent) => agent.id === "qwen");
+  return profile?.injection.method === "config-file" ? profile.injection : undefined;
+}
+
+function qwenSettingsLayerPaths(): string[] | null {
+  const injection = qwenConfigFileInjection();
+  if (!injection?.base_config) return null;
+  if (qwenHomeState().ambiguous) return null;
+  const system = baseConfigPath(injection.base_config);
+  const configuredDefaults = process.env.QWEN_CODE_SYSTEM_DEFAULTS_PATH?.trim();
+  const defaultsRoot = configuredDefaults ? expandTilde(configuredDefaults) : join(dirname(system), "system-defaults.json");
+  const defaults = isAbsolute(defaultsRoot) ? defaultsRoot : resolve(defaultsRoot);
+  // Keep system settings last even when operator paths alias another layer;
+  // last-layer identity matters for enterprise MCP server shadow checks.
+  return [
+    defaults,
+    qwenConfigPath(),
+    join(process.cwd(), ".qwen", "settings.json"),
+    system,
+  ];
+}
+
+function qwenSettingsLayers(): JsonObject[] | null {
+  const paths = qwenSettingsLayerPaths();
+  if (!paths) return null;
+  const layers: JsonObject[] = [];
+  for (const path of paths) {
+    const layer = readOptionalJsonObject(path);
+    if (!layer) return null;
+    layers.push(layer);
+  }
+  return layers;
+}
+
+function qwenSettingsPermitRecovery(marker: McpServerMarker, layers: JsonObject[]): boolean {
+  const fallback = qwenHomeEnvFallback();
+  if (!fallback) return false;
+
+  // System settings are enterprise-owned and outrank Caveman's user entry.
+  // Never replace a different server carrying the same name.
+  const systemEntry = jsonValueAt(layers[layers.length - 1], ["mcpServers", "caveman"]);
+  if (systemEntry !== undefined && !qwenMcpEntryMatches(systemEntry, marker)) return false;
+
+  let allowedConfigured = false;
+  let allowed = false;
+  for (const layer of layers) {
+    const allowList = qwenStringList(layer, ["mcp", "allowed"], fallback);
+    const excludeList = qwenStringList(layer, ["mcp", "excluded"], fallback);
+    const denyRules = qwenStringList(layer, ["permissions", "deny"], fallback);
+    const legacyDenyRules = qwenStringList(layer, ["tools", "exclude"], fallback);
+    const disabledTools = qwenStringList(layer, ["tools", "disabled"], fallback);
+    if (allowList === null || excludeList === null || denyRules === null || legacyDenyRules === null || disabledTools === null) return false;
+    if (allowList !== undefined) {
+      allowedConfigured = true;
+      if (allowList.some((pattern) => qwenMcpServerPatternMatches("caveman", pattern))) allowed = true;
+    }
+    if (excludeList?.some((pattern) => qwenMcpServerPatternMatches("caveman", pattern))) return false;
+    if (denyRules?.some(qwenCavemanToolDenied) || legacyDenyRules?.some(qwenCavemanToolDenied)) return false;
+    if (disabledTools?.some(qwenCavemanToolDisabled)) return false;
+  }
+  return !allowedConfigured || allowed;
+}
+
+function qwenEnvironmentFilePaths(): string[] {
+  const state = qwenHomeState();
+  const home = homedir();
+  const legacy = join(home, ".qwen");
+  const found: string[] = [];
+  const push = (path: string) => {
+    if (existsSync(path) && !found.includes(path)) found.push(path);
+  };
+  const pushHome = () => {
+    push(join(state.root, ".env"));
+    if (state.root !== legacy) push(join(legacy, ".env"));
+    push(join(home, ".env"));
+  };
+  let current: string;
+  try {
+    current = realpathSync(process.cwd());
+  } catch {
+    current = resolve(process.cwd());
+  }
+  while (true) {
+    if (current === home) {
+      pushHome();
+      break;
+    }
+    const scoped = join(current, ".qwen", ".env");
+    if (existsSync(scoped)) {
+      push(scoped);
+      pushHome();
+      break;
+    }
+    const plain = join(current, ".env");
+    if (existsSync(plain)) {
+      push(plain);
+      pushHome();
+      break;
+    }
+    const parent = dirname(current);
+    if (!parent || parent === current) {
+      pushHome();
+      break;
+    }
+    current = parent;
+  }
+  return found;
+}
+
+function qwenEffectiveEnvValue(layers: JsonObject[], key: string): string | undefined | null {
+  const inherited = process.env[key];
+  if (inherited) return inherited;
+  let value: string | undefined;
+  for (const path of qwenEnvironmentFilePaths()) {
+    const parsed = qwenReadDotEnv(path);
+    if (!parsed) return null;
+    if (parsed[key] !== undefined) value = parsed[key];
+    if (value) return value;
+  }
+  // settings.env is the lowest environment tier; system settings win over
+  // workspace, user, and system defaults for each key.
+  for (const layer of layers) {
+    const env = jsonValueAt(layer, ["env"]);
+    if (env === undefined) continue;
+    if (!env || typeof env !== "object" || Array.isArray(env)) return null;
+    const candidate = (env as Record<string, unknown>)[key];
+    if (candidate !== undefined && typeof candidate !== "string") return null;
+    if (typeof candidate === "string") value = candidate;
+  }
+  return value;
+}
+
+function qwenCliBoolean(args: string[], name: string): boolean | undefined {
+  let value: boolean | undefined;
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg === "--") break;
+    if (arg === `--no-${name}`) {
+      value = false;
+      continue;
+    }
+    if (arg.startsWith(`--${name}=`)) {
+      value = arg.slice(arg.indexOf("=") + 1) === "true";
+      continue;
+    }
+    if (arg !== `--${name}`) continue;
+    const next = args[index + 1];
+    if (next === "true" || next === "false") {
+      value = next === "true";
+      index++;
+    } else {
+      value = true;
+    }
+  }
+  return value;
+}
+
+function qwenModeEnabled(args: string[], name: string, envKey: string, layers: JsonObject[]): boolean | null {
+  const explicit = qwenCliBoolean(args, name);
+  if (explicit !== undefined) return explicit;
+  const raw = qwenEffectiveEnvValue(layers, envKey);
+  if (raw === null) return null;
+  return !!raw && ["1", "true", "yes", "on"].includes(raw.toLowerCase().trim());
+}
+
+function qwenSafeModeEnabled(args: string[]): boolean | null {
+  const layers = qwenSettingsLayers();
+  return layers ? qwenModeEnabled(args, "safe-mode", "QWEN_CODE_SAFE_MODE", layers) : null;
+}
+
+function qwenArgsPermitRecovery(args: string[], layers: JsonObject[]): boolean {
+  if (qwenModeEnabled(args, "safe-mode", "QWEN_CODE_SAFE_MODE", layers) !== false) return false;
+  if (qwenModeEnabled(args, "bare", "QWEN_CODE_SIMPLE", layers) !== false) return false;
+  let allowedConfigured = false;
+  const allowed: string[] = [];
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg === "--") break;
+    if (arg === "--mcp-config" || arg.startsWith("--mcp-config=")) return false;
+    if (arg.startsWith("--exclude-tools=")) {
+      const denied = arg.slice(arg.indexOf("=") + 1).split(",").map((item) => item.trim()).filter(Boolean);
+      if (denied.some(qwenCavemanToolDenied)) return false;
+      continue;
+    }
+    if (arg === "--exclude-tools") {
+      while (index + 1 < args.length && !args[index + 1]!.startsWith("-")) {
+        const denied = args[++index]!.split(",").map((item) => item.trim()).filter(Boolean);
+        if (denied.some(qwenCavemanToolDenied)) return false;
+      }
+      continue;
+    }
+    if (arg.startsWith("--allowed-mcp-server-names=")) {
+      allowedConfigured = true;
+      allowed.push(...arg.slice(arg.indexOf("=") + 1).split(",").map((item) => item.trim()).filter(Boolean));
+      continue;
+    }
+    if (arg !== "--allowed-mcp-server-names") continue;
+    allowedConfigured = true;
+    while (index + 1 < args.length && !args[index + 1]!.startsWith("-")) {
+      allowed.push(...args[++index]!.split(",").map((item) => item.trim()).filter(Boolean));
+    }
+  }
+  return !allowedConfigured || allowed.some((pattern) => qwenMcpServerPatternMatches("caveman", pattern));
+}
+
+function ownedMcpRegistration(agentId: string, agentArgs: string[] = []): McpServerMarker | null {
+  const marker = readMcpServerMarker(agentId, "caveman");
+  if (!marker) return null;
+  if (agentId === "kilo") {
+    const config = readOptionalJsonObject(kiloConfigPath());
+    return config && kiloMcpEntryMatches(jsonValueAt(config, ["mcp", "caveman"]), marker) ? marker : null;
+  }
+  if (agentId === "qwen") {
+    const layers = qwenSettingsLayers();
+    if (!layers || !qwenArgsPermitRecovery(agentArgs, layers)) return null;
+    const config = readOptionalJsonObject(qwenConfigPath());
+    if (!config || !qwenMcpEntryMatches(jsonValueAt(config, ["mcpServers", "caveman"]), marker)) return null;
+    return qwenSettingsPermitRecovery(marker, layers) ? marker : null;
+  }
+  return marker;
 }
 
 function installMcpQwenJson(mcp: { command: string; args: string[] }, serverName = "caveman"): boolean {

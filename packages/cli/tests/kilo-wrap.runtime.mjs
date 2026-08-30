@@ -26,6 +26,23 @@ function runCli(args, env) {
   });
 }
 
+function withEnv(patch, fn) {
+  const previous = new Map();
+  for (const [key, value] of Object.entries(patch)) {
+    previous.set(key, process.env[key]);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
 function kiloMcpFixture() {
   const root = mkdtempSync(join(tmpdir(), "cave-kilo-mcp-"));
   const home = join(root, "home");
@@ -175,6 +192,10 @@ test("Kilo MCP install is idempotent, marker-owned, upgradeable, and reversible"
       command: fx.mcpV1,
       args: [],
     });
+    withEnv({ HOME: fx.env.HOME, CAVEMAN_HOME: fx.env.CAVEMAN_HOME }, () => {
+      const config = JSON.parse(buildWrapEnv(kilo, "http://127.0.0.1:8787", "marker-only").KILO_CONFIG_CONTENT);
+      assert.deepEqual(config.mcp.caveman, { type: "local", command: [fx.mcpV1], enabled: true });
+    });
 
     const repeated = await runCli(["mcp", "install", "kilo"], fx.env);
     assert.equal(repeated.code, 0, repeated.stderr);
@@ -239,8 +260,39 @@ test("Kilo MCP refuses user-modified owned entries and keeps marker", async () =
     assert.match(removed.stderr, /changed since Caveman installed it; refusing removal/);
     assert.equal(readFileSync(fx.configPath, "utf8"), modified);
     assert.equal(existsSync(fx.markerPath), true);
+    withEnv({ HOME: fx.env.HOME, CAVEMAN_HOME: fx.env.CAVEMAN_HOME }, () => {
+      const config = JSON.parse(buildWrapEnv(kilo).KILO_CONFIG_CONTENT);
+      assert.equal(config.mcp?.caveman, undefined, "changed native entry must invalidate stale marker");
+    });
   } finally {
     fx.cleanup();
+  }
+});
+
+test("Kilo wrap rejects deleted registrations and malformed ownership journals", async (t) => {
+  for (const mutation of ["deleted registration", "wrong marker tool", "extra marker field", "blank marker command"]) {
+    await t.test(mutation, async () => {
+      const fx = kiloMcpFixture();
+      try {
+        const installed = await runCli(["mcp", "install", "kilo"], fx.env);
+        assert.equal(installed.code, 0, installed.stderr);
+        if (mutation === "deleted registration") {
+          writeFileSync(fx.configPath, "{}\n");
+        } else {
+          const marker = JSON.parse(readFileSync(fx.markerPath, "utf8"));
+          if (mutation === "wrong marker tool") marker.tool = "different_tool";
+          if (mutation === "extra marker field") marker.untrusted = true;
+          if (mutation === "blank marker command") marker.command = " \t";
+          writeFileSync(fx.markerPath, JSON.stringify(marker, null, 2) + "\n");
+        }
+        withEnv({ HOME: fx.env.HOME, CAVEMAN_HOME: fx.env.CAVEMAN_HOME }, () => {
+          const config = JSON.parse(buildWrapEnv(kilo).KILO_CONFIG_CONTENT);
+          assert.equal(config.mcp?.caveman, undefined);
+        });
+      } finally {
+        fx.cleanup();
+      }
+    });
   }
 });
 

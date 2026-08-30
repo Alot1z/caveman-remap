@@ -124,7 +124,7 @@ test("platform config defaults resolve only closed vendor settings paths", () =>
   );
   assert.equal(
     platformDefaultConfigPath("qwen-system-settings", "win32", { ProgramData: "D:\\ManagedData" }),
-    "D:\\ManagedData\\qwen-code\\settings.json",
+    "C:\\ProgramData\\qwen-code\\settings.json",
   );
   assert.equal(platformDefaultConfigPath("qwen-system-settings", "freebsd", {}), undefined);
 });

@@ -115,7 +115,10 @@ function qwenMcpFixture() {
   const root = mkdtempSync(join(tmpdir(), "cave-qwen-mcp-"));
   const home = join(root, "home");
   const cavemanHome = join(root, "caveman-home");
-  const configPath = join(home, ".qwen", "settings.json");
+  const qwenHome = join(root, "relocated-qwen-home");
+  const configPath = join(qwenHome, "settings.json");
+  const systemConfigPath = join(root, "system-settings.json");
+  const systemDefaultsPath = join(root, "system-defaults.json");
   const markerPath = join(cavemanHome, "mcp", "qwen.json");
   const mcpV1 = join(root, "caveman-mcp-v1");
   const mcpV2 = join(root, "caveman-mcp-v2");
@@ -123,6 +126,7 @@ function qwenMcpFixture() {
   return {
     root,
     configPath,
+    systemConfigPath,
     markerPath,
     mcpV1,
     mcpV2,
@@ -130,6 +134,9 @@ function qwenMcpFixture() {
       ...process.env,
       HOME: home,
       CAVEMAN_HOME: cavemanHome,
+      QWEN_HOME: qwenHome,
+      QWEN_CODE_SYSTEM_SETTINGS_PATH: systemConfigPath,
+      QWEN_CODE_SYSTEM_DEFAULTS_PATH: systemDefaultsPath,
       CAVEMAN_MCP_BIN: mcpV1,
       NO_COLOR: "1",
     },
@@ -237,7 +244,9 @@ test("Qwen MCP install is idempotent, marker-owned, upgradeable, and reversible"
     withEnv({
       HOME: fx.env.HOME,
       CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+      QWEN_HOME: fx.env.QWEN_HOME,
       QWEN_CODE_SYSTEM_SETTINGS_PATH: join(fx.root, "missing-system-settings.json"),
+      QWEN_CODE_SYSTEM_DEFAULTS_PATH: fx.env.QWEN_CODE_SYSTEM_DEFAULTS_PATH,
       QWEN_CODE_LEGACY_MCP_BLOCKING: "0",
     }, () => {
       assert.equal(buildWrapEnv(qwen).QWEN_CODE_LEGACY_MCP_BLOCKING, "0");
@@ -259,10 +268,15 @@ test("Qwen MCP install is idempotent, marker-owned, upgradeable, and reversible"
     withEnv({
       HOME: fx.env.HOME,
       CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
-      QWEN_CODE_SYSTEM_SETTINGS_PATH: join(fx.root, "missing-system-settings.json"),
+      QWEN_HOME: fx.env.QWEN_HOME,
+      QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfigPath,
+      QWEN_CODE_SYSTEM_DEFAULTS_PATH: fx.env.QWEN_CODE_SYSTEM_DEFAULTS_PATH,
       QWEN_CODE_LEGACY_MCP_BLOCKING: "0",
     }, () => {
-      assert.equal(buildWrapEnv(qwen).QWEN_CODE_LEGACY_MCP_BLOCKING, "1");
+      const wrapped = buildWrapEnv(qwen, "http://127.0.0.1:8787", "marker-only");
+      assert.equal(wrapped.QWEN_CODE_LEGACY_MCP_BLOCKING, "1");
+      const config = readInjected(wrapped).config;
+      assert.deepEqual(config.mcpServers.caveman, { command: fx.mcpV1, args: [] });
     });
 
     const repeated = await runCli(["mcp", "install", "qwen"], fx.env);
@@ -326,10 +340,241 @@ test("Qwen MCP refuses conflicting or user-modified entries", async (t) => {
       assert.match(removed.stderr, /changed since Caveman installed it; refusing removal/);
       assert.equal(readFileSync(fx.configPath, "utf8"), modified);
       assert.equal(existsSync(fx.markerPath), true);
+      withEnv({
+        HOME: fx.env.HOME,
+        CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+        QWEN_HOME: fx.env.QWEN_HOME,
+        QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfigPath,
+        QWEN_CODE_SYSTEM_DEFAULTS_PATH: fx.env.QWEN_CODE_SYSTEM_DEFAULTS_PATH,
+        QWEN_CODE_LEGACY_MCP_BLOCKING: "0",
+      }, () => {
+        const wrapped = buildWrapEnv(qwen);
+        assert.equal(wrapped.QWEN_CODE_LEGACY_MCP_BLOCKING, "0");
+        const effective = readInjected(wrapped).config;
+        assert.equal(effective.mcpServers?.caveman, undefined);
+        assert.ok(effective.mcp.excluded.includes("caveman"));
+      });
     } finally {
       fx.cleanup();
     }
   });
+});
+
+test("Qwen wrap fails closed for stale, shadowed, filtered, and CLI-replaced MCP registrations", async (t) => {
+  const cases = [
+    {
+      name: "deleted native entry",
+      mutate: (fx) => writeFileSync(fx.configPath, "{}\n"),
+    },
+    {
+      name: "wrong marker tool",
+      mutate: (fx) => {
+        const marker = JSON.parse(readFileSync(fx.markerPath, "utf8"));
+        marker.tool = "different_tool";
+        writeFileSync(fx.markerPath, JSON.stringify(marker, null, 2) + "\n");
+      },
+    },
+    {
+      name: "enterprise server shadow",
+      mutate: (fx) => writeFileSync(fx.systemConfigPath, JSON.stringify({
+        mcpServers: { caveman: { command: "enterprise-owned", args: [] } },
+      })),
+    },
+    {
+      name: "enterprise exclusion",
+      mutate: (fx) => writeFileSync(fx.systemConfigPath, JSON.stringify({ mcp: { excluded: ["cave*"] } })),
+    },
+    {
+      name: "enterprise allowlist omission",
+      mutate: (fx) => writeFileSync(fx.systemConfigPath, JSON.stringify({ mcp: { allowed: ["approved-only"] } })),
+    },
+    {
+      name: "enterprise permission denial",
+      mutate: (fx) => writeFileSync(fx.systemConfigPath, JSON.stringify({ permissions: { deny: ["mcp__caveman"] } })),
+    },
+    {
+      name: "enterprise empty-call permission denial",
+      mutate: (fx) => writeFileSync(fx.systemConfigPath, JSON.stringify({ permissions: { deny: ["mcp__caveman__caveman_retrieve()"] } })),
+    },
+    {
+      name: "enterprise wildcard permission denial",
+      mutate: (fx) => writeFileSync(fx.systemConfigPath, JSON.stringify({ permissions: { deny: ["mcp__cave*"] } })),
+    },
+    {
+      name: "enterprise disabled tool",
+      mutate: (fx) => writeFileSync(fx.systemConfigPath, JSON.stringify({ tools: { disabled: ["mcp__caveman__caveman_retrieve"] } })),
+    },
+    {
+      name: "unresolved enterprise deny variable",
+      mutate: (fx) => writeFileSync(fx.systemConfigPath, JSON.stringify({ permissions: { deny: ["$QWEN_DENY_RECOVERY"] } })),
+    },
+  ];
+
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      const fx = qwenMcpFixture();
+      try {
+        const installed = await runCli(["mcp", "install", "qwen"], fx.env);
+        assert.equal(installed.code, 0, installed.stderr);
+        fixture.mutate(fx);
+        withEnv({
+          HOME: fx.env.HOME,
+          CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+          QWEN_HOME: fx.env.QWEN_HOME,
+          QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfigPath,
+          QWEN_CODE_SYSTEM_DEFAULTS_PATH: fx.env.QWEN_CODE_SYSTEM_DEFAULTS_PATH,
+          QWEN_CODE_LEGACY_MCP_BLOCKING: "0",
+          QWEN_CODE_SAFE_MODE: undefined,
+          QWEN_CODE_SIMPLE: undefined,
+          QWEN_DENY_RECOVERY: undefined,
+        }, () => {
+          const wrapped = buildWrapEnv(qwen);
+          assert.equal(wrapped.QWEN_CODE_LEGACY_MCP_BLOCKING, "0");
+          const effective = readInjected(wrapped).config;
+          assert.notDeepEqual(effective.mcpServers?.caveman, { command: fx.mcpV1, args: [] });
+          assert.ok(effective.mcp.excluded.includes("caveman"));
+        });
+      } finally {
+        fx.cleanup();
+      }
+    });
+  }
+
+  for (const blocked of [
+    { name: "CLI MCP replacement", args: ["--mcp-config", "replacement.json"] },
+    { name: "CLI excluded tool", args: ["--exclude-tools", "mcp__cave*"] },
+    { name: "CLI excluded tool equals form", args: ["--exclude-tools=mcp*"] },
+    { name: "CLI bare mode", args: ["--bare=true"] },
+    { name: "bare-mode environment", args: [], env: { QWEN_CODE_SIMPLE: "on" } },
+  ]) {
+    await t.test(blocked.name, async () => {
+      const fx = qwenMcpFixture();
+      try {
+        const installed = await runCli(["mcp", "install", "qwen"], fx.env);
+        assert.equal(installed.code, 0, installed.stderr);
+        withEnv({
+          HOME: fx.env.HOME,
+          CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+          QWEN_HOME: fx.env.QWEN_HOME,
+          QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfigPath,
+          QWEN_CODE_SYSTEM_DEFAULTS_PATH: fx.env.QWEN_CODE_SYSTEM_DEFAULTS_PATH,
+          QWEN_CODE_LEGACY_MCP_BLOCKING: "0",
+          QWEN_CODE_SAFE_MODE: undefined,
+          QWEN_CODE_SIMPLE: undefined,
+          ...blocked.env,
+        }, () => {
+          const wrapped = buildWrapEnv(qwen, "http://127.0.0.1:8787", "auto", blocked.args);
+          assert.equal(wrapped.QWEN_CODE_LEGACY_MCP_BLOCKING, "0");
+          const effective = readInjected(wrapped).config;
+          assert.equal(effective.mcpServers?.caveman, undefined);
+          assert.ok(effective.mcp.excluded.includes("caveman"));
+        });
+      } finally {
+        fx.cleanup();
+      }
+    });
+  }
+
+  for (const blocked of [
+    { name: "CLI safe mode", args: ["--safe-mode"] },
+    { name: "safe-mode environment", args: [], env: { QWEN_CODE_SAFE_MODE: "yes" } },
+    {
+      name: "safe-mode settings environment",
+      args: [],
+      mutate: (fx) => writeFileSync(fx.systemConfigPath, JSON.stringify({ env: { QWEN_CODE_SAFE_MODE: "on" } })),
+    },
+  ]) {
+    await t.test(blocked.name, async () => {
+      const fx = qwenMcpFixture();
+      try {
+        const installed = await runCli(["mcp", "install", "qwen"], fx.env);
+        assert.equal(installed.code, 0, installed.stderr);
+        blocked.mutate?.(fx);
+        withEnv({
+          HOME: fx.env.HOME,
+          CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+          QWEN_HOME: fx.env.QWEN_HOME,
+          QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfigPath,
+          QWEN_CODE_SYSTEM_DEFAULTS_PATH: fx.env.QWEN_CODE_SYSTEM_DEFAULTS_PATH,
+          QWEN_CODE_SAFE_MODE: undefined,
+          ...blocked.env,
+        }, () => {
+          assert.throws(
+            () => buildWrapEnv(qwen, "http://127.0.0.1:8787", "auto", blocked.args),
+            /Qwen safe mode ignores Caveman system settings/,
+          );
+        });
+      } finally {
+        fx.cleanup();
+      }
+    });
+  }
+});
+
+test("Qwen policy parser preserves reachable MCP registrations", async (t) => {
+  for (const allowed of [
+    { name: "bare permission wildcard", settings: { permissions: { deny: ["*"] } } },
+    { name: "nonempty permission specifier", settings: { permissions: { deny: ["mcp__caveman__caveman_retrieve(handle)"] } } },
+    { name: "malformed permission specifier", settings: { permissions: { deny: ["mcp__caveman__caveman_retrieve)"] } } },
+    { name: "disabled wildcard is exact-only", settings: { tools: { disabled: ["mcp__*"] } } },
+    { name: "argument scan stops at separator", args: ["--", "--safe-mode", "--exclude-tools=mcp*"] },
+    { name: "explicit safe false overrides environment", args: ["--safe-mode=false"], env: { QWEN_CODE_SAFE_MODE: "yes" } },
+  ]) {
+    await t.test(allowed.name, async () => {
+      const fx = qwenMcpFixture();
+      try {
+        const installed = await runCli(["mcp", "install", "qwen"], fx.env);
+        assert.equal(installed.code, 0, installed.stderr);
+        if (allowed.settings) writeFileSync(fx.systemConfigPath, JSON.stringify(allowed.settings));
+        withEnv({
+          HOME: fx.env.HOME,
+          CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+          QWEN_HOME: fx.env.QWEN_HOME,
+          QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfigPath,
+          QWEN_CODE_SYSTEM_DEFAULTS_PATH: fx.env.QWEN_CODE_SYSTEM_DEFAULTS_PATH,
+          QWEN_CODE_LEGACY_MCP_BLOCKING: "0",
+          QWEN_CODE_SAFE_MODE: undefined,
+          QWEN_CODE_SIMPLE: undefined,
+          ...allowed.env,
+        }, () => {
+          const wrapped = buildWrapEnv(qwen, "http://127.0.0.1:8787", "auto", allowed.args ?? []);
+          assert.equal(wrapped.QWEN_CODE_LEGACY_MCP_BLOCKING, "1");
+          assert.deepEqual(readInjected(wrapped).config.mcpServers.caveman, { command: fx.mcpV1, args: [] });
+        });
+      } finally {
+        fx.cleanup();
+      }
+    });
+  }
+});
+
+test("Qwen recovery follows QWEN_HOME and policy values loaded from dotenv", async () => {
+  const fx = qwenMcpFixture();
+  try {
+    const installed = await runCli(["mcp", "install", "qwen"], fx.env);
+    assert.equal(installed.code, 0, installed.stderr);
+    mkdirSync(fx.env.HOME, { recursive: true });
+    writeFileSync(join(fx.env.HOME, ".env"), `QWEN_HOME=${fx.env.QWEN_HOME}\n`);
+    writeFileSync(join(fx.env.QWEN_HOME, ".env"), "QWEN_DENY_RECOVERY=mcp__caveman\n");
+    writeFileSync(fx.systemConfigPath, JSON.stringify({ permissions: { deny: ["$QWEN_DENY_RECOVERY"] } }));
+    withEnv({
+      HOME: fx.env.HOME,
+      CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+      QWEN_HOME: undefined,
+      QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfigPath,
+      QWEN_CODE_SYSTEM_DEFAULTS_PATH: fx.env.QWEN_CODE_SYSTEM_DEFAULTS_PATH,
+      QWEN_DENY_RECOVERY: undefined,
+      QWEN_CODE_LEGACY_MCP_BLOCKING: "0",
+    }, () => {
+      const wrapped = buildWrapEnv(qwen);
+      assert.equal(wrapped.QWEN_CODE_LEGACY_MCP_BLOCKING, "0");
+      const effective = readInjected(wrapped).config;
+      assert.equal(effective.mcpServers?.caveman, undefined);
+      assert.ok(effective.mcp.excluded.includes("caveman"));
+    });
+  } finally {
+    fx.cleanup();
+  }
 });
 
 test("Qwen MCP fails closed on malformed or incompatible settings", async (t) => {

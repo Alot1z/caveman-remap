@@ -240,6 +240,39 @@ test("managed Qwen omits upstream header when only stored gateway credentials ar
   }
 });
 
+test("managed Qwen retains native key reference for effective dotenv and settings env keys", async (t) => {
+  for (const source of ["dotenv", "settings env"]) {
+    await t.test(source, () => {
+      const fx = qwenFixture();
+      const secret = `sk-${source.replace(" ", "-")}-secret`;
+      try {
+        if (source === "dotenv") {
+          writeFileSync(join(dirname(fx.userConfig), ".env"), `OPENAI_API_KEY=${secret}\n`);
+        } else {
+          const user = JSON.parse(fx.userBytes);
+          user.env = { OPENAI_API_KEY: secret };
+          writeFileSync(fx.userConfig, JSON.stringify(user));
+        }
+        withEnv({
+          HOME: fx.env.HOME,
+          CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+          QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfig,
+          CAVE_API_KEY: "cave-managed-secret",
+          OPENAI_API_KEY: undefined,
+        }, () => {
+          const injected = readInjected(buildWrapEnv(qwen, "https://gateway.example"));
+          for (const model of injected.config.modelProviders.openai) {
+            assert.equal(model.generationConfig.customHeaders["x-cave-upstream-key"], "$OPENAI_API_KEY");
+          }
+          assert.doesNotMatch(injected.raw, new RegExp(secret));
+        });
+      } finally {
+        fx.cleanup();
+      }
+    });
+  }
+});
+
 test("caveman qwen passes user args and never mutates Qwen settings", async () => {
   const fx = qwenFixture();
   try {

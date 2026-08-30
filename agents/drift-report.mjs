@@ -5,7 +5,7 @@
 // than duplicated. Non-blocking by design — the caller runs it with continue-on-error, and
 // this script never exits non-zero on a `gh` hiccup, only on bad input.
 //
-// Usage: node public/agents/drift-report.mjs --input <probe.json>
+// Usage: node agents/drift-report.mjs --input <probe.json>
 // Requires the `gh` CLI authenticated (GH_TOKEN) with `issues: write`.
 
 import { readFileSync } from "node:fs";
@@ -14,7 +14,7 @@ import { spawnSync } from "node:child_process";
 const args = process.argv.slice(2);
 const inputAt = args.indexOf("--input");
 if (inputAt === -1 || !args[inputAt + 1]) {
-  process.stderr.write("usage: node public/agents/drift-report.mjs --input <probe.json>\n");
+  process.stderr.write("usage: node agents/drift-report.mjs --input <probe.json>\n");
   process.exit(2);
 }
 
@@ -50,7 +50,7 @@ for (const r of drifted) {
     "",
     "This is a non-blocking drift report from the nightly Agent conformance workflow. To clear it:",
     `1. Verify \`${r.id}@${r.observed}\` wraps correctly.`,
-    `2. Bump \`tested_agent_version\` in \`public/agents/profiles/${r.id}.json\` (the conformance CI pin is derived from it and enforced by \`compile.mjs\`).`,
+    `2. Bump \`tested_agent_version\` in \`agents/profiles/${r.id}.json\` (the conformance CI pin is derived from it and enforced by \`compile.mjs\`).`,
     `3. Update \`last_verified_at\`/\`verified_by\` if the profile carries them.`,
   ].join("\n");
 

@@ -120,6 +120,13 @@ function validateEnvVariableName(value, need, label) {
   need(typeof value === "string" && ENV_VAR_RE.test(value) && !loaderControlKey(value), `${label} is not a safe environment variable name`);
 }
 
+function validateKnownKeys(value, allowed, need, label) {
+  need(value && typeof value === "object" && !Array.isArray(value), `${label} must be an object`);
+  for (const key of Object.keys(value)) {
+    need(allowed.has(key), `${label} has unknown key "${key}"`);
+  }
+}
+
 function optionalOpenAIKeyEnvPathAllowed(profileId, segments) {
   return profileId === "qwen"
     && segments.length === 9
@@ -286,6 +293,7 @@ function validate(p, file) {
   need(inj && typeof inj === "object", "injection must be an object");
   need(INJECTION_METHODS.has(inj.method), `unknown injection.method "${inj.method}" (fail-closed)`);
   if (inj.method === "env") {
+    validateKnownKeys(inj, new Set(["method", "env"]), need, "injection");
     need(inj.env && typeof inj.env === "object" && !Array.isArray(inj.env), "injection.env must be an object");
     for (const [key, value] of Object.entries(inj.env)) {
       need(ENV_KEY_RE.test(key) && !loaderControlKey(key), `injection.env key "${key}" is not allowlisted`);
@@ -295,18 +303,23 @@ function validate(p, file) {
       }
     }
   } else if (inj.method === "config-env-content") {
+    validateKnownKeys(inj, new Set(["method", "env_var", "config_content"]), need, "injection");
     validateEnvVariableName(inj.env_var, need, "injection.env_var");
-    need(inj.config_content && typeof inj.config_content === "object", "injection.config_content must be an object");
-    need(inj.config_content.local && typeof inj.config_content.local === "object", "injection.config_content.local is required");
+    validateKnownKeys(inj.config_content, new Set(["local", "managed"]), need, "injection.config_content");
+    need(inj.config_content.local && typeof inj.config_content.local === "object" && !Array.isArray(inj.config_content.local), "injection.config_content.local is required");
+    if (inj.config_content.managed !== undefined) {
+      need(inj.config_content.managed && typeof inj.config_content.managed === "object" && !Array.isArray(inj.config_content.managed), "injection.config_content.managed must be an object");
+    }
     validateConfigStrings(inj.config_content, need, "injection.config_content", p.id, ["injection", "config_content"]);
   } else if (inj.method === "config-file") {
+    validateKnownKeys(inj, new Set(["method", "env_var", "base_config", "config_overlay"]), need, "injection");
     validateEnvVariableName(inj.env_var, need, "injection.env_var");
     if (inj.base_config !== undefined) {
-      need(inj.base_config && typeof inj.base_config === "object" && !Array.isArray(inj.base_config), "injection.base_config must be an object");
+      validateKnownKeys(inj.base_config, new Set(["path", "env_var", "state_dir", "platform_default"]), need, "injection.base_config");
       need(typeof inj.base_config.path === "string" && profilePathAllowed(inj.base_config.path, p.id), `injection.base_config.path must stay under ~/.${p.id}/ without ..`);
       if (inj.base_config.env_var !== undefined) validateEnvVariableName(inj.base_config.env_var, need, "injection.base_config.env_var");
       if (inj.base_config.state_dir !== undefined) {
-        need(inj.base_config.state_dir && typeof inj.base_config.state_dir === "object" && !Array.isArray(inj.base_config.state_dir), "injection.base_config.state_dir must be an object");
+        validateKnownKeys(inj.base_config.state_dir, new Set(["env_var", "filename"]), need, "injection.base_config.state_dir");
         validateEnvVariableName(inj.base_config.state_dir.env_var, need, "injection.base_config.state_dir.env_var");
         need(typeof inj.base_config.state_dir.filename === "string" && inj.base_config.state_dir.filename.length > 0, "injection.base_config.state_dir.filename must be a non-empty string");
       }
@@ -315,10 +328,11 @@ function validate(p, file) {
         need(inj.base_config.platform_default === `${p.id}-system-settings`, "injection.base_config.platform_default must belong to the profile id");
       }
     }
-    need(inj.config_overlay && typeof inj.config_overlay === "object" && !Array.isArray(inj.config_overlay), "injection.config_overlay must be an object");
+    validateKnownKeys(inj.config_overlay, new Set(["local", "managed"]), need, "injection.config_overlay");
     need(Object.prototype.hasOwnProperty.call(inj.config_overlay, "local"), "injection.config_overlay.local is required");
     validateConfigStrings(inj.config_overlay, need, "injection.config_overlay", p.id, ["injection", "config_overlay"]);
   } else if (inj.method === "native-extension") {
+    validateKnownKeys(inj, new Set(["method", "host", "asset", "loader_flag"]), need, "injection");
     need(NATIVE_EXTENSION_HOSTS.has(inj.host), `injection.host "${inj.host}" is not an allowlisted native-extension host (fail-closed)`);
     need(inj.host === p.id, `injection.host must equal the profile id (got "${inj.host}" for "${p.id}")`);
     need(NATIVE_EXTENSION_ASSETS.has(inj.asset), `injection.asset "${inj.asset}" is not an allowlisted extension asset (fail-closed)`);
@@ -330,6 +344,7 @@ function validate(p, file) {
     const ch = p.command_hook;
     need(ch && typeof ch === "object", "command_hook must be an object");
     need(COMMAND_HOOK_METHODS.has(ch.method), `unknown command_hook.method "${ch.method}" (fail-closed)`);
+    validateKnownKeys(ch, new Set(ch.method === "instruction-note" || ch.method === "codex-pretooluse" ? ["method", "file"] : ["method"]), need, "command_hook");
     if (ch.method === "instruction-note" || ch.method === "codex-pretooluse") {
       need(typeof ch.file === "string" && profilePathAllowed(ch.file, p.id), `command_hook.file must stay under ~/.${p.id}/ without ..`);
     }
@@ -340,17 +355,23 @@ function validate(p, file) {
     const mh = p.memory_hook;
     need(mh && typeof mh === "object", "memory_hook must be an object");
     need(MEMORY_HOOK_METHODS.has(mh.method), `unknown memory_hook.method "${mh.method}" (fail-closed)`);
+    validateKnownKeys(mh, new Set(["method"]), need, "memory_hook");
   }
   // skills is optional (the agent's on-disk skill surface for `caveman convert`);
   // if present its format must be one we can parse — unknown fails the build.
   if (p.skills !== undefined) {
     const sk = p.skills;
     need(sk && typeof sk === "object", "skills must be an object");
+    validateKnownKeys(sk, new Set(["format", "user_dirs", "project_dirs"]), need, "skills");
     need(SKILL_FORMATS.has(sk.format), `unknown skills.format "${sk.format}" (fail-closed)`);
     need(Array.isArray(sk.user_dirs) && sk.user_dirs.length > 0 && sk.user_dirs.every((d) => typeof d === "string" && d.length > 0), "skills.user_dirs must be a non-empty string array");
     if (sk.project_dirs !== undefined) {
       need(Array.isArray(sk.project_dirs) && sk.project_dirs.every((d) => typeof d === "string" && d.length > 0), "skills.project_dirs must be a string array");
     }
+  }
+  if (p.attribution !== undefined) {
+    validateKnownKeys(p.attribution, new Set(["header"]), need, "attribution");
+    if (p.attribution.header !== undefined) need(typeof p.attribution.header === "string", "attribution.header must be a string");
   }
   // Every model id pinned in the injection config must be priced by the provider catalog
   // (issue #136): an unpriced pin under-reports the operator's spend. Fail closed.

@@ -58,6 +58,7 @@
             "env_var": { "type": "string", "description": "the env var that carries the rendered inline JSON config (e.g. OPENCODE_CONFIG_CONTENT)" },
             "config_content": {
               "type": "object",
+              "additionalProperties": false,
               "required": ["local"],
               "properties": {
                 "local": { "type": "object", "description": "config for local BYOK mode (caveman start)" },
@@ -96,6 +97,7 @@
             },
             "config_overlay": {
               "type": "object",
+              "additionalProperties": false,
               "required": ["local"],
               "properties": {
                 "local": { "description": "overlay merged over the base config for local BYOK mode (caveman start)" },

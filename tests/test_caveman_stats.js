@@ -968,5 +968,53 @@ test('lifetime view excludes legacy rows from net even when mixed with rows that
   assert.match(out, /Est\. net:\s+\+1,536/);
 });
 
+test('--reset rotates history and clears summary + statusline suffix', (tmp) => {
+  const claudeDir = path.join(tmp, '.claude');
+  fs.mkdirSync(claudeDir, { recursive: true });
+  const history = path.join(claudeDir, '.caveman-history.jsonl');
+  fs.writeFileSync(history,
+    JSON.stringify({ ts: 1000, session_id: 'a', output_tokens: 5, est_saved_tokens: 10, est_saved_usd: 0, turns: 1 }) + '\n');
+  // Prime the sidecar + statusline suffix as a stats run would.
+  execFileSync(process.execPath, [STATS, '--all'], { encoding: 'utf8', env: { ...process.env, CLAUDE_CONFIG_DIR: claudeDir } });
+  assert.ok(fs.existsSync(history + '.summary.json'), 'summary sidecar primed');
+
+  const out = execFileSync(process.execPath, [STATS, '--reset'], {
+    encoding: 'utf8', env: { ...process.env, CLAUDE_CONFIG_DIR: claudeDir },
+  });
+  assert.match(out, /Reset lifetime stats/);
+  assert.ok(!fs.existsSync(history + '.summary.json'), 'summary sidecar removed');
+  assert.ok(!fs.existsSync(history), 'live history removed');
+  // History rotated to a dated backup rather than deleted outright.
+  const baks = fs.readdirSync(claudeDir).filter(f => f.includes('.caveman-history.jsonl.reset-'));
+  assert.strictEqual(baks.length, 1, 'history archived, not destroyed');
+
+  // A fresh --all reports a clean slate.
+  const after = execFileSync(process.execPath, [STATS, '--all'], {
+    encoding: 'utf8', env: { ...process.env, CLAUDE_CONFIG_DIR: claudeDir },
+  });
+  assert.match(after, /No sessions logged yet/);
+});
+
+test('persistSummaryConcurrent folds in a peer summary already ahead (no lost update)', () => {
+  const stats = require(STATS);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'caveman-stats-cas-'));
+  const sp = path.join(tmp, '.summary.json');
+  // A peer already advanced past the point we are about to persist.
+  const peer = { version: 1, watermark: 500,
+    entries: { b: { ts: 3000, output_tokens: 5, est_saved_tokens: 9, est_saved_usd: 0, turns: 1 } } };
+  fs.writeFileSync(sp, JSON.stringify(peer));
+  // Our slower run lags at watermark 200 with its own session 'a'.
+  const mine = { version: 1, watermark: 200,
+    entries: { a: { ts: 2000, output_tokens: 10, est_saved_tokens: 20, est_saved_usd: 0 } } };
+  const ok = stats.persistSummaryConcurrent(sp, mine, 3);
+  assert.strictEqual(ok, true);
+  const saved = JSON.parse(fs.readFileSync(sp, 'utf8'));
+  // Watermark advanced to the peer's, and BOTH sessions survive — a lost
+  // update would have clobbered 'b' with an older replacement.
+  assert.strictEqual(saved.watermark, 500);
+  assert.ok(saved.entries.a, 'our session preserved');
+  assert.ok(saved.entries.b, 'peer session preserved — no lost update');
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

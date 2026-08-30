@@ -458,12 +458,50 @@ function loadHistorySummary(path) {
   return null;
 }
 
+// Verify-on-write readback (mirrors compress backup-readback discipline): write to
+// a temp file, read it back, and only rename into place when the round-trip is
+// byte-lossless. A corrupt sidecar must never be installed silently — every run
+// after the revert is a safe full rebuild, never a subtly-wrong lifetime total.
 function saveHistorySummary(path, summary) {
+  const tmp = path + '.' + process.pid + '.' + Date.now() + '.tmp';
   try {
-    const tmp = path + '.' + process.pid + '.' + Date.now();
     fs.writeFileSync(tmp, JSON.stringify(summary));
+    const back = JSON.parse(fs.readFileSync(tmp, 'utf8'));
+    const ok = back != null && back.version === 1
+      && back.watermark === summary.watermark
+      && back.entries && typeof back.entries === 'object'
+      && JSON.stringify(back.entries) === JSON.stringify(summary.entries);
+    if (!ok) { fs.unlinkSync(tmp); return false; }
     fs.renameSync(tmp, path);
-  } catch (e) { /* best-effort; a stale summary only costs a rebuild next run */ }
+    return true;
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch (x) {}
+    return false;
+  }
+}
+
+// Persist an updated lifetime summary safely even when two /caveman-stats runs
+// race the same history file. The rename is atomic (last-writer-wins) but a
+// plain read-modify-write can drop the other run's increments if its slice is
+// folded into an older summary. So before committing, fold in any summary that
+// is already AHEAD of the one we built (a concurrent writer observed more
+// appends), then save with verify-on-write. Bounded retries in case writers
+// keep landing; on failure we simply skip persisting — the next run merges the
+// whole appended delta anyway, so no increments are ever lost, only re-done.
+function persistSummaryConcurrent(path, summary, maxRetries) {
+  for (let attempt = 0; attempt < Math.max(1, maxRetries || 3); attempt++) {
+    const onDisk = loadHistorySummary(path);
+    if (onDisk && onDisk.watermark > summary.watermark) {
+      // A peer already advanced past us — fold its rows in so our slice is not
+      // clobbered by an older replacement.
+      for (const [id, row] of Object.entries(onDisk.entries)) {
+        mergeSession(summary.entries, id, row);
+      }
+      summary.watermark = onDisk.watermark;
+    }
+    if (saveHistorySummary(path, summary)) return true;
+  }
+  return false;
 }
 
 // Drop the latest snapshot for a session when the incoming row is newer.
@@ -514,6 +552,11 @@ function aggregateHistory(historyPath, sinceMs) {
       if (!e || typeof e !== 'object') continue;
       mergeSession(entries, e.session_id || '_', toRow(e));
     }
+    // Full rebuild: a fresh summary from the current (possibly rotated/truncated)
+    // history. A plain verify-on-write — no peer folding: an on-disk summary from
+    // BEFORE the rotation is stale (it spans rows that no longer exist), and
+    // folding it in would silently resurrect sessions that were intentionally
+    // rotated away.
     summary = { version: 1, watermark: fullSize, entries };
     saveHistorySummary(summaryPath, summary);
   } else {
@@ -524,7 +567,9 @@ function aggregateHistory(historyPath, sinceMs) {
       mergeSession(summary.entries, e.session_id || '_', toRow(e));
     }
     summary.watermark = slice.watermark;
-    saveHistorySummary(summaryPath, summary);
+    // Monotonic append lineage: fold a peer summary that already advanced past
+    // us so neither concurrent run's increments are dropped.
+    persistSummaryConcurrent(summaryPath, summary);
   }
 
   // Filter the merged latest-per-session map to the requested window.
@@ -552,6 +597,29 @@ function aggregateHistory(historyPath, sinceMs) {
     }
   }
   return { sessions: Object.keys(timeFiltered).length, outputTokens, estSavedTokens, estSavedUsd, netSavedTokens, netTurns };
+}
+
+// Deliberately clear lifetime tracking: rotate the history file to a dated
+// backup (the numbers are the user's data, so we never hard-delete them), and
+// drop the summary sidecar + statusline suffix so every counter starts clean.
+// Concurrent with a stats call the rename and unlinks are each atomic — a racing
+// run re-creates either file from the (rotated) history or an empty summary.
+// Returns a short human summary of what was cleaned up.
+function resetLifetime(historyPath) {
+  const claudeDir = path.dirname(historyPath);
+  const summaryPath = historyPath + '.summary.json';
+  const suffixPath = path.join(claudeDir, '.caveman-statusline-suffix');
+  const done = [];
+
+  if (fs.existsSync(historyPath)) {
+    const bak = historyPath + '.reset-' + new Date().toISOString().replace(/[:.]/g, '-') + '.bak';
+    try { fs.renameSync(historyPath, bak); done.push('.caveman-history.jsonl → ' + path.basename(bak)); } catch (e) { /* leave; report below */ }
+  }
+  for (const p of [summaryPath, suffixPath]) {
+    try { if (fs.existsSync(p)) { fs.unlinkSync(p); done.push(path.basename(p)); } } catch (e) { /* best-effort */ }
+  }
+  if (done.length === 0) return 'No lifetime stats found — nothing to reset.';
+  return 'Reset lifetime stats. Archived: ' + done.join(', ') + '.';
 }
 
 // Output-reduction share: saved / (saved + used) = the fraction of the
@@ -734,6 +802,12 @@ function main() {
   const claudeDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
   const historyPath = path.join(claudeDir, '.caveman-history.jsonl');
 
+  // Explicit lifetime reset: rotate history + drop sidecar/suffix, then exit.
+  if (args.includes('--reset')) {
+    process.stdout.write(resetLifetime(historyPath) + '\n');
+    return;
+  }
+
   // Lifetime aggregation paths short-circuit before we need a live session.
   if (all || sinceArg) {
     const sinceMs = parseDuration(sinceArg);
@@ -820,10 +894,9 @@ function main() {
   }
 }
 
-if (require.main === module) main();
-
-module.exports = {
-  formatStats, formatShare, formatHistory, aggregateHistory, parseDuration, deriveSavings,
+if (require.main === module) main();  module.exports = {
+  formatStats, formatShare, formatHistory, aggregateHistory, resetLifetime, persistSummaryConcurrent,
+  parseDuration, deriveSavings,
   deriveNet, ruleOverheadPerTurn, parseSession, priceForModel, formatUsd, COMPRESSION,
   MODEL_OUTPUT_PRICE_PER_M, findCompressedPairs, summarizeCompressed, humanizeTokens,
   outputReductionPct, readModeLog, attributeByMode,

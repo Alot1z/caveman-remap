@@ -3,7 +3,10 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/JuliusBrussee/caveman/proxy/providers/openaicompat"
 )
 
 func TestLoad_MissingFileYieldsRecordDefaults(t *testing.T) {
@@ -307,6 +310,57 @@ func TestCompatCredential_UsesPerNameEnvAndEmptyMeansNoAuth(t *testing.T) {
 	}
 	if got, ok := cfg.CompatCredential("missing"); ok || got != "" {
 		t.Errorf("missing credential = (%q,%v), want (\"\",false)", got, ok)
+	}
+}
+
+// A built-in compat mount has its own BYOK policy with no user config. Thus a
+// keyless request never uses the OPENAI_COMPAT_API_KEY secret.
+func TestCompatCredential_BuiltinMountReadsItsOwnEnv(t *testing.T) {
+	t.Setenv("OPENCODE_API_KEY", "sk-opencode")
+	t.Setenv("OPENAI_COMPAT_API_KEY", "sk-legacy")
+	if got, ok := (Config{}).CompatCredential("opencode-go"); !ok || got != "sk-opencode" {
+		t.Errorf("opencode-go credential = (%q,%v), want (sk-opencode,true)", got, ok)
+	}
+}
+
+func TestCompatUpstreams_UserEntryWins(t *testing.T) {
+	builtin := Config{}.CompatUpstreams()
+	if got := builtin["opencode-go"].BaseURL; got != "https://opencode.ai/zen/go" {
+		t.Fatalf("built-in opencode-go base_url = %q, want the OpenCode Go upstream", got)
+	}
+	user := CompatConfig{BaseURL: "https://opencode.example.test", APIKeyEnv: "OPENCODE_ZEN_API_KEY"}
+	cfg := Config{Compat: map[string]CompatConfig{
+		"opencode-go": user,
+		"openrouter":  {BaseURL: "https://openrouter.ai/api", APIKeyEnv: "OPENROUTER_API_KEY"},
+	}}
+	merged := cfg.CompatUpstreams()
+	if got := merged["opencode-go"]; got != user {
+		t.Errorf("opencode-go upstream = %+v, want the user entry %+v", got, user)
+	}
+	if _, ok := merged["openrouter"]; !ok {
+		t.Errorf("user-only upstream openrouter missing from %v", merged)
+	}
+	if len(merged) != 2 {
+		t.Errorf("merged upstreams = %v, want exactly the built-in and user names", merged)
+	}
+	if _, ok := cfg.Compat["opencode-go"]; !ok || len(cfg.Compat) != 2 {
+		t.Errorf("CompatUpstreams must not mutate cfg.Compat: %v", cfg.Compat)
+	}
+}
+
+// buildAdapters panics on a compat entry that fails validation. Only config.Load
+// validates the user entries. This test validates the built-in entries.
+func TestBuiltinCompat_EntriesPassValidation(t *testing.T) {
+	for name, upstream := range builtinCompat {
+		if err := openaicompat.ValidateName(name); err != nil {
+			t.Errorf("built-in compat %q: %v", name, err)
+		}
+		if err := openaicompat.ValidateBaseURL(upstream.BaseURL); err != nil {
+			t.Errorf("built-in compat %q base_url: %v", name, err)
+		}
+		if strings.TrimSpace(upstream.APIKeyEnv) == "" {
+			t.Errorf("built-in compat %q has no api_key_env", name)
+		}
 	}
 }
 

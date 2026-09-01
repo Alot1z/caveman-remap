@@ -49,7 +49,7 @@ export class ProviderRouter {
   async apply(model: ExtensionContext["model"], ctx: ExtensionContext): Promise<void> {
     if (!this.gateOpen || this.applying || !this.gateway) return;
     if (!model) return;
-    const route = routeForApi(this.gateway, model.api);
+    const route = routeForApi(this.gateway, model.api, model.provider);
     let oauth = true;
     try {
       oauth = ctx.modelRegistry.isUsingOAuth(model);
@@ -61,7 +61,9 @@ export class ProviderRouter {
       const key = `${model.provider}/${model.id}`;
       if (!this.warnedModels.has(key)) {
         this.warnedModels.add(key);
-        const reason = oauth ? "OAuth/subscription credentials are not routed" : `unsupported API "${model.api}"`;
+        const reason = oauth
+          ? "OAuth/subscription credentials are not routed"
+          : `unsupported provider/API "${model.provider}/${model.api}"`;
         this.notify(`Caveman: pass-through for ${key} (${reason}); no compression`, "warning");
       }
       return;

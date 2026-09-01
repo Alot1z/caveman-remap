@@ -1,8 +1,9 @@
 // Registers a loopback test provider so integration runs never leave the
 // machine: direct (ungated) traffic fast-fails on a dead local port, and gated
-// traffic goes wherever the caveman extension routes it.
+// traffic goes wherever the caveman extension routes it. The provider id is
+// "openai" because routeForApi routes only allowlisted provider names.
 export default function (pi) {
-  pi.registerProvider("stubprov", {
+  pi.registerProvider("openai", {
     name: "Stub Provider",
     baseUrl: "http://127.0.0.1:1",
     apiKey: "dummy-key-for-stub",

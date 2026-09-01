@@ -98,6 +98,11 @@ Each mount declares `base_url` and an environment-variable name containing its
 credential. Compatibility means HTTP shape, not guaranteed support for every
 provider extension.
 
+One mount is built in. The proxy registers `/compat/opencode-go/` with the
+upstream `https://opencode.ai/zen/go` and the credential variable
+`OPENCODE_API_KEY`. A `compat` entry with the name `opencode-go` in
+`caveman.yaml` replaces the built-in mount and can set another endpoint.
+
 ## Modes
 
 | Mode | Request behavior |

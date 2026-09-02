@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -92,6 +93,63 @@ func TestStandaloneBoot_ZeroCloudDeps_InferredRows(t *testing.T) {
 	}
 	if stats.Basis != "inferred" {
 		t.Errorf("basis = %q, want inferred (standalone never claims verified)", stats.Basis)
+	}
+}
+
+func TestStandaloneActiveModeAutoCachesAcrossProvidersAndModelSwitches(t *testing.T) {
+	t.Setenv("CAVEMAN_MODE", "active")
+	t.Setenv("CAVEMAN_BREAKPOINT_PLAN", "")
+	cfg, err := config.Load(filepath.Join(t.TempDir(), "absent.yaml"))
+	if err != nil {
+		t.Fatalf("load defaults: %v", err)
+	}
+	upstream := &captureUpstreamTransport{response: `{}`}
+	spend, err := store.Open(filepath.Join(t.TempDir(), "caveman.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer spend.Close()
+	srv := New(cfg, spend, Options{HTTPClient: &http.Client{Transport: upstream}})
+
+	send := func(path, body string) []byte {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("x-api-key", "provider-test-key")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", path, rec.Code, rec.Body.String())
+		}
+		return bytes.Clone(upstream.body)
+	}
+
+	anthropicBody := send("/anthropic/v1/messages", `{"model":"claude-sonnet-4-6","max_tokens":64,"tools":[{"name":"workspace","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"inspect"}]}`)
+	if !bytes.Contains(anthropicBody, []byte(`"cache_control"`)) {
+		t.Fatalf("Anthropic default missed cache breakpoint: %s", anthropicBody)
+	}
+	bedrockBody := send("/bedrock/model/global.anthropic.claude-sonnet-4-6/converse", `{"system":[{"text":"stable policy"}],"messages":[{"role":"user","content":[{"text":"inspect"}]}]}`)
+	if !bytes.Contains(bedrockBody, []byte(`"cachePoint"`)) {
+		t.Fatalf("Bedrock default missed cache point: %s", bedrockBody)
+	}
+
+	openAIKey := func(model string) string {
+		t.Helper()
+		body := send("/openai/v1/chat/completions", fmt.Sprintf(`{"model":%q,"messages":[{"role":"system","content":"stable policy"},{"role":"user","content":"inspect"}]}`, model))
+		var root map[string]any
+		if err := json.Unmarshal(body, &root); err != nil {
+			t.Fatalf("decode OpenAI body: %v", err)
+		}
+		key, _ := root["prompt_cache_key"].(string)
+		if key == "" {
+			t.Fatalf("OpenAI default missed prompt_cache_key: %s", body)
+		}
+		return key
+	}
+	first := openAIKey("gpt-5.6")
+	switched := openAIKey("gpt-5.6-sol")
+	back := openAIKey("gpt-5.6")
+	if first == switched || first != back {
+		t.Fatalf("model cache lanes not isolated/stable: first=%q switched=%q back=%q", first, switched, back)
 	}
 }
 

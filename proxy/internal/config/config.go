@@ -48,12 +48,10 @@ type Config struct {
 	// may only default on under the local-wrap clause (recovery + CCR) —
 	// which it does not; it stays an explicit opt-in.
 	ToolSchemaStrip string `yaml:"toolschema_strip"`
-	// BreakpointPlan selects the cache-breakpoint planner. It is DEFAULT OFF: only
-	// the explicit value "frontier" turns it on, and "", "off", and any
-	// unrecognized value all mean off. The planner adds provider-native cache
-	// metadata (Anthropic cache_control, OpenAI prompt_cache_key) to the upstream
-	// request only, so it changes no model-visible bytes — but it stays off until
-	// the escalation ladder has priced it.
+	// BreakpointPlan selects the cache-breakpoint planner. Empty defaults to
+	// "frontier" so optimization modes need no cache-specific setup. Explicit
+	// "off" and unrecognized values fail closed. Planner metadata changes no
+	// model-visible bytes; record mode remains an unconditional pass-through.
 	BreakpointPlan string `yaml:"breakpoint_plan"`
 	// ObserveEstimate turns on record-mode observe-only estimation. When true AND
 	// Mode is "record", the proxy runs the compressor on COPIES of each live-zone
@@ -178,15 +176,22 @@ func (c Config) withDefaults() Config {
 	default:
 		c.ToolSchemaStrip = "off"
 	}
-	// Same normalization discipline: one spelling of off, so the decision point is
-	// a single equality against "frontier".
+	// Cache planning is safe metadata and defaults on in optimization modes. Keep
+	// one explicit off spelling and fail closed for unknown values.
 	switch c.BreakpointPlan {
-	case "frontier":
+	case "":
+		c.BreakpointPlan = "frontier"
+	case "frontier", "off":
 	default:
 		c.BreakpointPlan = "off"
 	}
 	if c.Optimizers == nil {
 		c.Optimizers = map[string]bool{}
+	}
+	for _, optimizerID := range []string{"anthropic-cache-breakpoints", "openai-prompt-cache-key", "bedrock-cache-points"} {
+		if _, configured := c.Optimizers[optimizerID]; !configured {
+			c.Optimizers[optimizerID] = true
+		}
 	}
 	return c
 }

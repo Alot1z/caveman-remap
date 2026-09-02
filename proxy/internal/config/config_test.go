@@ -168,6 +168,34 @@ func TestLoad_ParsesProvidersAndOptimizers(t *testing.T) {
 	}
 }
 
+func TestLoad_CacheOptimizersDefaultOnWithExplicitOff(t *testing.T) {
+	t.Setenv("CAVEMAN_BREAKPOINT_PLAN", "")
+	cfg, err := Load(filepath.Join(t.TempDir(), "absent.yaml"))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	for _, optimizerID := range []string{"anthropic-cache-breakpoints", "openai-prompt-cache-key", "bedrock-cache-points"} {
+		if !cfg.Optimizers[optimizerID] {
+			t.Fatalf("default optimizer %q disabled: %#v", optimizerID, cfg.Optimizers)
+		}
+	}
+
+	path := filepath.Join(t.TempDir(), "caveman.yaml")
+	if err := os.WriteFile(path, []byte("optimizers:\n  openai-prompt-cache-key: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatalf("load explicit off: %v", err)
+	}
+	if cfg.Optimizers["openai-prompt-cache-key"] {
+		t.Fatal("explicit OpenAI cache off-switch was overwritten")
+	}
+	if !cfg.Optimizers["anthropic-cache-breakpoints"] || !cfg.Optimizers["bedrock-cache-points"] {
+		t.Fatalf("unconfigured cache defaults lost: %#v", cfg.Optimizers)
+	}
+}
+
 func TestLoad_ParsesCompatUpstreams(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "caveman.yaml")
 	yaml := "compat:\n" +
@@ -356,17 +384,16 @@ func TestLoad_ToolSchemaStripDefaultsOffAndFailsClosed(t *testing.T) {
 	}
 }
 
-// The breakpoint planner is DEFAULT OFF for the same reason: it ships behind the
-// escalation ladder, so only the explicit value "frontier" turns it on and every
-// other spelling normalizes to off.
-func TestLoad_BreakpointPlanDefaultsOffAndFailsClosed(t *testing.T) {
+// Cache planning defaults on in optimization modes. Explicit off and unknown
+// values remain fail-closed off-switches; record mode never runs planner.
+func TestLoad_BreakpointPlanDefaultsFrontierAndFailsClosed(t *testing.T) {
 	t.Setenv("CAVEMAN_BREAKPOINT_PLAN", "")
 	cfg, err := Load(filepath.Join(t.TempDir(), "absent.yaml"))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.BreakpointPlan != "off" {
-		t.Fatalf("bare config breakpoint_plan = %q, want off", cfg.BreakpointPlan)
+	if cfg.BreakpointPlan != "frontier" {
+		t.Fatalf("bare config breakpoint_plan = %q, want frontier", cfg.BreakpointPlan)
 	}
 
 	path := filepath.Join(t.TempDir(), "caveman.yaml")

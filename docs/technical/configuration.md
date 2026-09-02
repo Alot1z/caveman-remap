@@ -84,9 +84,10 @@ Set `CAVEMAN_CONFIG` to load another file.
 label: local
 mode: record
 listen: 127.0.0.1:8787
-optimizers: []
+optimizers: {}
 subscription_compress: false
 toolschema_strip: false
+breakpoint_plan: frontier
 providers: {}
 compat: {}
 ```
@@ -98,10 +99,10 @@ compat: {}
 | `label` | Human-readable installation label |
 | `mode` | Proxy operating mode |
 | `listen` | Local listen address |
-| `optimizers` | Explicit optimizer configuration |
+| `optimizers` | Optimizer overrides; provider-cache optimizers default on in optimization modes and accept explicit `false` |
 | `subscription_compress` | Allow eligible subscription traffic compression |
 | `toolschema_strip` | Allow configured tool-schema annotation stripping |
-| `breakpoint_plan` | Optional cache breakpoint plan |
+| `breakpoint_plan` | Cache breakpoint plan; defaults to `frontier`, with `off` as explicit off-switch |
 | `providers` | Provider endpoint, billing tier and region overrides |
 | `compat` | Named OpenAI-compatible provider mounts |
 

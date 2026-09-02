@@ -105,13 +105,35 @@ func injectRetrieveTool(provider, routePath string, body []byte) ([]byte, bool) 
 	return out, true
 }
 
+// hasRetrieveTool reports whether the request already carries a tool under the
+// proxy's own bare `caveman_retrieve` name. Exact match on purpose: a bare
+// caveman_retrieve may equally be a caller's unrelated tool, and compress mode
+// treats that as a reason to keep its hands off the request entirely
+// (TestCompressModeDoesNotHijackUserRetrieveTool), never as proof of recovery.
 func hasRetrieveTool(body []byte) bool {
+	return requestToolMatches(body, func(name string) bool { return name == retrieveToolName })
+}
+
+// hasMcpRetrieveTool reports whether the caller mounted the caveman MCP server
+// itself, from the one spelling that proves it: the namespaced form an agent host
+// generates for an MCP server's tools (`mcp__caveman__caveman_retrieve` under
+// Claude Code, whatever prefix another host picks — providers.IsRecoveryToolName
+// owns that definition). Unlike the bare name it cannot be a coincidence, which is
+// what makes it usable as in-band evidence that this request can recover elided
+// detail on its own.
+func hasMcpRetrieveTool(body []byte) bool {
+	return requestToolMatches(body, func(name string) bool {
+		return name != retrieveToolName && providers.IsRecoveryToolName(name)
+	})
+}
+
+func requestToolMatches(body []byte, match func(string) bool) bool {
 	var root map[string]any
 	if json.Unmarshal(body, &root) != nil {
 		return false
 	}
 	tools, _ := root["tools"].([]any)
-	return toolNameInList(tools, retrieveToolName)
+	return toolNameInList(tools, match)
 }
 
 type gatewayJSONSpan struct {
@@ -333,24 +355,24 @@ func providerUsesOpenAITools(provider string) bool {
 	}
 }
 
-func toolNameInList(tools []any, name string) bool {
+func toolNameInList(tools []any, match func(string) bool) bool {
 	for _, t := range tools {
 		tm, _ := t.(map[string]any)
 		if tm == nil {
 			continue
 		}
-		if n, _ := tm["name"].(string); n == name {
+		if n, _ := tm["name"].(string); match(n) {
 			return true
 		}
 		if fn, _ := tm["function"].(map[string]any); fn != nil {
-			if n, _ := fn["name"].(string); n == name {
+			if n, _ := fn["name"].(string); match(n) {
 				return true
 			}
 		}
 		declarations, _ := tm["functionDeclarations"].([]any)
 		for _, declaration := range declarations {
 			declarationMap, _ := declaration.(map[string]any)
-			if n, _ := declarationMap["name"].(string); n == name {
+			if n, _ := declarationMap["name"].(string); match(n) {
 				return true
 			}
 		}

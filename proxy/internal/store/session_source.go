@@ -63,7 +63,6 @@ type turnEvent struct {
 	TextPayloads        []string
 	TaskSpawns          int
 	SkillUses           []string
-	SkillHaystack       string
 	Compaction          bool
 	JSONLLine           int
 	RelPath             string
@@ -223,11 +222,6 @@ func (c *sessionEventConsumer) consume(event turnEvent) {
 
 	for _, raw := range event.SkillUses {
 		if slug, ok := c.knownSlugs[normalizeSkillReference(raw)]; ok {
-			c.seenSlugs[slug] = true
-		}
-	}
-	for _, slug := range c.slugs {
-		if slug != "" && !c.seenSlugs[slug] && strings.Contains(event.SkillHaystack, slug) {
 			c.seenSlugs[slug] = true
 		}
 	}

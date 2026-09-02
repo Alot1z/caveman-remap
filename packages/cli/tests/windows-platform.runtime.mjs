@@ -79,6 +79,10 @@ test("CLI normalizes every path in Windows lifecycle hook commands", () => {
 
 test("every Windows hook executable prefix uses PowerShell invocation", () => {
   assert.equal(
+    hookExecutableInvocation("C:\\Users\\Jane Doe\\AppData\\Roaming\\npm\\caveman.CMD", undefined, "win32", false),
+    "'C:/Users/Jane Doe/AppData/Roaming/npm/caveman.CMD'",
+  );
+  assert.equal(
     hookExecutableInvocation("C:\\Users\\Jane Doe\\AppData\\Roaming\\npm\\caveman.CMD", undefined, "win32"),
     "& 'C:/Users/Jane Doe/AppData/Roaming/npm/caveman.CMD'",
   );

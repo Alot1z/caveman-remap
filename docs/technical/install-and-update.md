@@ -86,8 +86,10 @@ tool-catalog shrink binaries are optional.
 caveman claude
 ```
 
-The command is shorthand for `caveman wrap claude`. An interactive first run
-can install missing signed binaries and continue. Non-interactive runs never
+The command persistently enables Claude's native Caveman integration, then runs
+Claude. Undo with `caveman disable claude`. Use `caveman wrap claude` for one
+ephemeral session with no persistent host-config changes. An interactive first
+run can install missing signed binaries and continue. Non-interactive runs never
 silently download a runtime; prepare them with `caveman setup --install`.
 
 Check direct pass-through before enabling transforms:

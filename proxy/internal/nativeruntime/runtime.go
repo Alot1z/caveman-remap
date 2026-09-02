@@ -102,7 +102,8 @@ type Runtime struct {
 	store                 *ccr.Store
 	receiptDir            string
 	usage                 sessionusage.Reader
-	mu                    sync.Mutex
+	mu                    sync.Mutex // activeSessions and lastActivity only
+	sessionLocks          [64]sync.Mutex
 	repositoryMu          sync.RWMutex
 	repositoryMaps        map[string]*repositoryMapEntry
 	repositorySessionRefs map[string]string
@@ -203,8 +204,9 @@ func resolveProfile(raw, policyMode string) (string, profileFeatures, error) {
 
 func (r *Runtime) Handle(_ context.Context, request Request) (Response, error) {
 	started := time.Now()
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	sessionLock := r.sessionLock(request.Session.ID)
+	sessionLock.Lock()
+	defer sessionLock.Unlock()
 
 	if request.ProtocolVersion != ProtocolVersion {
 		return Response{}, fmt.Errorf("native runtime: unsupported protocol version %d", request.ProtocolVersion)
@@ -228,6 +230,7 @@ func (r *Runtime) Handle(_ context.Context, request Request) (Response, error) {
 		return Response{}, err
 	}
 	request.Profile = profile
+	r.mu.Lock()
 	r.lastActivity = time.Now()
 	if request.Event.Type == "session.end" {
 		delete(r.activeSessions, request.Session.ID)
@@ -247,6 +250,7 @@ func (r *Runtime) Handle(_ context.Context, request Request) (Response, error) {
 		}
 		r.activeSessions[request.Session.ID] = activity
 	}
+	r.mu.Unlock()
 	response := Response{
 		ProtocolVersion: ProtocolVersion,
 		PolicyMode:      policyMode,
@@ -323,6 +327,19 @@ func (r *Runtime) Handle(_ context.Context, request Request) (Response, error) {
 		}
 	}
 	return response, nil
+}
+
+// sessionLock preserves event order within one session without making unrelated
+// coding-agent sessions spend their shared 250 ms hook budget waiting on each
+// other's repository and CCR work. Fixed stripes bound lock memory for a
+// long-lived runtime; hash collisions only serialize, never weaken isolation.
+func (r *Runtime) sessionLock(sessionID string) *sync.Mutex {
+	var hash uint32 = 2166136261
+	for i := 0; i < len(sessionID); i++ {
+		hash ^= uint32(sessionID[i])
+		hash *= 16777619
+	}
+	return &r.sessionLocks[hash%uint32(len(r.sessionLocks))]
 }
 
 func directOutputRewriteAgent(agentID string) bool {

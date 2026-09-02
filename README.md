@@ -89,13 +89,13 @@ They stack. Most people start with the skill and graduate.
 The full installer wires up Claude Code hooks and the statusline badge, detects every supported agent on your machine, and reruns safely (Node.js 22.13+):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/JuliusBrussee/caveman/v2.3.1/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/JuliusBrussee/caveman/v2.4.0/install.sh | bash
 ```
 
 On Windows (PowerShell 5.1+):
 
 ```powershell
-irm https://raw.githubusercontent.com/JuliusBrussee/caveman/v2.3.1/install.ps1 | iex
+irm https://raw.githubusercontent.com/JuliusBrussee/caveman/v2.4.0/install.ps1 | iex
 ```
 
 Just one agent:
@@ -272,7 +272,7 @@ The talking style is the headline, but one skill install carries a toolbox. Swit
 
 ## Wrap any agent
 
-Ten agents wrap natively, and the wrapper never edits your config files; every profile builds its settings in env vars or a throwaway overlay and leaves your own files alone. Adding an agent is normally one JSON profile in [`agents/profiles/`](./agents/profiles/).
+Ten agents wrap natively. `caveman <agent>` switches the native integration on for good and launches the agent; `caveman wrap <agent>` runs one session and leaves nothing behind. Adding an agent is normally one JSON profile in [`agents/profiles/`](./agents/profiles/), no code.
 
 | Agent                | Vendor           | How it's wrapped                                             |
 | -------------------- | ---------------- | ------------------------------------------------------------ |
@@ -288,7 +288,9 @@ Ten agents wrap natively, and the wrapper never edits your config files; every p
 | **Pi**               | pi.dev           | bundled native extension, your `~/.pi` config untouched      |
 
 <details>
-<summary><strong>Per-agent fine print</strong> — Kilo and Qwen smoke tests, the default loadout, SDK recipes</summary>
+<summary><strong>Per-agent fine print</strong> — what gets written, smoke tests, the default loadout, SDK recipes</summary>
+
+`caveman wrap` never edits your config files. The persistent shortcut's writes are journaled and reversible with `caveman disable <agent>`. Real sessions round-trip in record mode, tested against **Hermes v0.18.0**, **OpenClaw 2026.6.11**, and **Pi 0.84.2**.
 
 Kilo Code **7.5.6** passed a pinned real-CLI route and streaming-response smoke; its profile also runs through the same real-proxy compression and telemetry matrix as every other agent. This wraps Kilo's CLI (`kilo` or `kilocode`), not an already-running editor extension.
 

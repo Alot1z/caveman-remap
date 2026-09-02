@@ -357,13 +357,11 @@ type Server struct {
 //   - recovery must run through the agent's own caveman_retrieve MCP tool. These
 //     paths are marker-only — the proxy never injects its server-side retrieve
 //     tool into them — so without MCP recovery the elided detail is unreachable.
-//     mcpRecoveryAvailable takes that answer from the wrap door's out-of-band
-//     signal OR from the request's own tool list, whichever proves it.
 //   - the proxy must be able to keep the rewrite byte-stable on later turns
 //     (prefixStabilized), or turn N+1 flips the prefix back and busts the cache
 //     turn N created.
 //
-// This is a LOCAL-proxy capability — wrap or standalone. The managed gateway's lossless+stealth
+// This is a LOCAL-wrap-only capability. The managed gateway's lossless+stealth
 // rule for non-PAYG traffic is unchanged. Subscription rows it produces are
 // tokens-only: the row's dollar fields stay zero (see record()).
 func (s *Server) liveZoneCompressionAllowed(adapter providers.Adapter, body []byte) bool {
@@ -381,23 +379,8 @@ func (s *Server) liveZoneCompressionAllowed(adapter providers.Adapter, body []by
 	return s.prefixStabilized(adapter)
 }
 
-// mcpRecoveryAvailable reports whether the CALLER of this request can recover
-// detail the proxy elides. Two independent sources, both evidence rather than
-// assumption:
-//
-//   - the wrap door proves it out of band. `caveman <agent>` verifies the agent
-//     really has caveman_retrieve before setting CAVEMAN_RECOVERY=mcp, so the flag
-//     holds for every request that proxy will see.
-//   - the request proves it in band by carrying a caveman retrieve tool in its own
-//     tool list. This is what a bare `caveman start` proxy has to go on: it serves
-//     whichever client connects, so a machine-level `caveman mcp install` marker
-//     could never bind to the sender of a particular request — but the tool that
-//     install put in the agent's config travels with the request itself. Without
-//     this arm, subscription/OAuth sessions on a standalone proxy passed through
-//     uncompressed no matter what the operator installed (#908).
-//
-// Neither arm relaxes anything downstream: recovery is still marker-only for these
-// paths, and the live-zone predicate above still requires a stabilizable prefix.
+// mcpRecoveryAvailable binds recoverability to caller: either wrap verified it
+// out of band, or request itself carries namespaced Caveman MCP retrieve tool.
 func (s *Server) mcpRecoveryAvailable(body []byte) bool {
 	return s.recoveryViaMCP || hasMcpRetrieveTool(body)
 }

@@ -144,6 +144,7 @@ ANTHROPIC_API_KEY
 OPENAI_API_KEY
 GEMINI_API_KEY
 AZURE_OPENAI_API_KEY
+OPENCODE_API_KEY
 ```
 
 Amazon Bedrock supports its native authentication paths, including AWS

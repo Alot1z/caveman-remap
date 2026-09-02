@@ -182,8 +182,8 @@ class CompressSafetyTests(unittest.TestCase):
 
     def test_retry_preamble_output_rejected_and_not_written(self):
         # A fix-retry response with a prose preamble ahead of the real content
-        # must never reach disk — only the restore-on-failure write should
-        # land, and it must restore the original (issue #588).
+        # must never reach disk, staging included, and the live file must be
+        # left holding the original (issue #588).
         with tempfile.TemporaryDirectory() as tmp, \
              tempfile.TemporaryDirectory() as data_home, \
              mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
@@ -210,6 +210,55 @@ class CompressSafetyTests(unittest.TestCase):
             self.assertNotIn(preamble_fix, written_texts)
             self.assertEqual(path.read_text(encoding="utf-8"), original)
 
+    def test_live_file_never_holds_unvalidated_output_before_validation_passes(self):
+        # validate() must never see the live file already holding the
+        # un-validated candidate (issue #544).
+        with tempfile.TemporaryDirectory() as tmp, \
+             tempfile.TemporaryDirectory() as data_home, \
+             mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
+            original = "# Heading\n\nProse to compress, long enough to pass the identity check here.\n"
+            compressed = "# Heading\n\nProse.\n"
+            path = self._file_with(Path(tmp), original)
+
+            seen_live_contents = []
+
+            def spy_validate(orig_path, comp_path):
+                seen_live_contents.append(path.read_text(encoding="utf-8"))
+                return mock.Mock(is_valid=True, errors=[], warnings=[])
+
+            with mock.patch.object(compress_mod, "call_claude", return_value=compressed), \
+                 mock.patch.object(compress_mod, "validate", side_effect=spy_validate):
+                ok = compress_mod.compress_file(path)
+
+            self.assertTrue(ok)
+            self.assertEqual(seen_live_contents, [original])
+            self.assertEqual(path.read_text(encoding="utf-8"), compressed)
+            self.assertFalse((Path(tmp) / (path.name + ".caveman-staged")).exists())
+
+    def test_live_file_untouched_when_all_validation_attempts_fail(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             tempfile.TemporaryDirectory() as data_home, \
+             mock.patch.dict(os.environ, {"XDG_DATA_HOME": data_home, "LOCALAPPDATA": data_home}):
+            original = "# Heading\n\nProse to compress, long enough to pass the identity check here.\n"
+            compressed = "# Heading\n\nProse.\n"
+            path = self._file_with(Path(tmp), original)
+
+            invalid = mock.Mock(is_valid=False, errors=["some validation error"], warnings=[])
+            seen_live_contents = []
+
+            def spy_validate(orig_path, comp_path):
+                seen_live_contents.append(path.read_text(encoding="utf-8"))
+                return invalid
+
+            with mock.patch.object(compress_mod, "call_claude", return_value=compressed), \
+                 mock.patch.object(compress_mod, "validate", side_effect=spy_validate):
+                ok = compress_mod.compress_file(path)
+
+            self.assertFalse(ok)
+            self.assertEqual(seen_live_contents, [original] * compress_mod.MAX_RETRIES)
+            self.assertEqual(path.read_text(encoding="utf-8"), original)
+            self.assertFalse((Path(tmp) / (path.name + ".caveman-staged")).exists())
+
     def test_non_utf8_input_refused_before_anything_is_written(self):
         """errors="ignore" used to drop the undecodable byte, write the mangled
         text to the backup, pass the mangled-vs-mangled readback check, then
@@ -229,6 +278,40 @@ class CompressSafetyTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), raw)
             backup_dir = compress_mod.backup_dir_for(path)
             self.assertFalse((backup_dir / "task.original.md").exists())
+
+    def test_sensitive_directory_names_are_blocked(self):
+        self.assertTrue(
+            compress_mod.is_sensitive_path(Path("C:/dev/CREDENTIALS/hetzner/webhosting.md"))
+        )
+        self.assertTrue(compress_mod.is_sensitive_path(Path("project/secrets/service-notes.md")))
+        self.assertTrue(compress_mod.is_sensitive_path(Path("project/secret/service-notes.md")))
+        self.assertTrue(compress_mod.is_sensitive_path(Path("project/api-keys/service-notes.md")))
+        self.assertTrue(compress_mod.is_sensitive_path(Path("project/private_keys/service-notes.md")))
+        self.assertFalse(compress_mod.is_sensitive_path(Path("project/docs/service-notes.md")))
+
+    def test_code_blocks_are_masked_before_model_and_restored_byte_exact(self):
+        original = (
+            "# Tree\n\nProse before.\n\n"
+            "```text\nroot\n├── src\n│   └── app.py\n```\n\n"
+            "    indented()\n    code()\n\nProse after.\n"
+        )
+        masked, blocks = compress_mod.mask_code_blocks(original)
+        self.assertNotIn("├── src", masked)
+        self.assertNotIn("indented()", masked)
+        self.assertEqual(len(blocks), 2)
+        self.assertEqual(compress_mod.restore_code_blocks(masked, blocks), original)
+        compressed = masked.replace("Prose before.", "Before.").replace("Prose after.", "After.")
+        restored = compress_mod.restore_code_blocks(compressed, blocks)
+        self.assertIn("```text\nroot\n├── src\n│   └── app.py\n```", restored)
+        self.assertIn("    indented()\n    code()", restored)
+
+    def test_missing_or_duplicated_code_marker_fails_closed(self):
+        masked, blocks = compress_mod.mask_code_blocks("```sh\necho safe\n```\n")
+        marker = blocks[0][0]
+        with self.assertRaisesRegex(ValueError, "changed preserved code marker"):
+            compress_mod.restore_code_blocks(masked.replace(marker, ""), blocks)
+        with self.assertRaisesRegex(ValueError, "changed preserved code marker"):
+            compress_mod.restore_code_blocks(masked + marker, blocks)
 
     def test_crlf_line_endings_survive_the_round_trip(self):
         """Reading with universal newlines and writing back "\n" rewrote every

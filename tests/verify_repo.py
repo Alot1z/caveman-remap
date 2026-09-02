@@ -264,22 +264,22 @@ def verify_manifests_and_syntax() -> None:
         "plugin.json must not declare `agents` — the array form loads no "
         "agents at all; the default agents/ scan is the only working path",
     )
-    # The default scan turns EVERY top-level .md in agents/ into a subagent,
-    # named from its frontmatter or filename. agents/AGENTS.md and
-    # agents/CLAUDE.md (maintainer docs for the profile registry) shipped as
-    # bogus subagents named AGENTS and CLAUDE; they now live in agents/docs/,
-    # which the scan does not recurse into.
+    # Claude's default scan recurses through agents/: every markdown file there
+    # becomes a user-visible subagent. Maintainer docs belong outside this tree.
     expected_agent_files = {
         "cavecrew-builder.md",
         "cavecrew-investigator.md",
         "cavecrew-reviewer.md",
     }
-    top_level_agent_md = {path.name for path in (ROOT / "agents").glob("*.md")}
+    all_agent_md = {
+        path.relative_to(ROOT / "agents").as_posix()
+        for path in (ROOT / "agents").rglob("*.md")
+    }
     ensure(
-        top_level_agent_md == expected_agent_files,
-        "agents/*.md is scanned wholesale into every user's subagent list; "
-        f"unexpected files ship as subagents: {sorted(top_level_agent_md - expected_agent_files)}. "
-        "Move non-agent markdown into agents/docs/.",
+        all_agent_md == expected_agent_files,
+        "agents/**/*.md is scanned wholesale into every user's subagent list; "
+        f"unexpected files ship as subagents: {sorted(all_agent_md - expected_agent_files)}. "
+        "Move non-agent markdown outside agents/.",
     )
 
     # Claude Code loads commands/*.md as flat skills alongside skills/*/SKILL.md,
@@ -390,7 +390,81 @@ def verify_powershell_static() -> None:
     )
     ensure("[CAVEMAN" in statusline_text, "caveman-statusline.ps1 missing badge output")
 
+    # Parity anchors between the two statusline ports and the JS source of
+    # truth. There is no PowerShell behavioral test on the POSIX runners, so
+    # these greps are the only thing standing between a bash-only fix and a
+    # silently divergent Windows badge.
+    sh_text = (ROOT / "src/hooks/caveman-statusline.sh").read_text(encoding="utf-8")
+    config_text = (ROOT / "src/hooks/caveman-config.js").read_text(encoding="utf-8")
+
+    match = re.search(r"SESSIONS_DIRNAME\s*=\s*'([^']+)'", config_text)
+    ensure(match is not None, "caveman-config.js no longer defines SESSIONS_DIRNAME")
+    sessions_dir = match.group(1)
+
+    for name, text in (
+        ("caveman-statusline.sh", sh_text),
+        ("caveman-statusline.ps1", statusline_text),
+    ):
+        ensure(
+            sessions_dir in text,
+            f"{name} does not reference {sessions_dir} — session-scoped badge would silently "
+            f"fall back to the machine-wide flag",
+        )
+        ensure(
+            ".mode" in text,
+            f"{name} missing the per-session .mode file extension",
+        )
+
+    # A durable 'off' must render nothing, not "[CAVEMAN:OFF]".
+    ensure('[ "$MODE" = "off" ] && exit 0' in sh_text,
+           "caveman-statusline.sh does not short-circuit on durable off")
+    ensure('if ($Mode -eq "off") { exit 0 }' in statusline_text,
+           "caveman-statusline.ps1 does not short-circuit on durable off")
+
+    # The session-id whitelist must be the same rule in all three ports —
+    # alphabet AND length. The bash port originally checked only the alphabet.
+    id_re = re.search(r"SESSION_ID_RE\s*=\s*/\^\[A-Za-z0-9_-\]\{1,(\d+)\}\$/", config_text)
+    ensure(id_re is not None, "caveman-config.js no longer defines SESSION_ID_RE in the expected shape")
+    max_len = id_re.group(1)
+    ensure(
+        f"-gt {max_len}" in sh_text,
+        f"caveman-statusline.sh does not cap the session id at {max_len} chars like the JS/ps1 ports",
+    )
+    ensure(
+        f"{{1,{max_len}}}" in statusline_text,
+        f"caveman-statusline.ps1 does not cap the session id at {max_len} chars",
+    )
+
+    # Both ports must guard against a blocking stdin read.
+    ensure("[ ! -t 0 ]" in sh_text, "caveman-statusline.sh missing TTY guard on stdin read")
+    ensure("-t 1" in sh_text, "caveman-statusline.sh missing bounded stdin read")
+    ensure("IsInputRedirected" in statusline_text,
+           "caveman-statusline.ps1 missing redirect guard on stdin read")
+    ensure("Wait(1000)" in statusline_text, "caveman-statusline.ps1 missing bounded stdin read")
+
+    # macOS ships bash 3.2, which rejects fractional read timeouts.
+    ensure(
+        not re.search(r"read\b[^\n]*-t\s+0\.", sh_text),
+        "caveman-statusline.sh uses a fractional read timeout — bash 3.2 rejects it "
+        "with 'invalid timeout specification'",
+    )
+
+    # The per-session store must be cleaned up by every uninstall path, or a
+    # reinstall inherits stale modes for session ids that no longer exist.
+    installer_text = (ROOT / "bin/install.js").read_text(encoding="utf-8")
+    uninstall_sh_text = (ROOT / "src/hooks/uninstall.sh").read_text(encoding="utf-8")
+    for name, text in (
+        ("bin/install.js", installer_text),
+        ("src/hooks/uninstall.sh", uninstall_sh_text),
+        ("src/hooks/uninstall.ps1", uninstall_text),
+    ):
+        ensure(
+            sessions_dir in text,
+            f"{name} does not remove {sessions_dir} on uninstall",
+        )
+
     print("Windows install path statically wired")
+    print("Statusline session-state parity (sh/ps1/js) OK")
 
 
 def load_compress_modules():

@@ -101,12 +101,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rawHash := sha256.Sum256(body)
-	// Local compression is not account-gated, so both non-PAYG
-	// classifications reach the live zone on the same purely technical conditions:
-	// the operator off-switch, an adapter with cache-floor reasoning, and the MCP
-	// recovery + byte-stable prefix machinery that makes the rewrite recoverable
-	// and maintainable. Decided here rather than before the read because the
-	// recovery half of it is answered by the request's own tool list.
+	// Decide after reading: standalone clients prove recovery with their request's
+	// namespaced caveman retrieve tool; wrap may prove it out of band.
 	nonPAYGLiveZone := (authMode == AuthModeSubscription || authMode == AuthModeOAuth) && s.liveZoneCompressionAllowed(adapter, body)
 	subscriptionPassthrough := authMode == AuthModeSubscription && !nonPAYGLiveZone
 	evidence := requestEvidenceFromHeaders(r.Header)
@@ -131,7 +127,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request) {
 			evidence.SessionCorrelationBasis = basis
 		}
 	}
-	// Record real request path rather than adapter's default provider tag.
+	// Record the real request path rather than the adapter's default provider tag.
 	meta.Endpoint = r.URL.Path
 	// The caller's session identity, already shape-bounded by requestEvidenceFromHeaders.
 	// It reaches adapters as content-blind routing input only (see RequestMetadata).

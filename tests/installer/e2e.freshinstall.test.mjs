@@ -171,6 +171,29 @@ test('uninstall removes session state but keeps lifetime history', () => {
   }
 });
 
+test('uninstall unlinks a replaced session directory without touching its target', {
+  skip: process.platform === 'win32' ? 'symlink setup requires Windows developer mode' : false,
+}, () => {
+  const dir = freshTmpDir();
+  const configDir = path.join(dir, 'claude');
+  const outside = path.join(dir, 'outside');
+  const sentinel = path.join(outside, 'keep.txt');
+  const env = isolatedInstallEnv(dir);
+  try {
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.mkdirSync(outside);
+    fs.writeFileSync(sentinel, 'keep');
+    fs.symlinkSync(outside, path.join(configDir, '.caveman-sessions'));
+
+    const removed = runInstaller(['--uninstall'], configDir, env);
+    assert.equal(removed.status, 0, removed.stderr || removed.stdout);
+    assert.equal(fs.existsSync(path.join(configDir, '.caveman-sessions')), false);
+    assert.equal(fs.readFileSync(sentinel, 'utf8'), 'keep');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('uninstall dry-run reports planned removals and deletes nothing', () => {
   const dir = freshTmpDir();
   const configDir = path.join(dir, 'claude');

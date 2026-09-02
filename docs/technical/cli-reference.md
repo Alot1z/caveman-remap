@@ -12,7 +12,8 @@ for accepted flags.
 
 | Command | Purpose | Account needed |
 |---|---|---:|
-| `caveman <agent>` | Run a supported agent through the local layer | No |
+| `caveman <agent>` | Persistently enable native integration, then run supported agent | No |
+| `caveman wrap <agent>` | Run one ephemeral wrapped session without persistent host config | No |
 | `caveman run -- <command>` | Run an arbitrary command through the local layer | No |
 | `caveman learn` | Rank locally observed improvements | No |
 | `caveman status` | Show local runtime, mode, and connection state | No |

@@ -54,6 +54,55 @@ test('reads --session-file directly and sums output tokens', (tmp) => {
   assert.match(out, /Cache-read tokens:\s+250/);
 });
 
+test('counts a multi-block API response once, not once per JSONL line', (tmp) => {
+  // Claude Code writes one assistant line per content block (text + each
+  // tool_use) of the same API response — same message.id + requestId, same
+  // usage repeated. Only one line per response may count.
+  const usage = { output_tokens: 487, cache_read_input_tokens: 1000 };
+  const sess = makeSession(tmp, [
+    { type: 'assistant', requestId: 'req_1', message: { id: 'msg_a', usage } },
+    { type: 'assistant', requestId: 'req_1', message: { id: 'msg_a', usage } },
+    { type: 'assistant', requestId: 'req_1', message: { id: 'msg_a', usage } },
+    { type: 'user', message: { content: 'tool result' } },
+    { type: 'assistant', requestId: 'req_2', message: { id: 'msg_b', usage: { output_tokens: 13, cache_read_input_tokens: 500 } } },
+  ]);
+  const out = execFileSync(process.execPath, [STATS, '--session-file', sess], {
+    encoding: 'utf8',
+    env: { ...process.env, CLAUDE_CONFIG_DIR: path.join(tmp, '.claude') },
+  });
+  assert.match(out, /Turns:\s+2/);
+  assert.match(out, /Output tokens:\s+500\b/);
+  assert.match(out, /Cache-read tokens:\s+1,?\.?500\b/);
+});
+
+test('same message.id under different requestIds counts per response (retry path)', (tmp) => {
+  // A retried request re-sends the same message.id under a new requestId —
+  // those are distinct billed responses and must both count.
+  const sess = makeSession(tmp, [
+    { type: 'assistant', requestId: 'req_1', message: { id: 'msg_a', usage: { output_tokens: 100 } } },
+    { type: 'assistant', requestId: 'req_2', message: { id: 'msg_a', usage: { output_tokens: 100 } } },
+  ]);
+  const out = execFileSync(process.execPath, [STATS, '--session-file', sess], {
+    encoding: 'utf8',
+    env: { ...process.env, CLAUDE_CONFIG_DIR: path.join(tmp, '.claude') },
+  });
+  assert.match(out, /Turns:\s+2/);
+  assert.match(out, /Output tokens:\s+200\b/);
+});
+
+test('entries without message.id keep per-line counting (no dedupe key)', (tmp) => {
+  const sess = makeSession(tmp, [
+    { type: 'assistant', message: { usage: { output_tokens: 100 } } },
+    { type: 'assistant', message: { usage: { output_tokens: 100 } } },
+  ]);
+  const out = execFileSync(process.execPath, [STATS, '--session-file', sess], {
+    encoding: 'utf8',
+    env: { ...process.env, CLAUDE_CONFIG_DIR: path.join(tmp, '.claude') },
+  });
+  assert.match(out, /Turns:\s+2/);
+  assert.match(out, /Output tokens:\s+200\b/);
+});
+
 test('shows full-mode savings estimate when flag is full', (tmp) => {
   const sess = makeSession(tmp, [
     { type: 'assistant', message: { usage: { output_tokens: 350 } } },
@@ -167,6 +216,13 @@ test('priceForModel matches by prefix across point releases', () => {
   assert.strictEqual(priceForModel('claude-sonnet-4-7-20260315'), 15.00);
   assert.strictEqual(priceForModel('claude-haiku-4-5'), 5.00);
   assert.strictEqual(priceForModel('claude-3-5-sonnet-20241022'), 15.00);
+  assert.strictEqual(priceForModel('claude-opus-5'), 25.00);
+  assert.strictEqual(priceForModel('claude-sonnet-5'), 10.00);
+  assert.strictEqual(priceForModel('claude-fable-5'), 50.00);
+  assert.strictEqual(priceForModel('claude-mythos-5'), 50.00);
+  assert.strictEqual(priceForModel('claude-opus-5[1m]'), 25.00);
+  assert.strictEqual(priceForModel('claude-sonnet-5[1m]'), 10.00);
+  assert.strictEqual(priceForModel('claude-haiku-5'), null);
   assert.strictEqual(priceForModel(null), null);
   assert.strictEqual(priceForModel('gpt-4'), null);
 });
@@ -427,6 +483,95 @@ test('statusline strips control bytes from suffix', (tmp) => {
   // Escape byte stripped; "[31mEVIL" remains, but the leading \x1b is gone so
   // the user's terminal won't be hijacked.
   assert.doesNotMatch(out, /\x1b\[31m/);
+});
+
+// ── statusline: per-session badge ──────────────────────────────────────────
+//
+// Claude Code pipes session JSON (including session_id) to the statusline
+// command. These drive the script the same way, so the badge is proven to
+// reflect the window it belongs to rather than a machine-wide flag.
+
+function statusline(claudeDir, stdin) {
+  return execFileSync('bash', [path.join(ROOT, 'src', 'hooks', 'caveman-statusline.sh')], {
+    encoding: 'utf8',
+    input: stdin === undefined ? '' : stdin,
+    env: { ...process.env, CLAUDE_CONFIG_DIR: claudeDir, CAVEMAN_STATUSLINE_SAVINGS: '0' },
+  });
+}
+
+function seedSessions(claudeDir, modes) {
+  const dir = path.join(claudeDir, '.caveman-sessions');
+  fs.mkdirSync(dir, { recursive: true });
+  for (const [sid, mode] of Object.entries(modes)) {
+    fs.writeFileSync(path.join(dir, `${sid}.mode`), mode);
+  }
+}
+
+test('statusline.sh renders the session mode, not the shared flag', (tmp) => {
+  if (process.platform === 'win32') return;
+  const claudeDir = path.join(tmp, '.claude');
+  fs.mkdirSync(claudeDir, { recursive: true });
+  fs.writeFileSync(path.join(claudeDir, '.caveman-active'), 'full');
+  seedSessions(claudeDir, { sessA: 'ultra', sessB: 'lite' });
+
+  assert.match(statusline(claudeDir, '{"session_id":"sessA"}'), /\[CAVEMAN:ULTRA\]/);
+  assert.match(statusline(claudeDir, '{"session_id":"sessB"}'), /\[CAVEMAN:LITE\]/);
+});
+
+test('statusline.sh renders nothing for a durable off session', (tmp) => {
+  if (process.platform === 'win32') return;
+  const claudeDir = path.join(tmp, '.claude');
+  fs.mkdirSync(claudeDir, { recursive: true });
+  // Another window is still on 'full' — this one must stay silent anyway.
+  fs.writeFileSync(path.join(claudeDir, '.caveman-active'), 'full');
+  seedSessions(claudeDir, { sessOff: 'off' });
+
+  const out = statusline(claudeDir, '{"session_id":"sessOff"}');
+  assert.strictEqual(out, '', `expected empty badge, got ${JSON.stringify(out)}`);
+  assert.doesNotMatch(out, /OFF/, 'must never render [CAVEMAN:OFF]');
+});
+
+test('statusline.sh falls back to the legacy flag without a usable session id', (tmp) => {
+  if (process.platform === 'win32') return;
+  const claudeDir = path.join(tmp, '.claude');
+  fs.mkdirSync(claudeDir, { recursive: true });
+  fs.writeFileSync(path.join(claudeDir, '.caveman-active'), 'wenyan');
+  seedSessions(claudeDir, { sessA: 'ultra' });
+
+  for (const stdin of [
+    '{"session_id":"unknown-session"}',   // valid id, no state file yet
+    '{"model":{"id":"x"}}',               // payload without session_id
+    '{"session_id":"../../etc/passwd"}',  // traversal attempt
+    'not json at all',
+    '',                                   // no payload
+  ]) {
+    assert.match(statusline(claudeDir, stdin), /\[CAVEMAN:WENYAN\]/, `stdin: ${stdin}`);
+  }
+});
+
+test('statusline.sh never reads a session file outside the sessions dir', (tmp) => {
+  if (process.platform === 'win32') return;
+  const claudeDir = path.join(tmp, '.claude');
+  fs.mkdirSync(claudeDir, { recursive: true });
+  fs.writeFileSync(path.join(claudeDir, '.caveman-active'), 'full');
+  // Plant a file the traversal would reach if the id were interpolated raw.
+  fs.mkdirSync(path.join(claudeDir, '.caveman-sessions'), { recursive: true });
+  fs.writeFileSync(path.join(claudeDir, 'escaped.mode'), 'ultra');
+
+  const out = statusline(claudeDir, '{"session_id":"../escaped"}');
+  assert.match(out, /\[CAVEMAN\]/, 'must fall back to the legacy full badge');
+  assert.doesNotMatch(out, /ULTRA/, 'traversal must not reach the planted file');
+});
+
+test('statusline.sh tolerates multiline and whitespace-padded JSON', (tmp) => {
+  if (process.platform === 'win32') return;
+  const claudeDir = path.join(tmp, '.claude');
+  fs.mkdirSync(claudeDir, { recursive: true });
+  fs.writeFileSync(path.join(claudeDir, '.caveman-active'), 'full');
+  seedSessions(claudeDir, { sessA: 'ultra' });
+
+  const pretty = '{\n  "model": { "id": "x" },\n  "session_id" : "sessA"\n}\n';
+  assert.match(statusline(claudeDir, pretty), /\[CAVEMAN:ULTRA\]/);
 });
 
 test('appendFlag is symlink-safe (refuses symlinked target)', (tmp) => {

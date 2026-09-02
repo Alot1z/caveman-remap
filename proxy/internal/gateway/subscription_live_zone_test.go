@@ -460,9 +460,6 @@ func TestSubscriptionLiveZoneRecordsTokensNeverDollars(t *testing.T) {
 	}
 }
 
-// claudeCodeConversationWithMcpRetrieve is the same Claude Code request, sent by a
-// session that mounted the caveman MCP server itself (`caveman mcp install claude`).
-// Its retrieve tool travels in the tool list under the host's MCP namespace.
 func claudeCodeConversationWithMcpRetrieve(liveText string) string {
 	return strings.Replace(
 		claudeCodeConversation(liveText),
@@ -472,52 +469,30 @@ func claudeCodeConversationWithMcpRetrieve(liveText string) string {
 	)
 }
 
-// TestSubscriptionRecoveryFromRequestToolList pins the standalone-proxy half of
-// recoverability (#908). A bare `caveman start` proxy is never told
-// CAVEMAN_RECOVERY=mcp — it serves whichever client connects, so no machine-level
-// marker can bind to the sender of a given request. The request itself can still
-// prove it: a subscription session carrying the namespaced caveman retrieve tool
-// compresses, and the identical session without it stays byte-identical passthrough.
 func TestSubscriptionRecoveryFromRequestToolList(t *testing.T) {
 	live := strings.Repeat("newest live turn bytes ", 40)
 	withTool := claudeCodeConversationWithMcpRetrieve(live)
-
 	rt := &captureTransport{responses: []string{subMessageRespBody}}
 	comp := &liveZoneCompressor{}
 	srv, sink := newSubscriptionCompressServer(comp, rt, Config{})
 
 	serveBody(t, srv, "/v1/messages", withTool, subscriptionAgentHeaders)
-
-	upstream := string(rt.bodies[0])
-	if strings.Contains(upstream, live) {
-		t.Fatalf("a request carrying its own MCP retrieve tool must compress the live zone: %s", upstream)
+	if strings.Contains(string(rt.bodies[0]), live) || !strings.Contains(string(rt.bodies[0]), "<<ccr:") {
+		t.Fatalf("namespaced retrieve tool must enable recoverable compression: %s", rt.bodies[0])
 	}
-	if !strings.Contains(upstream, "<<ccr:") {
-		t.Fatalf("compression must disclose an in-block CCR marker: %s", upstream)
-	}
-	row := sink.last(t)
-	if !row.CompressionEligible {
-		t.Fatalf("the request must be counted in requests_eligible_for_compression: %+v", row)
-	}
-	if row.CompressionTokensBefore <= 0 {
-		t.Fatalf("row must record the token reduction: %+v", row)
+	if row := sink.last(t); !row.CompressionEligible || row.CompressionTokensBefore <= 0 {
+		t.Fatalf("request must be compression-eligible: %+v", row)
 	}
 
-	// Same proxy, same session shape, tool removed: nothing proves recovery.
 	without := claudeCodeConversation(live)
 	rt2 := &captureTransport{responses: []string{subMessageRespBody}}
 	comp2 := &liveZoneCompressor{}
 	srv2, sink2 := newSubscriptionCompressServer(comp2, rt2, Config{})
-
 	serveBody(t, srv2, "/v1/messages", without, subscriptionAgentHeaders)
-
-	if sha256.Sum256(rt2.bodies[0]) != sha256.Sum256([]byte(without)) {
-		t.Fatalf("without a retrieve tool the same proxy must pass through:\n got %s\nwant %s", rt2.bodies[0], without)
-	}
-	if comp2.calls != 0 {
-		t.Fatalf("without a retrieve tool the compressor must not run (calls=%d)", comp2.calls)
+	if sha256.Sum256(rt2.bodies[0]) != sha256.Sum256([]byte(without)) || comp2.calls != 0 {
+		t.Fatalf("request without recovery proof must pass through: %s", rt2.bodies[0])
 	}
 	if row := sink2.last(t); row.CompressionEligible {
-		t.Fatalf("a passthrough request must stay out of the eligibility denominator: %+v", row)
+		t.Fatalf("passthrough request must stay outside eligibility denominator: %+v", row)
 	}
 }

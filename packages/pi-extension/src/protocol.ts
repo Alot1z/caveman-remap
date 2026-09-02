@@ -76,9 +76,10 @@ export function outputReplacementOf(response: HookResponse | undefined): string 
   return replacement ? replacement : undefined;
 }
 
-// Route table: which Pi model API maps to which path under the local gateway.
-// APIs absent here (azure/bedrock/vertex/mistral/codex-responses/…) are
-// unsupported and must never be routed (honesty: no guessed protocol).
+// This route table maps each Pi model API to a path under the local gateway.
+// An API that is not in this table is unsupported, for example azure, bedrock,
+// vertex, mistral, and codex-responses. The extension never routes such an API,
+// because it does not guess a wire protocol.
 export const ROUTES_BY_API: Readonly<Record<string, string>> = {
   "anthropic-messages": "/w/pi",
   "openai-completions": "/w/pi/openai/v1",
@@ -86,7 +87,26 @@ export const ROUTES_BY_API: Readonly<Record<string, string>> = {
   "google-generative-ai": "/w/pi/v1beta",
 };
 
-export function routeForApi(gateway: string, api: string | undefined): string | undefined {
+// OpenCode Go uses the OpenAI and Anthropic wire protocols, but its upstream is
+// not api.openai.com. This provider mount gives the proxy the correct upstream.
+const ROUTES_BY_PROVIDER_API: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  "opencode-go": {
+    "anthropic-messages": "/w/pi/compat/opencode-go",
+    "openai-completions": "/w/pi/compat/opencode-go/v1",
+    "openai-responses": "/w/pi/compat/opencode-go/v1",
+  },
+};
+
+// If the caller gives a provider, this function routes only the providers that the
+// local proxy can resolve. If the caller gives no provider, the function keeps the
+// API-only behavior for existing callers.
+export function routeForApi(gateway: string, api: string | undefined, provider?: string): string | undefined {
+  const providerRoutes = provider ? ROUTES_BY_PROVIDER_API[provider] : undefined;
+  if (provider && providerRoutes) {
+    const path = api ? providerRoutes[api] : undefined;
+    return path ? joinUrl(gateway, path) : undefined;
+  }
+  if (provider && provider !== "anthropic" && provider !== "openai" && provider !== "google") return undefined;
   const path = api ? ROUTES_BY_API[api] : undefined;
   return path ? joinUrl(gateway, path) : undefined;
 }

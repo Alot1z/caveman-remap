@@ -85,7 +85,7 @@ func (c Creds) Resolve(provider string, r *http.Request) providers.Credential {
 func (c Creds) authFallbackEnv(provider string, r *http.Request) string {
 	if provider == "openai_compatible" {
 		if name := compatNameFromPath(r.URL.Path); name != "" {
-			if upstream, ok := c.cfg.Compat[name]; ok {
+			if upstream, ok := c.cfg.CompatUpstreams()[name]; ok {
 				return strings.TrimSpace(upstream.APIKeyEnv)
 			}
 		}
@@ -267,11 +267,13 @@ func (c *engineCompressor) RetrieveOriginal(handle, query string) ([]byte, error
 	return c.eng.RetrieveQuery(handle, query)
 }
 
-// buildAdapters constructs the provider adapters. Anthropic, OpenAI, and Gemini
-// always get sensible public defaults so a bare `caveman start` works. Bedrock's
-// standard Runtime endpoint is derived from the resolved AWS region; operators
-// only need a raw URL for advanced/custom endpoints. Azure, Vertex, and
-// OpenAI-compatible remain opt-in because they have no universal endpoint.
+// buildAdapters makes the provider adapters. Anthropic, OpenAI, and Gemini
+// always get their public default upstream, so a bare `caveman start` works.
+// Bedrock gets the Runtime endpoint of the resolved AWS region. An operator gives
+// a raw Bedrock URL only for a custom endpoint. Azure, Vertex, and the legacy
+// OpenAI-compatible adapter stay opt-in because they have no universal endpoint.
+// The named compat mounts come from Config.CompatUpstreams, which includes the
+// built-in OpenCode Go mount.
 func buildAdapters(cfg config.Config) []providers.Adapter {
 	adapters := []providers.Adapter{
 		anthropic.New(cfg.BaseURL("anthropic", "https://api.anthropic.com")),
@@ -285,17 +287,19 @@ func buildAdapters(cfg config.Config) []providers.Adapter {
 	if u := cfg.BaseURL("vertex", ""); u != "" {
 		adapters = append(adapters, vertex.New(u))
 	}
-	compatNames := make([]string, 0, len(cfg.Compat))
-	for name := range cfg.Compat {
+	compat := cfg.CompatUpstreams()
+	compatNames := make([]string, 0, len(compat))
+	for name := range compat {
 		compatNames = append(compatNames, name)
 	}
 	sort.Strings(compatNames)
 	for _, name := range compatNames {
-		adapter, err := openaicompat.NewNamed(name, cfg.Compat[name].BaseURL)
+		adapter, err := openaicompat.NewNamed(name, compat[name].BaseURL)
 		if err != nil {
-			// Unreachable via config.Load, which pre-validates every compat entry
-			// with the same ValidateName/ValidateBaseURL. Callers constructing a
-			// Config by hand must pass Load-validated compat entries.
+			// This error cannot occur through config.Load, which validates every
+			// compat entry with the same ValidateName and ValidateBaseURL. The
+			// config package tests validate every built-in entry. A caller that
+			// makes a Config by hand must give Load-validated compat entries.
 			panic(err)
 		}
 		adapters = append(adapters, adapter)

@@ -80,10 +80,8 @@ func (s *Server) chatgpt(w http.ResponseWriter, r *http.Request) {
 	var comp *compressionOutcome
 	adapter := openai.New(s.chatGPTUpstream)
 	compressEligible := r.Method == http.MethodPost && rc.RuntimeMode == "compress" && suffix == "/responses" &&
-		// nil body: this decision gates whether the request body is read at all, so
-		// the in-band tool-list arm of mcpRecoveryAvailable cannot run here. The
-		// /chatgpt route exists only for the Codex subscription wrap, which always
-		// sets CAVEMAN_RECOVERY=mcp, so the out-of-band arm answers it.
+		// nil body: this route exists only for subscription wrap, which proves
+		// recovery out of band before starting its dedicated proxy.
 		s.compressor != nil && s.liveZoneCompressionAllowed(adapter, nil) && compiledPlanAllowed
 	if compressEligible {
 		captured, readErr := io.ReadAll(io.LimitReader(r.Body, chatGPTCaptureLimit+1))

@@ -35,7 +35,6 @@ it as MIT adoption surface.
 | `mem/js/` | MIT | Thin JavaScript client for cavemem. |
 | `mem/py/` | MIT | Thin Python client for cavemem. |
 | `engine/` | BSL-1.1 | Core compression IP and CCR. |
-| `cacheengine/` | BSL-1.1 | Provider-native prompt-cache planner and wire engine. |
 | `rewriter/` | BSL-1.1 | Engine-linked reflection rewriter and recovery gates. |
 | `browse/` | BSL-1.1 | Local browser driver; embeds the engine, vendors MIT chromedp modules. |
 | `proxy/` | BSL-1.1 | Standalone gateway and provider adapters. |

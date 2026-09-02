@@ -544,7 +544,7 @@ test("Kilo MCP install is idempotent, marker-owned, upgradeable, and reversible"
       args: [],
       config_path: canonicalTestPath(fx.configPath),
     });
-    withEnv({ HOME: fx.env.HOME, CAVEMAN_HOME: fx.env.CAVEMAN_HOME }, () => {
+    withEnv({ HOME: fx.env.HOME, XDG_CONFIG_HOME: fx.env.XDG_CONFIG_HOME, CAVEMAN_HOME: fx.env.CAVEMAN_HOME }, () => {
       const automatic = JSON.parse(buildWrapEnv(kilo, "http://127.0.0.1:8787", "auto").KILO_CONFIG_CONTENT);
       assert.deepEqual(automatic.mcp.caveman, { type: "local", command: [fx.mcpV1], enabled: true });
       for (const mode of ["marker-only", "off"]) {
@@ -1029,7 +1029,7 @@ test("Kilo MCP refuses user-modified owned entries and keeps marker", async () =
     assert.match(removed.stderr, /changed since Caveman installed it; refusing removal/);
     assert.equal(readFileSync(fx.configPath, "utf8"), modified);
     assert.equal(existsSync(fx.markerPath), true);
-    withEnv({ HOME: fx.env.HOME, CAVEMAN_HOME: fx.env.CAVEMAN_HOME }, () => {
+    withEnv({ HOME: fx.env.HOME, XDG_CONFIG_HOME: fx.env.XDG_CONFIG_HOME, CAVEMAN_HOME: fx.env.CAVEMAN_HOME }, () => {
       const config = JSON.parse(buildWrapEnv(kilo).KILO_CONFIG_CONTENT);
       assert.equal(config.mcp?.caveman, undefined, "changed native entry must invalidate stale marker");
     });
@@ -1054,7 +1054,7 @@ test("Kilo wrap rejects deleted registrations and malformed ownership journals",
           if (mutation === "blank marker command") marker.command = " \t";
           writeFileSync(fx.markerPath, JSON.stringify(marker, null, 2) + "\n");
         }
-        withEnv({ HOME: fx.env.HOME, CAVEMAN_HOME: fx.env.CAVEMAN_HOME }, () => {
+        withEnv({ HOME: fx.env.HOME, XDG_CONFIG_HOME: fx.env.XDG_CONFIG_HOME, CAVEMAN_HOME: fx.env.CAVEMAN_HOME }, () => {
           const config = JSON.parse(buildWrapEnv(kilo).KILO_CONFIG_CONTENT);
           assert.equal(config.mcp?.caveman, undefined);
         });

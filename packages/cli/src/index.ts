@@ -5304,7 +5304,7 @@ async function spawnWrapped(
               );
               proxyReady = await portListening(host, port);
             }
-            runtime = proxyReady ? readProxyRuntimeState(port, proxyVersion) : { owner: "unknown" };
+            runtime = proxyReady ? await awaitProxyRuntimeState(port, proxyVersion) : { owner: "unknown" };
             if (runtime.owner === "unknown" || !proxyRuntimeMatches(runtime, effectiveMode, desiredRecoveryViaMCP)) {
               runtimeState = runtime.owner === "unknown"
                 ? OFF_STATES.foreignProcess(host, port)
@@ -5343,7 +5343,7 @@ async function spawnWrapped(
     }
     proxyReady = await portListening(host, port);
     if (proxyReady && gateApplies) {
-      runtime = readProxyRuntimeState(port, proxyVersion);
+      runtime = proxyStarted ? await awaitProxyRuntimeState(port, proxyVersion) : readProxyRuntimeState(port, proxyVersion);
       if (runtime.owner === "unknown") {
         runtimeState = proxyVersion?.capabilities.includes("run_state")
           ? OFF_STATES.foreignProcess(host, port)
@@ -16770,6 +16770,17 @@ function readProxyRuntimeState(port: number, versionInfo: ReturnType<typeof prob
     };
   } catch {
     return { owner: "unknown" };
+  }
+}
+
+// A proxy caveman just started binds its port before its run state is
+// readable; polling briefly keeps that window from reading as a foreign owner.
+async function awaitProxyRuntimeState(port: number, versionInfo: ReturnType<typeof probeProxyVersion>, timeoutMs = 3000): Promise<ProxyRuntimeState> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const state = readProxyRuntimeState(port, versionInfo);
+    if (state.owner !== "unknown" || Date.now() >= deadline) return state;
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }
 

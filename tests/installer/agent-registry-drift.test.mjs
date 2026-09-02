@@ -73,7 +73,7 @@ function runReporter(t, artifact, { expectedId = profile.id, inputBasename = `${
   };
 }
 
-test("validated drift artifact may call gh only after validation", (t) => {
+test("validated drift artifact may call gh only after validation", { skip: process.platform === "win32" && "gh stub is a sh script; the reporter runs on POSIX CI only" }, (t) => {
   const result = runReporter(t, validDrift());
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.ghCalls, /^issue list/m);
@@ -92,7 +92,7 @@ test("complete matching non-drift artifact performs no gh operation", (t) => {
   assert.equal(result.ghCalls, "");
 });
 
-test("release version outranks matching prerelease", (t) => {
+test("release version outranks matching prerelease", { skip: process.platform === "win32" && "gh stub is a sh script; the reporter runs on POSIX CI only" }, (t) => {
   const prereleaseProfile = registry.agents.find((candidate) => candidate.tested_agent_version.includes("-"));
   if (!prereleaseProfile) throw new Error("prerelease profile pin missing from registry fixture");
   const artifact = validDrift();

@@ -4,10 +4,11 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const { checkProfileScope } = await import(join(root, "agents", "check-profile-scope.mjs"));
+// A bare Windows path is not a valid ESM specifier; go through a file URL.
+const { checkProfileScope } = await import(pathToFileURL(join(root, "agents", "check-profile-scope.mjs")).href);
 
 function fixtureRepo(t) {
   const repo = mkdtempSync(join(tmpdir(), "caveman-profile-scope-"));

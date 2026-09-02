@@ -35,7 +35,12 @@ for (const file of SHIPPABLE_FILES) {
   copyFileSync(join(root, file), targetFile);
 }
 if (target === "firefox") {
-  copyFileSync(join(root, "firefox/manifest.json"), join(stage, "manifest.json"));
+  // Keep the Firefox manifest in lockstep with the shared version source
+  // (package.json == Chrome manifest, validated above) so the two manifests
+  // can never drift apart at pack time.
+  const firefoxManifest = JSON.parse(readFileSync(join(root, "firefox/manifest.json"), "utf8"));
+  firefoxManifest.version = source.manifest.version;
+  writeFileSync(join(stage, "manifest.json"), JSON.stringify(firefoxManifest, null, 2) + "\n");
 }
 verifyExtensionRoot(stage, { exact: true });
 

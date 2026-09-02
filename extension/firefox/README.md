@@ -7,9 +7,11 @@ behaviour is identical to Chrome; only the manifest is Firefox-tuned.
 Differences from the Chrome manifest:
 
 - `browser_specific_settings.gecko.id` (+ `strict_min_version` 121, first stable MV3
-  service-worker support).
-- Icons omit the non-standard 32px key; `background.scripts` is declared alongside the
-  service worker for Firefox's event-page fallback.
+  service-worker support). Firefox requires a stable add-on ID for AMO; the value lives
+  here and must not change once published.
+- Icons omit the non-standard 32px key.
+- Background stays a single MV3 `service_worker` declaration (no dual
+  `service_worker` + `scripts` block — WebExtensions reject both keys together).
 
 ## Load (temporary, local test)
 

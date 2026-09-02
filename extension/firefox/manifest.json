@@ -5,7 +5,7 @@
   "description": "Caveman Mode adds a short instruction to each message you send on ChatGPT, Claude & Gemini, so replies stay compact.",
   "browser_specific_settings": {
     "gecko": {
-      "id": "caveman-mode@outdated-athletically.ru",
+      "id": "caveman-mode@caveman",
       "strict_min_version": "121.0"
     }
   },
@@ -25,8 +25,7 @@
     }
   },
   "background": {
-    "service_worker": "src/background.js",
-    "scripts": ["src/background.js"]
+    "service_worker": "src/background.js"
   },
   "content_scripts": [
     {

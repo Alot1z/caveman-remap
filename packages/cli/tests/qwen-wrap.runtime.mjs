@@ -15,6 +15,10 @@ const qwen = PROFILES.find((profile) => profile.id === "qwen");
 
 assert.ok(qwen, "compiled registry must contain Qwen Code");
 
+function routedQwenArgs(args) {
+  return [...qwen.args, ...args];
+}
+
 function runCli(args, env) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [cli, ...args], { env });
@@ -73,7 +77,19 @@ function qwenFixture() {
   const systemBytes = JSON.stringify({
     general: { enableAutoUpdate: false },
     security: { folderTrust: { enabled: true } },
+    providerProtocol: { openai: "sibling-protocol" },
     modelProviders: { sibling: [{ id: "sibling-model", envKey: "SIBLING_KEY" }] },
+    fastModel: "qwen-oauth-fast",
+    advisorModel: "qwen-oauth-advisor",
+    visionModel: "qwen-oauth-vision",
+    compactionModel: "qwen-oauth-compaction",
+    imageModel: "qwen-oauth-image",
+    voiceModel: "qwen-oauth-voice",
+    disableAllHooks: false,
+    tools: { webSearch: { enabled: true, model: "qwen-oauth-search" } },
+    agents: { builtin: { exploreModel: "qwen-oauth-explore" }, allowedGrades: ["full"] },
+    skills: { disabledLevels: [] },
+    slashCommands: { disabled: [] },
   }, null, 2) + "\n";
   const userBytes = JSON.stringify({
     security: { auth: { selectedType: "qwen-oauth" } },
@@ -94,7 +110,9 @@ process.stdout.write(JSON.stringify({
   argv: process.argv.slice(2),
   config: path ? JSON.parse(readFileSync(path, "utf8")) : null,
   openaiKey: process.env.OPENAI_API_KEY || "",
-  caveKey: process.env.CAVE_API_KEY || ""
+  caveKey: process.env.CAVE_API_KEY || "",
+  webSearchEnabled: process.env.ENABLE_WEB_SEARCH || "",
+  workflowsDisabled: process.env.QWEN_CODE_DISABLE_WORKFLOWS || ""
 }));
 `,
     { mode: 0o755 },
@@ -243,9 +261,9 @@ function writePendingMcpUninstall(agent, markerPath, configPath, configBefore, c
   writePendingCopies(markerPath, configPath, journal);
 }
 
-test("Qwen profile uses high-precedence system settings without static model args", () => {
+test("Qwen profile uses high-precedence system settings with a bounded extension guard", () => {
   assert.deepEqual(qwen.binary_names, ["qwen"]);
-  assert.deepEqual(qwen.args, []);
+  assert.deepEqual(qwen.args, ["--extensions=none"]);
   assert.equal(qwen.tested_agent_version, "0.22.3");
   assert.equal(qwen.install, "npm i -g @qwen-code/qwen-code@0.22.3");
   assert.equal(qwen.injection.method, "config-file");
@@ -255,10 +273,29 @@ test("Qwen profile uses high-precedence system settings without static model arg
     assert.equal(overlay.security.auth.selectedType, "openai");
     assert.equal(overlay.security.auth.enforcedType, "openai");
     assert.equal(overlay.modelFallbacks, "");
+    assert.deepEqual(overlay.providerProtocol, {});
+    assert.equal(overlay.model.baseUrl, "{{cave_base_url}}/v1");
+    assert.equal(overlay.fastModel, "");
+    assert.equal(overlay.advisorModel, "");
+    assert.equal(overlay.visionModel, "");
+    assert.equal(overlay.compactionModel, "");
+    assert.equal(overlay.imageModel, "");
+    assert.equal(overlay.voiceModel, "");
+    assert.equal(overlay.disableAllHooks, true);
+    assert.deepEqual(overlay.tools.webSearch, { enabled: false, model: "" });
+    assert.equal(overlay.tools.workflowsEnabled, false);
+    assert.deepEqual(overlay.tools.disabled, ["agent", "skill", "web_search", "create_sub_session", "workflow"]);
+    assert.deepEqual(overlay.agents, { builtin: { exploreModel: "inherit" }, allowedGrades: [] });
+    assert.deepEqual(overlay.permissions.deny, ["Agent", "Skill", "WebSearch", "CreateSubSession", "Workflow"]);
+    assert.deepEqual(overlay.skills.disabledLevels, ["project", "user", "extension", "bundled"]);
+    assert.deepEqual(overlay.experimental.liveVoice, { enabled: false, apiKey: "", model: "" });
+    for (const command of ["auth", "model", "arena", "agents", "workflows", "permissions", "extensions", "reload-plugins", "mcp", "resume", "continue", "hooks"]) {
+      assert.ok(overlay.slashCommands.disabled.includes(command), command);
+    }
   }
 });
 
-test("local Qwen config preserves system policy and keeps secrets out of temp JSON", () => {
+test("local Qwen config preserves non-routing system policy and strips alternate routes", () => {
   const fx = qwenFixture();
   try {
     withEnv({
@@ -275,8 +312,23 @@ test("local Qwen config preserves system policy and keeps secrets out of temp JS
       assert.equal(injected.config.security.auth.selectedType, "openai");
       assert.equal(injected.config.security.auth.enforcedType, "openai");
       assert.equal(injected.config.modelFallbacks, "");
-      assert.deepEqual(injected.config.modelProviders.sibling, [{ id: "sibling-model", envKey: "SIBLING_KEY" }]);
+      assert.equal(injected.config.modelProviders.sibling, undefined);
+      assert.deepEqual(injected.config.providerProtocol, {});
       assert.equal(injected.config.model.name, "gpt-5.5");
+      assert.equal(injected.config.model.baseUrl, "http://127.0.0.1:8787/w/qwen/v1");
+      assert.equal(injected.config.fastModel, "");
+      assert.equal(injected.config.advisorModel, "");
+      assert.equal(injected.config.visionModel, "");
+      assert.equal(injected.config.compactionModel, "");
+      assert.equal(injected.config.imageModel, "");
+      assert.equal(injected.config.voiceModel, "");
+      assert.equal(injected.config.disableAllHooks, true);
+      assert.deepEqual(injected.config.tools.webSearch, { enabled: false, model: "" });
+      assert.equal(injected.config.tools.workflowsEnabled, false);
+      assert.deepEqual(injected.config.tools.disabled, ["agent", "skill", "web_search", "create_sub_session", "workflow"]);
+      assert.deepEqual(injected.config.agents, { builtin: { exploreModel: "inherit" }, allowedGrades: [] });
+      assert.deepEqual(injected.config.skills.disabledLevels, ["project", "user", "extension", "bundled"]);
+      assert.deepEqual(injected.config.experimental.liveVoice, { enabled: false, apiKey: "", model: "" });
       assert.deepEqual(injected.config.modelProviders.openai.map((model) => model.id), ["gpt-5.5", "gpt-5.4-mini"]);
       for (const model of injected.config.modelProviders.openai) {
         assert.equal(model.envKey, "OPENAI_API_KEY");
@@ -863,11 +915,13 @@ test("caveman qwen passes user args and never mutates Qwen settings", async () =
     });
     assert.equal(out.code, 0, `exit ${out.code}/${out.signal}: ${out.stderr}`);
     const child = JSON.parse(out.stdout);
-    assert.deepEqual(child.argv, ["--model", "gpt-5.4-mini", "-p", "review this"]);
+    assert.deepEqual(child.argv, routedQwenArgs(["--model", "gpt-5.4-mini", "-p", "review this"]));
     assert.equal(child.openaiKey, "sk-qwen-upstream-test");
     assert.equal(child.caveKey, "");
     assert.equal(child.config.model.name, "gpt-5.5");
     assert.equal(child.config.modelProviders.openai[0].baseUrl, "http://127.0.0.1:8787/w/qwen/v1");
+    assert.equal(child.webSearchEnabled, "0");
+    assert.equal(child.workflowsDisabled, "1");
     assert.equal(readFileSync(fx.systemConfig, "utf8"), fx.systemBytes);
     assert.equal(readFileSync(fx.userConfig, "utf8"), fx.userBytes);
   } finally {
@@ -889,6 +943,7 @@ test("Qwen route guard accepts only profile-backed CLI selectors", async (t) => 
     { name: "camel OpenAI auth", args: ["--authType=openai", "-p", "hello"] },
     { name: "explicit modes off", args: ["--safe-mode=false", "--bare=false", "-p", "hello"] },
     { name: "negated modes", args: ["--no-safeMode", "--no-bare", "-p", "hello"] },
+    { name: "experimental surfaces off", args: ["--acp=false", "--experimental-skills=false", "-p", "hello"] },
     { name: "separator", args: ["-p", "hello", "--", "--model", "outside-wrapper-parser"] },
   ];
   for (const fixture of routed) {
@@ -898,7 +953,7 @@ test("Qwen route guard accepts only profile-backed CLI selectors", async (t) => 
         const out = await runCli(["qwen", ...fixture.args], { ...fx.env, CAVEMAN_OFFLINE: "1" });
         assert.equal(out.code, 0, out.stderr);
         const child = JSON.parse(out.stdout);
-        assert.deepEqual(child.argv, fixture.args);
+        assert.deepEqual(child.argv, routedQwenArgs(fixture.args));
         assert.equal(child.config.security.auth.enforcedType, "openai");
         assert.equal(child.config.modelFallbacks, "");
         assert.equal(child.config.modelProviders.openai[0].baseUrl, "http://127.0.0.1:8787/w/qwen/v1");
@@ -934,6 +989,32 @@ test("Qwen route guard launches direct for bypassing or ambiguous selectors", as
     { name: "bare token after separator", surface: "--bare", args: ["-p", "hello", "--", "--bare"] },
     { name: "safe mode environment", surface: "--safe-mode", args: ["-p", "hello"], env: { QWEN_CODE_SAFE_MODE: "yes" } },
     { name: "bare environment defeats CLI false", surface: "--bare", args: ["--bare=false", "-p", "hello"], env: { QWEN_CODE_SIMPLE: "on" } },
+    { name: "extension value", surface: "--extensions", args: ["--extensions", "foreign", "-p", "hello"] },
+    { name: "extension equals", surface: "--extensions", args: ["--extensions=foreign", "-p", "hello"] },
+    { name: "extension short equals", surface: "--extensions", args: ["-e=foreign", "-p", "hello"] },
+    { name: "extension compact short", surface: "--extensions", args: ["-eforeign", "-p", "hello"] },
+    { name: "extension short cluster", surface: "--extensions", args: ["-de", "foreign", "-p", "hello"] },
+    { name: "repeated extension lock", surface: "--extensions", args: ["--extensions=none", "-p", "hello"] },
+    { name: "ACP", surface: "--acp", args: ["--acp", "-p", "hello"] },
+    { name: "experimental ACP", surface: "--experimental-acp", args: ["--experimental-acp=true", "-p", "hello"] },
+    { name: "experimental skills", surface: "--experimental-skills", args: ["--experimental-skills", "-p", "hello"] },
+    { name: "extension listing", surface: "control mode", args: ["--list-extensions"] },
+    { name: "extension listing short", surface: "control mode", args: ["-l"] },
+    { name: "extension listing short cluster", surface: "control mode", args: ["-dl"] },
+    { name: "channel mode", surface: "control mode", args: ["--channel", "stdio"] },
+    { name: "serve command", surface: "serve", args: ["serve"] },
+    { name: "option-prefixed serve command", surface: "serve", args: ["--debug", "serve"] },
+    { name: "review command", surface: "review", args: ["review", "run"] },
+    { name: "continue latest session", surface: "session restore", args: ["--continue", "-p", "hello"] },
+    { name: "continue latest session short", surface: "session restore", args: ["-c", "-p", "hello"] },
+    { name: "continue latest session short cluster", surface: "session restore", args: ["-dc", "-p", "hello"] },
+    { name: "resume session", surface: "session restore", args: ["--resume", "session-id", "-p", "hello"] },
+    { name: "resume session equals", surface: "session restore", args: ["--resume=session-id", "-p", "hello"] },
+    { name: "resume session short", surface: "session restore", args: ["-r", "session-id", "-p", "hello"] },
+    { name: "resume session compact short", surface: "session restore", args: ["-rsession-id", "-p", "hello"] },
+    { name: "resume session short cluster", surface: "session restore", args: ["-drsession-id", "-p", "hello"] },
+    { name: "fork restored session", surface: "session restore", args: ["--fork-session", "-p", "hello"] },
+    { name: "fork restored session camel", surface: "session restore", args: ["--forkSession=true", "-p", "hello"] },
   ];
   for (const fixture of direct) {
     await t.test(fixture.name, async () => {
@@ -992,6 +1073,57 @@ test("Qwen direct selector bypass starts no proxy and buildWrapEnv fails closed"
     });
   } finally {
     fx.cleanup();
+  }
+});
+
+test("Qwen enforced auth policy conflicts launch direct without profile injection", async (t) => {
+  for (const fixture of [
+    { name: "foreign provider", enforcedType: "qwen-oauth" },
+    { name: "malformed provider", enforcedType: { provider: "openai" } },
+  ]) {
+    await t.test(fixture.name, async () => {
+      const fx = qwenFixture();
+      const proxy = join(fx.root, "caveman-proxy-sentinel");
+      const sentinel = join(fx.root, "proxy-was-started");
+      try {
+        const system = JSON.parse(fx.systemBytes);
+        system.security.auth = { enforcedType: fixture.enforcedType };
+        writeFileSync(fx.systemConfig, JSON.stringify(system, null, 2) + "\n");
+        writeFileSync(join(fx.env.HOME, ".caveman-cloud", "config.json"), JSON.stringify({
+          wrap: { proxy: true, shrink: false, mcp: false, browse: false },
+        }));
+        writeFileSync(proxy, `#!/bin/sh\nprintf invoked > ${JSON.stringify(sentinel)}\nexit 1\n`, { mode: 0o755 });
+
+        const args = ["-p", "hello"];
+        const out = await runCli(["qwen", ...args], {
+          ...fx.env,
+          CAVEMAN_OFFLINE: "1",
+          CAVEMAN_PROXY_BIN: proxy,
+        });
+        assert.equal(out.code, 0, out.stderr);
+        const child = JSON.parse(out.stdout);
+        assert.deepEqual(child.argv, args);
+        assert.deepEqual(child.config.security.auth.enforcedType, fixture.enforcedType);
+        assert.equal(child.config.modelProviders.openai, undefined);
+        assert.equal(child.webSearchEnabled, "");
+        assert.equal(child.workflowsDisabled, "");
+        assert.equal(existsSync(sentinel), false);
+        assert.match(out.stderr, /Qwen enforced auth policy requires a provider outside Caveman's routed profile; launching directly/);
+
+        withEnv({
+          HOME: fx.env.HOME,
+          CAVEMAN_HOME: fx.env.CAVEMAN_HOME,
+          QWEN_CODE_SYSTEM_SETTINGS_PATH: fx.systemConfig,
+        }, () => {
+          assert.throws(
+            () => buildWrapEnv(qwen, "http://127.0.0.1:8787", "auto", qwen.args),
+            /Qwen enforced auth policy requires a provider outside Caveman's routed profile/,
+          );
+        });
+      } finally {
+        fx.cleanup();
+      }
+    });
   }
 });
 

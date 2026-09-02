@@ -350,6 +350,11 @@ test("Kilo route guard launches direct for model and attach bypasses", async (t)
     { name: "cloud after spaced command boolean", surface: "cloud", args: ["--stream", "false", "cloud", "start"] },
     { name: "roll call", surface: "roll-call", args: ["roll-call", "gpt"] },
     { name: "roll call after spaced boolean", surface: "roll-call", args: ["--verbose", "false", "roll-call", "gpt"] },
+    { name: "daemon", surface: "daemon", args: ["daemon"] },
+    { name: "daemon start", surface: "daemon", args: ["daemon", "start"] },
+    { name: "daemon restart after valued global", surface: "daemon", args: ["--log-level", "INFO", "daemon", "restart"] },
+    { name: "console", surface: "console", args: ["console"] },
+    { name: "console after spaced boolean", surface: "console", args: ["--print-logs", "false", "console"] },
     { name: "unknown option arity", surface: "arguments", args: ["--future-option", "run", "cloud", "start"] },
   ];
   for (const fixture of fixtures) {
@@ -476,6 +481,10 @@ test("Kilo route guard fails closed when called through buildWrapEnv", () => {
   assert.throws(
     () => buildWrapEnv(kilo, "http://127.0.0.1:8787", "auto", ["attach", "https:\/\/remote.example\/session"]),
     /Kilo attach uses another server's provider route/,
+  );
+  assert.throws(
+    () => buildWrapEnv(kilo, "http://127.0.0.1:8787", "auto", ["daemon", "start"]),
+    /Kilo daemon can outlive Caveman's wrap session/,
   );
 });
 

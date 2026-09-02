@@ -2014,8 +2014,10 @@ async function start(argv: string[] = []) {
   const subscriptionCompress = subscriptionCompressEnabled(startGate);
   // A bare proxy has no active-agent identity, so it cannot prove that whichever
   // subscription client arrives owns a compatible recovery tool. Keep the global
-  // recovery signal off; only `caveman wrap <agent>` can bind recovery to a checked
-  // agent profile. Inherited environment claims never cross this boundary.
+  // recovery signal off; `caveman wrap <agent>` binds recovery to a checked agent
+  // profile out of band, and for every other client the proxy reads the retrieve
+  // tool out of the request itself. Inherited environment claims never cross this
+  // boundary.
   const mcpRecovery = startMcpRecoveryAvailable();
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -2036,8 +2038,11 @@ async function start(argv: string[] = []) {
   env.CAVE_ENGINE_TOON = runtime.mode === "compress" && runtime.toon ? "best-of" : "";
   env.CAVE_PIXEL_MODELS = runtime.pixelModels ?? "";
   env.CAVE_PIXEL_DENSITY = runtime.pixelDensity ?? "";
-  if (subscriptionCompress && mcpRecovery) {
-    process.stderr.write(dim("→ subscription logins (Claude Pro/Max) compress locally too — live zone only; compressed turns are re-sent byte-identically so the provider cache stays warm\n"));
+  if (subscriptionCompress && anyMcpInstalled()) {
+    // A bare proxy serves whichever client connects, so this door can only promise
+    // compression for the sessions that bring the retrieve tool with them. Naming
+    // that condition is the difference between a claim and a guarantee.
+    process.stderr.write(dim("→ subscription logins (Claude Pro/Max) compress locally too, for sessions whose agent carries caveman_retrieve — live zone only; compressed turns are re-sent byte-identically so the provider cache stays warm\n"));
     process.stderr.write(dim(`→ ${SUBSCRIPTION_TOKENS_ONLY_NOTE}\n`));
   } else if (subscriptionCompress) {
     // Deliberately NOT the marker-only variant. That note's remedy is
@@ -4958,7 +4963,8 @@ function wrapUsage(stream: "stdout" | "stderr" = "stderr") {
   write(`Capability groups: think / remember / execute — inspect with \`${invokedAs()} tools config get\`.`);
   write("Auth passes through untouched: API keys AND subscription OAuth logins (Claude Pro/Max) both work.");
   write("Subscription logins compress locally too, no account needed (live zone only — compressed turns are re-sent byte-identically so the provider cache stays warm;");
-  write("needs MCP recovery; Claude/Codex wrap provide it ephemerally when caveman-mcp is available). Subscription savings are reported in tokens, never dollars. An account adds the dashboard, not compression.");
+  write("needs MCP recovery; Claude/Codex wrap provide it ephemerally when caveman-mcp is available, and any session that carries caveman_retrieve itself — `caveman mcp install <agent>` — proves it per request).");
+  write("Subscription savings are reported in tokens, never dollars. An account adds the dashboard, not compression.");
 }
 
 function normalizeAgentShortcutWrapArgs(input: string[]): string[] {
@@ -5444,6 +5450,13 @@ async function spawnWrapped(
     env = { ...process.env };
     childArgs = cmdArgs;
     process.stderr.write(`${mark("warn")} temporary native pack unavailable: ${(error as Error).message}; launching ${agent?.display_name ?? bin} directly\n`);
+  }
+  // Profile args are routing injection too. Qwen's extension lock must never
+  // leak into a launch we explicitly classified as direct; preserve only the
+  // user's argv on every bypass and native-pack failure path.
+  if (direct && agent?.id === "qwen"
+    && agent.args.every((arg, index) => childArgs[index] === arg)) {
+    childArgs = childArgs.slice(agent.args.length);
   }
   if (!direct && agent?.id === "claude") Object.assign(env, claudeCaveBuildEnv());
   if (!direct) maybeWarnHermesMissingKey(agent, gw);
@@ -8676,8 +8689,18 @@ function applyConfigFileInjection(env: NodeJS.ProcessEnv, agent: AgentProfile, i
       });
     }
   }
-  const overlay = mcpMode === "auto" ? rawOverlay : withoutCavemanMcpServer(rawOverlay as JsonObject);
-  const merged = deepMerge(baseConfig, overlay);
+  const overlay = (mcpMode === "auto" ? rawOverlay : withoutCavemanMcpServer(rawOverlay as JsonObject)) as JsonObject;
+  const merged = deepMerge(baseConfig, overlay) as JsonObject;
+  if (agent.id === "qwen") {
+    // Qwen treats these as whole-object REPLACE settings. Our generic merge is
+    // intentionally conservative for other agents, but retaining a sibling
+    // provider here would make it selectable at runtime outside /w/qwen.
+    for (const key of ["modelProviders", "providerProtocol"] as const) {
+      const value = overlay[key];
+      if (value === undefined) throw new Error(`Qwen routed profile is missing ${key}`);
+      merged[key] = cloneJsonValue(value);
+    }
+  }
   const rendered = JSON.stringify(merged, null, 2);
   if (rendered === undefined) throw new Error("merged config is not JSON");
   const outDir = mkdtempSync(join(tmpdir(), "caveman-wrap-"));
@@ -8852,6 +8875,11 @@ export function buildWrapEnv(agent?: AgentProfile, gw = gatewayURL(), mcpMode: M
     if (override?.surface === "--safe-mode" && override.reason === "ignores Caveman system settings") {
       throw new Error("Qwen safe mode ignores Caveman system settings");
     }
+    // These environment switches outrank settings in pinned Qwen 0.22.3.
+    // Keep side-request tools and workflow-spawned agents off in routed mode;
+    // corresponding system settings provide the durable second lock.
+    env.ENABLE_WEB_SEARCH = "0";
+    env.QWEN_CODE_DISABLE_WORKFLOWS = "1";
   }
   if (routeOverride) throw new Error(`${routeOverrideLabel(agent)} ${routeOverride.surface} ${routeOverride.reason}`);
   const inj = agent.injection;
@@ -10167,10 +10195,21 @@ function wrapMcpRecoveryAvailable(agent: AgentProfile | undefined, opts: WrapOpt
 }
 
 // Bare start cannot bind a machine-level MCP marker or inherited opt-in to the
-// client issuing a later request. Recovery therefore stays off. Agent-scoped wrap
-// performs the only supported compatibility check.
+// client issuing a later request, so it never CLAIMS recovery on their behalf:
+// CAVEMAN_RECOVERY stays off and the proxy decides per request, from the caveman
+// retrieve tool the caller's own tool list carries (gateway.mcpRecoveryAvailable).
+// Agent-scoped wrap performs the only supported out-of-band compatibility check.
 function startMcpRecoveryAvailable(): boolean {
   return false;
+}
+
+// anyMcpInstalled is what a bare proxy CAN honestly report: whether any agent on
+// this machine has the caveman retrieve tool installed at all. With none, every
+// subscription and streaming turn that reaches this proxy passes through, whichever
+// agent sends it — and `caveman mcp install <agent>` is the remedy that changes it,
+// because the tool it installs then travels in the agent's own requests.
+function anyMcpInstalled(): boolean {
+  return AGENTS.some((agent) => mcpInstalled(agent.id));
 }
 
 // resolveMcpCommand decides how to launch the caveman MCP server, in order:
@@ -11576,6 +11615,9 @@ function kiloRouteOverride(agent: AgentProfile, args: string[]): AgentRouteOverr
       if (command === "cloud" || command === "roll-call") {
         return { surface: command, reason: "runs outside Kilo's local single-model route" };
       }
+      if (command === "daemon" || command === "console") {
+        return { surface: command, reason: "can outlive Caveman's wrap session" };
+      }
     }
   }
   if (modelOccurrences > 1) return { surface: "--model", reason: "is repeated or malformed" };
@@ -11633,7 +11675,105 @@ function qwenBooleanArg(
 // auth flags, while safe/bare modes can discard it entirely. Parse the pinned
 // 0.22.3 spellings before proxy startup. Ambiguous or repeated selectors launch
 // direct: preserving the user's argv is safer than claiming traffic was routed.
+function qwenShortOptionLetters(arg: string): Set<string> {
+  if (!arg.startsWith("-") || arg.startsWith("--") || arg.length < 2) return new Set();
+  const letters = new Set<string>();
+  // yargs expands boolean clusters left-to-right, but these aliases consume the
+  // remaining suffix as their value. Do not mistake model/prompt text for flags.
+  const takesValue = new Set(["e", "i", "m", "o", "p", "r"]);
+  for (const letter of arg.slice(1).split("=", 1)[0]!) {
+    letters.add(letter);
+    if (takesValue.has(letter)) break;
+  }
+  return letters;
+}
+
+function qwenExtensionRouteOverride(args: string[]): AgentRouteOverride | null {
+  let confined = 0;
+  for (const arg of args) {
+    if (arg === "--extensions=none") {
+      confined++;
+      continue;
+    }
+    if (arg === "--extensions" || arg === "-e" || arg.startsWith("--extensions=") || arg.startsWith("-e")
+      || qwenShortOptionLetters(arg).has("e")) {
+      return { surface: "--extensions", reason: "can load model-routing code outside Caveman's locked session" };
+    }
+  }
+  return confined > 1
+    ? { surface: "--extensions", reason: "is repeated or ambiguous" }
+    : null;
+}
+
+function qwenControlSurfaceOverride(args: string[]): AgentRouteOverride | null {
+  for (const arg of args) {
+    if (arg === "--") break;
+    const shortOptions = qwenShortOptionLetters(arg);
+    if (arg === "--continue" || arg.startsWith("--continue=") || shortOptions.has("c")
+      || arg === "--resume" || arg.startsWith("--resume=") || shortOptions.has("r")
+      || arg === "--fork-session" || arg.startsWith("--fork-session=")
+      || arg === "--forkSession" || arg.startsWith("--forkSession=")) {
+      return { surface: "session restore", reason: "can reactivate a recorded provider route outside Caveman's locked session" };
+    }
+  }
+  const directFlags = ["--acp", "--experimental-acp", "--experimental-skills"] as const;
+  for (let index = 0; index < args.length; index++) {
+    const match = qwenBooleanArg(args, index, directFlags, []);
+    if (!match.matched) continue;
+    if (match.malformed || match.value === true) {
+      return { surface: args[index]!.split("=", 1)[0]!, reason: "exposes runtime model selection outside Caveman's locked session" };
+    }
+    index += match.consumed;
+  }
+  if (args.some((arg) => {
+    return arg === "--list-extensions" || qwenShortOptionLetters(arg).has("l") || arg.startsWith("--channel=") || arg === "--channel";
+  })) {
+    return { surface: "control mode", reason: "does not run one confined Qwen model session" };
+  }
+
+  const controlCommands = new Set(["auth", "channel", "extensions", "hooks", "mcp", "review", "serve", "sessions", "update"]);
+  const booleanOptions = new Set([
+    "--telemetry", "--debug", "--bare", "--safe-mode", "--insecure", "--chat-recording",
+    "--sandbox", "--yolo", "--experimental-lsp", "--restore-ask-user-question",
+    "--screen-reader", "--include-partial-messages", "--continue", "--fork-session", "--worktree",
+    "-s", "-c", "-v", "--version", "-h", "--help",
+  ]);
+  const valueOptions = new Set([
+    "--telemetry-target", "--telemetry-otlp-endpoint", "--telemetry-otlp-protocol", "--telemetry-log-prompts",
+    "--telemetry-outfile", "--proxy", "--model", "-m", "--prompt", "-p", "--prompt-interactive", "-i",
+    "--system-prompt", "--append-system-prompt", "--sandbox-image", "--approval-mode", "--allowed-mcp-server-names",
+    "--mcp-config", "--allowed-tools", "--include-directories", "--openai-logging", "--openai-logging-dir",
+    "--openai-api-key", "--openai-base-url", "--input-format", "--output-format", "-o", "--json-fd",
+    "--json-file", "--json-schema", "--input-file", "--resume", "-r", "--session-id", "--sandbox-session-id",
+    "--max-session-turns", "--max-wall-time", "--max-tool-calls", "--max-subagent-depth", "--core-tools",
+    "--exclude-tools", "--disabled-slash-commands", "--auth-type",
+  ]);
+  const routedArgs = args.filter((arg) => arg !== "--extensions=none");
+  for (let index = 0; index < routedArgs.length; index++) {
+    const arg = routedArgs[index]!;
+    if (arg === "--") break;
+    if (arg.startsWith("--") && arg.includes("=")) continue;
+    if (booleanOptions.has(arg)) {
+      if (routedArgs[index + 1] === "true" || routedArgs[index + 1] === "false") index++;
+      continue;
+    }
+    if (valueOptions.has(arg)) {
+      if (routedArgs[index + 1] !== undefined) index++;
+      continue;
+    }
+    if (arg.startsWith("-")) continue;
+    return controlCommands.has(arg)
+      ? { surface: arg, reason: "is a Qwen control command, not one confined model session" }
+      : null;
+  }
+  return null;
+}
+
 function qwenRouteOverride(agent: AgentProfile, args: string[]): AgentRouteOverride | null {
+  const extensionOverride = qwenExtensionRouteOverride(args);
+  if (extensionOverride) return extensionOverride;
+  const controlOverride = qwenControlSurfaceOverride(args);
+  if (controlOverride) return controlOverride;
   // Qwen 0.22.3 checks raw process.argv before yargs and forces SIMPLE mode
   // whenever this exact token occurs, even after `--` or beside `false`.
   if (args.includes("--bare")) return { surface: "--bare", reason: "ignores Caveman system settings" };
@@ -11753,6 +11893,12 @@ function qwenRouteOverride(agent: AgentProfile, args: string[]): AgentRouteOverr
 
   const layers = qwenSettingsLayers();
   if (!layers) return { surface: "effective settings", reason: "cannot be resolved safely" };
+  for (const layer of layers) {
+    const enforcedType = jsonValueAt(layer, ["security", "auth", "enforcedType"]);
+    if (enforcedType !== undefined && enforcedType !== "openai") {
+      return { surface: "enforced auth policy", reason: "requires a provider outside Caveman's routed profile" };
+    }
+  }
   const safeEnv = qwenEffectiveEnvValue(layers, "QWEN_CODE_SAFE_MODE");
   const bareEnv = qwenEffectiveEnvValue(layers, "QWEN_CODE_SIMPLE");
   if (safeEnv === null || bareEnv === null) return { surface: "effective settings", reason: "cannot be resolved safely" };
@@ -16606,7 +16752,7 @@ async function status(argv: string[]) {
   const mcpCompatibility = probeMcpBinary();
   if (mcpCompatibility && !mcpCompatibility.probe.current) {
     states.push(OFF_STATES.staleBinary("caveman-mcp", mcpCompatibility.probe.version, cliVersion()));
-  } else if (!startMcpRecoveryAvailable()) {
+  } else if (!anyMcpInstalled()) {
     states.push(fixedOffState(
       "mcp-missing",
       mcpSurfaceMode(resolution.values["execute.mcp"].value) === "marker-only"

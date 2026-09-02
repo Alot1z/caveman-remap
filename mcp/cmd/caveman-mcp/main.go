@@ -1,7 +1,10 @@
-// Command caveman-mcp is the Caveman MCP server over stdio. An MCP host (Claude
-// Code, Cursor, …) spawns it and speaks JSON-RPC on stdin/stdout; the three
-// caveman_* tools wrap the Caveman Engine. Logs go to stderr only — stdout
-// is the protocol channel.
+// Command caveman-mcp is the Caveman MCP server. The default transport is
+// stdio — an MCP host (Claude Code, Cursor, …) spawns it and speaks JSON-RPC on
+// stdin/stdout. With `-http <addr>` it serves the SAME server over the MCP
+// streamable-HTTP transport on the given address (e.g. `-http :8080`), so a
+// remote host can reach the caveman_* tools without a parallel Node server
+// (upstream review #934: the Go binary is the architectural owner of MCP). Logs
+// go to stderr only — stdout is the protocol channel on stdio.
 //
 // By default it opens the SHARED file recovery store (CAVEMAN_CCR_DB, else
 // ~/.caveman/ccr.db) — the same store the Caveman gateway writes — so a
@@ -25,7 +28,8 @@ import (
 var version = "dev"
 
 func main() {
-	if handled, code := handleArgs(os.Args[1:], os.Stdout, os.Stderr); handled {
+	rest, addr, wantHTTP := splitHTTPFlag(os.Args[1:])
+	if handled, code := handleArgs(rest, os.Stdout, os.Stderr); handled {
 		os.Exit(code)
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -39,10 +43,44 @@ func main() {
 
 	eng := engine.New(store, nil)
 	srv := mcp.NewServerVersion("caveman", version, mcp.EngineTools(eng, logger), logger)
+
+	if wantHTTP {
+		logger.Info("serving MCP over streamable HTTP", "addr", addr)
+		if err := srv.StartHTTP(addr); err != nil {
+			logger.Error("http serve", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := srv.Serve(os.Stdin, os.Stdout); err != nil {
 		logger.Error("serve", "err", err)
 		os.Exit(1)
 	}
+}
+
+// splitHTTPFlag scans args once for `-http [addr]`, returning the remaining
+// args (the flag and its address removed) and the address to serve. A bare
+// `-http` (no following arg) defaults to a loopback address; when the flag is
+// absent, args is returned unchanged. The first `-http` wins the address; every
+// `-http` pair is removed so handleArgs only ever sees what it understands.
+func splitHTTPFlag(args []string) (rest []string, addr string, wantHTTP bool) {
+	rest = make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-http" {
+			if !wantHTTP {
+				if i+1 < len(args) {
+					addr = args[i+1]
+				} else {
+					addr = "127.0.0.1:8931"
+				}
+				wantHTTP = true
+			}
+			i++ // skip the flag's address
+			continue
+		}
+		rest = append(rest, args[i])
+	}
+	return rest, addr, wantHTTP
 }
 
 func handleArgs(args []string, stdout, stderr io.Writer) (bool, int) {
@@ -53,14 +91,14 @@ func handleArgs(args []string, stdout, stderr io.Writer) (bool, int) {
 		err := json.NewEncoder(stdout).Encode(map[string]any{
 			"version":      version,
 			"schema":       "caveman.mcp.version.v1",
-			"capabilities": []string{"mcp_recovery", "build_stamped_version"},
+			"capabilities": []string{"mcp_recovery", "build_stamped_version", "http_transport"},
 		})
 		if err != nil {
 			return true, 1
 		}
 		return true, 0
 	}
-	_, _ = io.WriteString(stderr, "usage: caveman-mcp [version --json]\n")
+	_, _ = io.WriteString(stderr, "usage: caveman-mcp [version --json | -http <addr>]\n")
 	return true, 2
 }
 

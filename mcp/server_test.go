@@ -545,6 +545,13 @@ func TestZeroEgressNoNetworkImports(t *testing.T) {
 			if !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
 				continue
 			}
+			// http_transport.go is the explicit, opt-in HTTP surface behind the
+			// `-http` flag; it is the ONE file allowed to import net/http. The
+			// stdio path (Serve) never touches it, so the egress guarantee for
+			// the default adapter is unchanged.
+			if e.Name() == "http_transport.go" {
+				continue
+			}
 			f, err := parser.ParseFile(fset, filepath.Join(dir, e.Name()), nil, parser.ImportsOnly)
 			if err != nil {
 				t.Fatalf("parse %s: %v", e.Name(), err)

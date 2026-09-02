@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"time"
 )
 
 // Handler runs one tool call. It receives the raw JSON `arguments` and returns a
@@ -66,6 +67,10 @@ type Server struct {
 	version         string
 	maxInboundBytes int
 	maxResultBytes  int
+	// heartbeat is the SSE keep-alive interval for the HTTP transport. The
+	// 2025-06-18 spec allows heartbeats at any cadence; 15s keeps proxies and
+	// clients from treating an idle stream as dead. Tests shorten it.
+	heartbeat time.Duration
 }
 
 // NewServer builds a server over the given ordered tool set. log must write to
@@ -93,7 +98,7 @@ func NewServerVersion(name, version string, tools []Tool, log *slog.Logger) *Ser
 			exempt[t.Name] = true
 		}
 	}
-	return &Server{
+	s := &Server{
 		tools:           tools,
 		index:           idx,
 		capExempt:       exempt,
@@ -102,7 +107,9 @@ func NewServerVersion(name, version string, tools []Tool, log *slog.Logger) *Ser
 		version:         version,
 		maxInboundBytes: defaultMaxInboundBytes,
 		maxResultBytes:  defaultMaxResultBytes,
+		heartbeat:       15 * time.Second,
 	}
+	return s
 }
 
 // Serve runs the JSON-RPC loop until in reaches EOF. Framing is line-delimited

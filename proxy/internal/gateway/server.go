@@ -434,7 +434,7 @@ type Config struct {
 	// toolSchemaStripAllowed).
 	ToolSchemaStrip string
 	// BreakpointPlan enables the cache-breakpoint planner when it is exactly
-	// "frontier". It is default OFF (see breakpointPlanAllowed).
+	// "frontier", which the config loader defaults to (see breakpointPlanAllowed).
 	BreakpointPlan string
 	HTTPClient     *http.Client
 	// SessionMarkerKey validates local native-hook correlation markers. Valid

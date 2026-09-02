@@ -407,8 +407,14 @@ test("foreign listener is never signalled and forces a direct launch", async (t)
   const home = join(dir, "home");
   const binDir = join(dir, "bin");
   const signalFile = join(dir, "signalled");
+  const envFile = join(dir, "agent-env");
   mkdirSync(binDir, { recursive: true });
-  writeAgent(binDir);
+  // The agent records the base URL it was launched with, so the test can prove
+  // the direct fallback stripped caveman's route (#945).
+  writeFileSync(join(binDir, "agent"), `#!/usr/bin/env node
+require("node:fs").writeFileSync(${JSON.stringify(envFile)}, process.env.ANTHROPIC_BASE_URL || "");
+setTimeout(() => process.exit(0), 80);
+`, { mode: 0o755 });
   writeEntitledConfig(home);
   const port = await freePort();
   const listener = spawn(process.execPath, ["-e", `
@@ -425,7 +431,8 @@ process.exit(0);
 `, { mode: 0o755 });
   try {
     const out = await runCli(cli, ["wrap", "agent"], {
-      env: baseEnv(home, binDir, port, fakeProxy),
+      // A leaked route from an outer routed wrap must not survive either.
+      env: { ...baseEnv(home, binDir, port, fakeProxy), ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}/w/agent` },
       cwd: dir,
       timeoutMs: 5000,
     });
@@ -433,6 +440,7 @@ process.exit(0);
     assert.equal(alive(listener.pid), true);
     assert.equal(existsSync(signalFile), false);
     assert.match(out.stderr, /something else is listening/);
+    assert.equal(readFileSync(envFile, "utf8"), "", "direct launch must not carry caveman's route");
     // Routed launch would hand the operator's provider keys to that foreign
     // listener (#945); the run must fall back to a direct launch instead.
     assert.match(out.stderr, /direct \(no Caveman this run\)/);

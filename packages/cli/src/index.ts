@@ -5383,8 +5383,14 @@ async function spawnWrapped(
   // A foreign listener on the proxy port is the same failure as a gate
   // mismatch, with a worse consequence: launching routed would hand the
   // operator's provider keys to a process caveman does not own (#945).
-  if (runtimeState?.id === "running-gate-mismatch" || runtimeState?.id === "foreign-process") {
+  if (runtimeState?.id === "running-gate-mismatch") {
     process.stderr.write(`${mark("warn")} ${runtimeState.line}\n`);
+    direct = true;
+  } else if (proxyReady && gateApplies && !proxyStarted && runtime.owner === "unknown") {
+    // A listener caveman did not start this run and cannot prove it owns: a
+    // foreign process, or a proxy binary too old to answer. Routing anyway
+    // would hand the operator's provider keys to that listener (#945).
+    if (runtimeState) process.stderr.write(`${mark("warn")} ${runtimeState.line}\n`);
     direct = true;
   }
   const subscriptionCompressionActive = !direct && proxyReady && subscriptionCompress && desiredRecoveryViaMCP
@@ -5480,8 +5486,12 @@ async function spawnWrapped(
   if (!direct && agent?.id === "claude") Object.assign(env, claudeCaveBuildEnv());
   if (!direct) maybeWarnHermesMissingKey(agent, gw);
   if (direct) {
+    // buildWrapEnv writes the agent-attributed `${gw}/w/<agent>` form, and an
+    // outer routed wrap may leak the bare form; a direct launch strips both.
+    const gwPrefix = `${gw.replace(/\/+$/, "")}/`;
     for (const k of WRAP_BASE_URL_ENV_VARS) {
-      if (env[k] === gw) delete env[k];
+      const value = env[k];
+      if (value !== undefined && (value === gw || value.startsWith(gwPrefix))) delete env[k];
     }
   }
   // Only a local proxy session that survived native-pack setup can produce a
@@ -11857,7 +11867,7 @@ function qwenControlSurfaceOverride(args: string[]): AgentRouteOverride | null {
       return { surface: "session restore", reason: "can reactivate a recorded provider route outside Caveman's locked session" };
     }
   }
-  const directFlags = ["--acp", "--experimental-acp", "--experimental-skills"] as const;
+  const directFlags = ["--acp", "--experimental-acp", "--experimentalAcp", "--experimental-skills", "--experimentalSkills"] as const;
   for (let index = 0; index < args.length; index++) {
     const match = qwenBooleanArg(args, index, directFlags, []);
     if (!match.matched) continue;
@@ -11867,7 +11877,7 @@ function qwenControlSurfaceOverride(args: string[]): AgentRouteOverride | null {
     index += match.consumed;
   }
   if (args.some((arg) => {
-    return arg === "--list-extensions" || qwenShortOptionLetters(arg).has("l") || arg.startsWith("--channel=") || arg === "--channel";
+    return arg === "--list-extensions" || arg === "--listExtensions" || qwenShortOptionLetters(arg).has("l") || arg.startsWith("--channel=") || arg === "--channel";
   })) {
     return { surface: "control mode", reason: "does not run one confined Qwen model session" };
   }

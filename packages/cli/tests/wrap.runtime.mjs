@@ -887,3 +887,15 @@ test("wrap injects delegate MCP before startup without persisting agent config",
     assert.equal(off.existsSync(join(off.home, ".caveman", "mcp", `${agentId}.caveman-delegate.json`)), false);
   }
 });
+
+test("Claude remote-control launches direct because Claude Code refuses a proxied base URL (#947)", async () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const { buildWrapEnv } = await import(`${pathToFileURL(join(here, "..", "dist", "index.js")).href}?claude-remote-control`);
+  const claude = PROFILES.find((profile) => profile.id === "claude");
+  assert.throws(
+    () => buildWrapEnv(claude, "http://127.0.0.1:8787", "auto", ["remote-control"]),
+    /Claude Code remote-control only runs against api.anthropic.com/,
+  );
+  const env = buildWrapEnv(claude, "http://127.0.0.1:8787", "auto", ["-p", "hello"]);
+  assert.equal(env.ANTHROPIC_BASE_URL, "http://127.0.0.1:8787/w/claude");
+});

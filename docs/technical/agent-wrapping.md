@@ -210,3 +210,15 @@ trust boundaries.
 
 If a transform cannot parse input, cannot store recovery data, or cannot produce
 smaller safe output, Caveman sends original input.
+
+### Claude Code Remote Control
+
+Claude Code 2.1.196 and later only allows Remote Control when
+`ANTHROPIC_BASE_URL` points at `api.anthropic.com`; its first-party escape
+hatch does not cover this check. A proxied session therefore cannot start
+Remote Control. `caveman claude remote-control` and
+`caveman wrap claude remote-control` detect the subcommand and launch Claude
+Code directly, uncompressed. If `caveman enable claude` has written the route
+into `settings.json`, run `caveman disable claude` before starting a Remote
+Control session from a plain `claude` command, then `caveman enable claude`
+again afterwards.

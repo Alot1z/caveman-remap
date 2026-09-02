@@ -395,7 +395,10 @@ def call_claude(prompt: str) -> str:
                 max_tokens=8192,
                 messages=[{"role": "user", "content": prompt}],
             )
-            return strip_llm_wrapper(msg.content[0].text.strip())
+            # Tool-heavy models can put a tool_use or thinking block first; take
+            # the first text block instead of trusting content[0].
+            text = next((block.text for block in msg.content if getattr(block, "type", None) == "text"), "")
+            return strip_llm_wrapper(text.strip())
         except ImportError:
             pass  # anthropic not installed, fall back to CLI
     # Fallback: use claude CLI (handles desktop auth).

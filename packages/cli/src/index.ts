@@ -5380,7 +5380,10 @@ async function spawnWrapped(
       }
     }
   }
-  if (runtimeState?.id === "running-gate-mismatch") {
+  // A foreign listener on the proxy port is the same failure as a gate
+  // mismatch, with a worse consequence: launching routed would hand the
+  // operator's provider keys to a process caveman does not own (#945).
+  if (runtimeState?.id === "running-gate-mismatch" || runtimeState?.id === "foreign-process") {
     process.stderr.write(`${mark("warn")} ${runtimeState.line}\n`);
     direct = true;
   }
@@ -12053,6 +12056,11 @@ function qwenRouteOverride(agent: AgentProfile, args: string[]): AgentRouteOverr
 function agentRouteOverride(agent: AgentProfile, args: string[]): AgentRouteOverride | null {
   if (agent.id === "kilo") return kiloRouteOverride(agent, args);
   if (agent.id === "qwen") return qwenRouteOverride(agent, args);
+  // Claude Code 2.1.196+ refuses Remote Control unless ANTHROPIC_BASE_URL is
+  // api.anthropic.com, and the first-party escape hatch does not apply (#947).
+  if (agent.id === "claude" && args.includes("remote-control")) {
+    return { surface: "remote-control", reason: "only runs against api.anthropic.com, so it cannot route through the proxy" };
+  }
   return null;
 }
 

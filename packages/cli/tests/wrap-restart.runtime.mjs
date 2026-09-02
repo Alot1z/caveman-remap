@@ -401,7 +401,7 @@ process.exit(0);
   }
 });
 
-test("foreign listener is never signalled and gets owner-unknown banner", async (t) => {
+test("foreign listener is never signalled and forces a direct launch", async (t) => {
   if (!proxyBuilt) return t.skip("go toolchain not found");
   const dir = mkdtempSync(join(suiteDir, "foreign-"));
   const home = join(dir, "home");
@@ -432,8 +432,10 @@ process.exit(0);
     assert.equal(out.code, 0, out.stderr);
     assert.equal(alive(listener.pid), true);
     assert.equal(existsSync(signalFile), false);
-    assert.match(out.stderr, /caveman · owner: unknown · agent/);
     assert.match(out.stderr, /something else is listening/);
+    // Routed launch would hand the operator's provider keys to that foreign
+    // listener (#945); the run must fall back to a direct launch instead.
+    assert.match(out.stderr, /direct \(no Caveman this run\)/);
   } finally {
     if (alive(listener.pid)) process.kill(listener.pid, "SIGKILL");
   }

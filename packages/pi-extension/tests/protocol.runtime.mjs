@@ -28,6 +28,15 @@ test("route table maps supported APIs and refuses everything else", () => {
   assert.equal(routeForApi(gw, "openai-completions"), `${gw}/w/pi/openai/v1`);
   assert.equal(routeForApi(gw, "openai-responses"), `${gw}/w/pi/openai/v1`);
   assert.equal(routeForApi(gw, "google-generative-ai"), `${gw}/w/pi/v1beta`);
+  assert.equal(routeForApi(gw, "openai-responses", "opencode-go"), `${gw}/w/pi/compat/opencode-go/v1`);
+  assert.equal(routeForApi(gw, "openai-completions", "opencode-go"), `${gw}/w/pi/compat/opencode-go/v1`);
+  assert.equal(routeForApi(gw, "anthropic-messages", "opencode-go"), `${gw}/w/pi/compat/opencode-go`);
+  assert.equal(routeForApi(gw, "openai-responses", "openrouter"), undefined, "unknown provider must not inherit OpenAI upstream");
+  assert.equal(routeForApi(gw, "anthropic-messages", "anthropic"), `${gw}/w/pi`);
+  assert.equal(routeForApi(gw, "openai-completions", "openai"), `${gw}/w/pi/openai/v1`);
+  assert.equal(routeForApi(gw, "openai-responses", "openai"), `${gw}/w/pi/openai/v1`);
+  assert.equal(routeForApi(gw, "google-generative-ai", "google"), `${gw}/w/pi/v1beta`);
+  assert.equal(routeForApi(gw, "openai-completions", "stubprov"), undefined, "provider outside allowlist must not route");
   for (const api of ["azure-openai-responses", "openai-codex-responses", "mistral-conversations", "google-vertex", "bedrock-converse-stream", "made-up", undefined]) {
     assert.equal(routeForApi(gw, api), undefined, `api ${api} must not route`);
   }

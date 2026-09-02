@@ -306,11 +306,38 @@ func (c Config) Credential(provider string) providers.Credential {
 	return providers.Credential{Mode: "ephemeral_header"}
 }
 
-// CompatCredential returns the named OpenAI-compatible upstream key, plus
-// whether that upstream exists. An empty api_key_env intentionally means no
-// Authorization header for that named upstream.
+// builtinCompat holds the named OpenAI-compatible upstreams that work with no
+// user config. The standalone proxy mounts each one at /compat/<name>/, and
+// CompatCredential resolves its key. Thus one table gives a mount and its BYOK
+// policy. A caveman.yaml compat entry with the same name replaces the built-in
+// entry.
+var builtinCompat = map[string]CompatConfig{
+	// OpenCode Go uses the OpenAI and Anthropic wire protocols, but its upstream
+	// is not api.openai.com. Its key comes from OPENCODE_API_KEY, as in Pi.
+	"opencode-go": {BaseURL: "https://opencode.ai/zen/go", APIKeyEnv: "OPENCODE_API_KEY"},
+}
+
+// CompatUpstreams returns every named OpenAI-compatible upstream that the proxy
+// mounts. The result starts with the built-in table. Then the caveman.yaml
+// entries go on top, so a user entry with a built-in name replaces the built-in
+// entry. The result is a new map.
+func (c Config) CompatUpstreams() map[string]CompatConfig {
+	merged := make(map[string]CompatConfig, len(builtinCompat)+len(c.Compat))
+	for name, upstream := range builtinCompat {
+		merged[name] = upstream
+	}
+	for name, upstream := range c.Compat {
+		merged[name] = upstream
+	}
+	return merged
+}
+
+// CompatCredential returns the key of one named OpenAI-compatible upstream. The
+// second result is false if no built-in entry and no configured entry has this
+// name. An empty api_key_env means that the upstream needs no Authorization
+// header.
 func (c Config) CompatCredential(name string) (string, bool) {
-	upstream, ok := c.Compat[name]
+	upstream, ok := c.CompatUpstreams()[name]
 	if !ok {
 		return "", false
 	}

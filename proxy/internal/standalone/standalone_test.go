@@ -698,6 +698,49 @@ func TestBuildAdapters_RegistersNamedCompatBeforeLegacy(t *testing.T) {
 	}
 }
 
+func TestBuildAdapters_OpenCodeGoRouteUsesOpenCodeUpstream(t *testing.T) {
+	adapters := buildAdapters(config.Config{})
+	req := httptest.NewRequest(http.MethodPost, "/compat/opencode-go/v1/responses", nil)
+	for _, adapter := range adapters {
+		if adapter.Name() != "openai_compatible" || !adapter.MatchRoute(req.Method, req.URL.Path) {
+			continue
+		}
+		upstream, err := adapter.ResolveUpstreamURL(req.Context(), req, providers.RouteContext{})
+		if err != nil {
+			t.Fatalf("resolve OpenCode Go route: %v", err)
+		}
+		want := "https://opencode.ai/zen/go/v1/responses"
+		if got := upstream.String(); got != want {
+			t.Fatalf("OpenCode Go upstream = %q, want %q", got, want)
+		}
+		return
+	}
+	t.Fatal("built-in OpenCode Go adapter was not registered")
+}
+
+// TestCreds_OpenCodeGoBuiltinCompatCredential proves that the built-in OpenCode
+// Go mount has its own BYOK policy. The proxy adds this mount only if the user
+// config has no opencode-go entry. Thus a keyless request must not use the wrong
+// OPENAI_COMPAT_API_KEY secret. A user entry must still win.
+func TestCreds_OpenCodeGoBuiltinCompatCredential(t *testing.T) {
+	t.Setenv("OPENCODE_API_KEY", "sk-opencode")
+	t.Setenv("OPENAI_COMPAT_API_KEY", "sk-legacy")
+
+	builtin := Creds{cfg: config.Config{}}
+	req := httptest.NewRequest(http.MethodPost, "/compat/opencode-go/v1/responses", nil)
+	if got := builtin.Resolve("openai_compatible", req); got.Key != "sk-opencode" || got.AuthFallbackEnv != "OPENCODE_API_KEY" {
+		t.Errorf("built-in OpenCode Go credential = %+v, want OPENCODE_API_KEY key and fallback policy", got)
+	}
+
+	t.Setenv("OPENCODE_ZEN_API_KEY", "sk-user")
+	configured := Creds{cfg: config.Config{Compat: map[string]config.CompatConfig{
+		"opencode-go": {BaseURL: "https://opencode.example.test", APIKeyEnv: "OPENCODE_ZEN_API_KEY"},
+	}}}
+	if got := configured.Resolve("openai_compatible", req); got.Key != "sk-user" || got.AuthFallbackEnv != "OPENCODE_ZEN_API_KEY" {
+		t.Errorf("configured OpenCode Go credential = %+v, want the user api_key_env to win", got)
+	}
+}
+
 func TestBuildAdapters_DefaultCompatBareRoutePreservesConfiguredBase(t *testing.T) {
 	cfg := config.Config{Providers: map[string]config.ProviderConfig{
 		"openai_compatible": {BaseURL: "http://127.0.0.1:11434/v1?tenant=local"},

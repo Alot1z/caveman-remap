@@ -184,7 +184,7 @@ test("open gate: first request routes through /w/pi with Core in the system prom
     const out = await runPi(fx.env, [
       "--extension", stubProviderExtension, "--extension", extension,
       "--no-session", "--no-skills", "--no-context-files", "--no-prompt-templates", "--no-themes", "--no-extensions",
-      "--provider", "stubprov", "--model", "stub-model",
+      "--provider", "openai", "--model", "stub-model",
       "-p", "say hi",
     ]);
     assert.match(out.stdout, /CAVEMAN_STUB_OK/, `stdout: ${out.stdout}\nstderr: ${out.stderr}`);
@@ -209,7 +209,7 @@ test("closed gate (no run-state): zero proxy requests and a visible direct-mode 
     const out = await runPi(fx.env, [
       "--extension", stubProviderExtension, "--extension", extension,
       "--no-session", "--no-skills", "--no-context-files", "--no-prompt-templates", "--no-themes", "--no-extensions",
-      "--provider", "stubprov", "--model", "stub-model",
+      "--provider", "openai", "--model", "stub-model",
       "-p", "say hi",
     ]);
     // Direct mode points at the dead loopback port the stub provider declares —
@@ -230,7 +230,7 @@ test("published recovery=false: gate refuses even with a live proxy and working 
     const out = await runPi(fx.env, [
       "--extension", stubProviderExtension, "--extension", extension,
       "--no-session", "--no-skills", "--no-context-files", "--no-prompt-templates", "--no-themes", "--no-extensions",
-      "--provider", "stubprov", "--model", "stub-model",
+      "--provider", "openai", "--model", "stub-model",
       "-p", "say hi",
     ]);
     // Proxy is alive (health probe hits the stub) but published recovery is

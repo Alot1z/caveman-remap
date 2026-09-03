@@ -1,70 +1,52 @@
-# Plan-only draft — OpenCode Go anthropic-messages compat mount (the #934 lane)
+# OpenCode Go compat seam — ground-truth verdict (was: PR-OPENCODE-SCHEMA draft)
 
-**Status: DRAFT ONLY. Not opened, not pushed as a PR.** Trigger-gated like
-every other plan in this branch. Zero upstream interaction implied by this
-document.
+**Status: OBSERVED-AS-REFUTED (2026-09-03). The seam this draft was sized
+against is already handled on current main. Draft withdrawn; this document is
+now the finding record.** No PR was opened; none is due.
 
-## The lane (why this shape is sanctioned)
+## What the draft claimed (original premise, from KB #6552/#6458)
 
-The maintainer's #934 closure: *"If a specific host needs one schema tweak (as
-#870 did), a small PR against the existing MCP server is the right shape."*
-MCP surface work belongs in the **Go `caveman-mcp` binary** — never a
-parallel Node server. This draft is one host (OpenCode Go), one schema tweak,
-one small PR against the existing binary. It passes the #6509 rejection-class
-screen: not a new product surface (1), not a parallel subsystem (2), no CI
-gate (3), no unpinned e2e (4), uses the existing compat contract (5), no
-mirrors (6), no new modes (7), no merged-PR choreography (8).
+That the opencode-go `anthropic-messages` models (minimax-m3, qwen3.7-max,
+qwen3.7-plus, qwen3.8-max) fail through the proxy with
+`401 {"type":"error","error":{"type":"AuthError","message":"Missing API key."}}`
+because OpenCode Go rejects `Authorization: Bearer` on the anthropic-messages
+path, and that a single-purpose schema-tweak PR against the **Go
+`caveman-mcp` binary** should add an x-api-key compat mount (the #934 lane,
+per the #870 blessing).
 
-## The known seam (facts, cited)
+## Ground truth (current main `9911e5f`, static code read; go1.26.5 available)
 
-- **KB #6552** (per-host provider map): the OpenCode Go client rejects
-  `Authorization: Bearer` on the `anthropic-messages` path with
-  `401 {"type":"error","error":{"type":"AuthError","message":"Missing API key."}}`.
-  The opencode-go `anthropic-messages` models — `minimax-m3`, `qwen3.7-max`,
-  `qwen3.7-plus`, `qwen3.8-max` — failed through the proxy and worked in
-  direct mode.
-- **KB #6458** (proxy auth seam, PR #969, MERGED): the fix pattern is already
-  established at the proxy layer — a named compat mount maps the credential
-  by the **wire protocol of the request path**: `/compat/<name>/v1/messages`
-  gets `x-api-key` + a default `anthropic-version`; every other path keeps
-  `Authorization: Bearer`; a real inbound Bearer token keeps its header on
-  every path. The #969 verification included a protocol unit test for the
-  `anthropic-messages` arm and a Go end-to-end test.
+| # | Claim | Verdict | Evidence |
+|---|---|---|---|
+| 1 | The MCP binary has an anthropic-messages HTTP path to fix | **REFUTED** | `mcp/` has no `net/http` server (only `server_test.go`); `mcp/CLAUDE.md` L48: "v1 is **stdio-only**… HTTP transport + `caveman mcp` subcommand are **v2**". The MCP binary is a tool server; the anthropic-messages path belongs exclusively to the proxy. |
+| 2 | The x-api-key wire-protocol mapping exists as the fix pattern | **FACT** | `proxy/internal/gateway/auth_fallback.go` (merged #969): `openai_compatible` case sets `x-api-key` when the request carries it, else Bearer; `x-api-key` is a usable provider key; "A named compat mount maps an Anthropic-protocol path to x-api-key." |
+| 3 | opencode-go is a recognized compat mount | **FACT** | Built-in route `/compat/opencode-go/v1/messages` → `https://opencode.ai/zen/go/v1/messages` (+ `/v1/responses`, `/v1/chat/completions`), with a user escape hatch (`compat.opencode-go` config entry, `OPENCODE_ZEN_API_KEY` env) — `standalone_test.go` `TestBuildAdapters_OpenCodeGoRouteUsesOpenCodeUpstream` / `TestBuildAdapters_OpenCodeGoUserEntryReplacesBuiltin` / `TestCreds_OpenCodeGoBuiltinCompatCredential`. |
+| 4 | The four models are hardcoded routing | **REFUTED** | `minimax-m3`/`qwen3.7-*` appear only in test fixtures (`auth_fallback_test.go`, `standalone_test.go`) — provider-mapped via config, not hardcoded. |
+| 5 | A live repro of the 401 is possible here | **UNKNOWN (blocked)** | No provider keys on this machine and no live opencode-go client; a runtime repro is impossible without both. The static level fully answers the seam question; the behavioral level (does opencode-go's client actually send `x-api-key` on the compat path, does zen/go accept it) needs a keyed live call. |
+| 6 | The #934 lane targets the MCP binary | **REFUTED** | Per-host compat mounts live in the PROXY (`proxy/internal/standalone`, `/compat/<name>/`); the MCP binary's only host-specific surface is v2 HTTP transport, which is the #956-v2 track (KB #6451 Origin/auth). |
 
-## The draft shape (what a real PR would contain)
+## Verdict
 
-1. **Ground-truth first (blocking):** confirm on CURRENT main whether the
-   opencode-go MCP client actually drives `/v1/messages` through the Go
-   binary's compat layer (the #969 facts are proxy-layer; the MCP-binary side
-   must be reproduced, not assumed — the #6507 superseded discipline: the
-   maintainer ships follow-ups fast, so re-check main before building).
-2. **The change (one file region):** in the existing MCP/compat layer of the
-   Go binary, apply the established #969 credential-by-wire-protocol mapping
-   for the opencode-go host: requests on the `anthropic-messages` path carry
-   `x-api-key` (+ default `anthropic-version`), all other paths keep Bearer,
-   inbound Bearer preserved everywhere. Nothing else — no transport changes,
-   no new endpoints, no gateway changes.
-3. **Test shape (mirroring #969's verification):**
-   - protocol unit test: `anthropic-messages` arm asserts `x-api-key` mapping
-     and that a real inbound Bearer survives every path;
-   - regression test: the exact `401 Missing API key.` case fails before,
-     passes after;
-   - Go end-to-end test through the binary's compat mount (as #969 did for
-     the proxy).
-4. **Docs:** any schema behavior change ships with its doc line in the same
-   commit (#956 v2 requirement pattern).
+**The gap the draft was sized against is already closed on current main.**
+The pre-#969 failure recorded in KB #6552 was fixed by #969 (credential by
+wire protocol) plus the built-in opencode-go compat mount. A new PR would be
+duplicate work — exactly the "already on main" closure class of KB #6507.
 
-## Trigger
+## What the #934 lane actually holds now (re-scoped)
 
-Fires only when BOTH hold: (a) the ground-truth step confirms the gap on
-current main (reproduced, not assumed), and (b) the maintainer signals the
-#934 lane is open (no indication yet — the #956 v2 work is the other pending
-MCP thread). Until then this stays a draft.
+- Per-host schema tweaks live in the **proxy's** compat-mount layer, not the
+  MCP binary. opencode-go: built-in route exists; a future PR is due only if
+  the user-entry escape hatch proves insufficient (needs a live keyed repro —
+  UNKNOWN).
+- Codex pipe 2 MiB cap + fail-open: proxy-side contract, already recorded
+  (KB #6459).
+- The MCP binary's real open item is the **v2 HTTP transport** (#956-v2):
+  streamable-HTTP with Origin validation + auth per KB #6451 — the six-PR
+  queue in PR-SPLIT-ANALYSIS.md, still trigger-gated.
+- Trigger for any of this: a maintainer signal or a live-keyed failure. None
+  has fired.
 
-## Explicitly NOT in scope
+## Ledger note
 
-- No parallel Node server (the rejected #934 shape).
-- No new transports, no bearer-token auth redesign (that is the #956-v2
-  precedent, separately scheduled).
-- No model-list changes beyond the four documented opencode-go models.
-- No upstream PR, no fork PR — this document is the plan.
+Draft created 2026-09-03 (18ec9bb), ground-truthed same day, marked
+OBSERVED-AS-REFUTED. Zero upstream PRs; zero fork PRs.

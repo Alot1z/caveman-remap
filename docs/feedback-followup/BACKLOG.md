@@ -109,3 +109,28 @@ maintainer endorsement × value × actionability-now.
   wanted); 7–10 are gated on evidence, maintainer behavior, or explicit ask.
 - This file supersedes the ad-hoc "next steps" lists in the per-PR docs; the
   per-PR docs keep the full feedback verbatim + disposition.
+- Every item below is screened against the #6509 rejected-shape taxonomy
+  (8 structural rejection classes) before it may leave the backlog.
+
+## Rejection-class screen (KB #6509 — 8 classes)
+
+Classes: 1 new-product-surface · 2 parallel-subsystem-vs-Go-binary ·
+3 per-branch-CI-gate · 4 unpinned-CI-e2e · 5 contract-bypass ·
+6 checked-in-mirror · 7 unmeasured-mode-expansion · 8 merged-PR-dead-weight.
+
+| Rank | Nearest class to avoid | Rationale (why it is NOT a rejection) |
+|---|---|---|
+| 1 | 2 (parallel subsystem) | The #956-v2 transport is maintainer-scheduled and must land INSIDE the Go `caveman-mcp` binary — never a parallel Node server. Structurally safe if the binary boundary holds. |
+| 2 | none | KB capture only; no PR shape. Structurally safe. |
+| 3 | none | Hygiene rule; its whole point is preventing class-6 artifact drift. Structurally safe. |
+| 4 | 1, 8 (by construction) | One behavior per PR, zero merged-choreography references — the anti-dote to both classes. Safe. |
+| 5 | 8 (dead weight) | Minimal diff, no references to merged PRs' choreography, no speculative provider shapes. Safe. |
+| 6 | none | Reply-style convention, not a PR. Safe. |
+| 7 | 1 (new surface), 7 (unmeasured) | Closed-on-scope precedent (#931). The ONLY sanctioned lane is caveman-stats with the maintainer's measured-evidence issue first — that precondition is the trigger, and it satisfies the #6507 standing bar. |
+| 8 | 4 (unpinned CI e2e) | This IS the exact class-4 shape — deferred by design. If ever activated: fork-only CI, web-ext as a PINNED devDependency + explicit Firefox install step (the maintainer's own fix spec), never upstream. |
+| 9 | 6 (parallel guard) | No-op: upstream's own guard (`87325d8`) owns the surface; adding a parallel guard would be class-6. Run theirs, add nothing. |
+| 10 | none (not a gate) | Template, not CI; no per-branch config, no enforcement — it fails on value, not shape. Re-open only if the maintainer asks. |
+
+Gate: an item whose trigger fires must re-pass this screen at draft time
+against the THEN-current tree (the maintainer ships follow-ups fast — check
+main before building, #6507 implemented/superseded discipline).

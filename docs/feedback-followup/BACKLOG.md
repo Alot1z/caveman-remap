@@ -109,6 +109,12 @@ maintainer endorsement × value × actionability-now.
   wanted); 7–10 are gated on evidence, maintainer behavior, or explicit ask.
 - This file supersedes the ad-hoc "next steps" lists in the per-PR docs; the
   per-PR docs keep the full feedback verbatim + disposition.
+- Durable campaign records live in the KB (canonical-owner rule, digest item
+  85): narrative ledger = session digest `2026-09-03-caveman-upstream-mission.md`
+  (items 61–84); cluster index + provenance + relationships =
+  `knowledge/caveman/CLUSTER.md`; crawl disposition =
+  `knowledge/prompt-optimization/AUDIT-2026-09-03.md`. This file cites KB ids
+  and holds plan data; it does not restate campaign history.
 - Every item below is screened against the #6509 rejected-shape taxonomy
   (8 structural rejection classes) before it may leave the backlog.
 

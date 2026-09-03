@@ -59,5 +59,12 @@ MCP v2 HTTP transport (#956-v2).
 Feedback read 2026-09-03 from the live API of `JuliusBrussee/caveman`
 (PRs #931, #932, #933, #934, #936, #954, #955, #956, #957): all review
 comments, inline review comments, and closure reasons. Reviewers:
-JuliusBrussee (maintainer) and AmirF194. KB session digest:
-2026-09-03-caveman-upstream-mission (items 62–68).
+JuliusBrussee (maintainer) and AmirF194.
+
+Durable records (canonical-owner rule, digest item 85): the campaign
+narrative ledger is the KB session digest
+`2026-09-03-caveman-upstream-mission.md` (items 61–84, append-only); the KB
+cluster map `knowledge/caveman/CLUSTER.md` holds the entry index, provenance
+anchors, and the relationships table; the crawl disposition data lives in
+`knowledge/prompt-optimization/AUDIT-2026-09-03.md`. These docs hold plan
+data and cite KB ids; they do not restate campaign history.

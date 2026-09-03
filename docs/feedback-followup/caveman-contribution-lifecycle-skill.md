@@ -1,6 +1,7 @@
 ---
 name: caveman-contribution-lifecycle
 description: Use when preparing a caveman change for upstream contribution to JuliusBrussee/caveman through the Alot1z/caveman-remap fork — runs the gate from discovery to a verified, PR-ready branch: ground-truth against live main first, rejection-class screen, measured evidence with full runtime coverage, then the fork drafts surface. Requires gh authenticated (read-only GETs are sufficient until the final push).
+version: 1.0.0
 ---
 
 # Caveman Contribution Lifecycle

@@ -11,9 +11,9 @@ maintainer endorsement × value × actionability-now.
 
 | Rank | Idea (origin) | Class | Size | Trigger | Status |
 |---|---|---|---|---|---|
-| 1 | MCP-over-HTTP Origin/auth posture (#956) | KB security entry (universal) | S (capture); code deferred | Next MCP HTTP transport work (#956-v2 shape) | Open — capture anytime; marks the #956-v2 target shape |
-| 2 | Chrome vs Firefox content-script CSS `url()` resolution (#936) | KB fact (universal, OBSERVED) | S | Any cross-browser extension work | Open — capture anytime |
-| 3 | Manifest files are generated artifacts — regenerate, never hand-merge (#954) | Repo-hygiene rule | S | Any checksums/manifest merge | Open — capture anytime |
+| 1 | MCP-over-HTTP Origin/auth posture (#956) | KB security entry (universal) | S (capture); code deferred | Next MCP HTTP transport work (#956-v2 shape) | **CAPTURED — KB #6451 (TRUSTED)**; code still deferred to #956-v2 |
+| 2 | Chrome vs Firefox content-script CSS `url()` resolution (#936) | KB fact (universal, OBSERVED) | S | Any cross-browser extension work | **CAPTURED — KB #6441 (TRUSTED)**; Firefox-side comparison recorded in PR-936 draft |
+| 3 | Manifest files are generated artifacts — regenerate, never hand-merge (#954) | Repo-hygiene rule | S | Any checksums/manifest merge | **CAPTURED — KB #6452 (TRUSTED)** |
 | 4 | Review-unit discipline — one PR = one behavior (#931) | Convention + KB principle | S | Next multi-behavior diff starts forming | Open |
 | 5 | Smallest-version fixes, credit the reporter, shape-handling only for real providers (#932) | Review-checklist item | S | Any fix PR | Open |
 | 6 | Oracle-backed replies get confirmed, not re-reviewed (#954) | Reply-style convention | S | Next campaign reply | Open |

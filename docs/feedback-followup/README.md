@@ -21,6 +21,12 @@ and a plan with a concrete trigger for when to act. This branch lives only in
 | #956 | streamable-HTTP transport | security critique (ACAO:* + no Origin validation); v2-scheduled; target shape specified | CLOSED; deferred to v2 | [PR-956](PR-956-streamable-http.md) |
 
 Cross-cutting ideas from the good feedback: [inspirations.md](inspirations.md).
+Ranked, trigger-gated implementation backlog: [BACKLOG.md](BACKLOG.md).
+Right-sizing review of every campaign PR + remaining micro-tasks:
+[PR-SPLIT-ANALYSIS.md](PR-SPLIT-ANALYSIS.md).
+Caveman contribution workflow skill (mirrors ix-contribution):
+[caveman-contribution-skill.md](caveman-contribution-skill.md) — primary copy
+at `~/.agents/skills/caveman-contribution/SKILL.md`.
 
 ## How to use this branch
 

@@ -35,22 +35,27 @@ JuliusBrussee (post-merge follow-up, `87325d8`):
   maintainer's follow-up commit).
 - Remaining feedback = three optional follow-ups, none blocking.
 
-## Plan (draft)
+## Plan (execution log)
 
-1. **Firefox e2e in CI (optional):** add `web-ext` as a pinned devDependency
-   and an explicit Firefox install step, then re-add `test:firefox` to the
-   gate. Draft the change on the fork; run the e2e locally first (verified
-   5/5 vs Firefox 153 by the maintainer's own note).
-2. **Manifest drift guard:** the `package`-runs-firefox-target change covers
-   release builds; if a lighter check is wanted, a `test:`-side comparison of
-   firefox manifest version vs package.json (mirror of the Chrome check).
-3. **Doc accuracy:** PR bodies must reflect the actual `strict_min_version`
-   tested (121-vs-140 lesson) — fold into the fork's PR template draft.
+1. **Firefox e2e in CI (optional):** **NOT DONE — deliberately.** The maintainer
+   made `test:firefox` opt-in precisely because it fetches web-ext via npx at
+   test time; pinning web-ext + a Firefox install step + re-adding it to the
+   gate would reverse his explicit decision. Stays a fork-side option if the
+   user ever wants it.
+2. **Manifest drift guard:** **DONE upstream, stronger than drafted** —
+   `extension/test/package.test.mjs` now asserts (a) `package.json == Chrome
+   manifest` version, (b) the Firefox template carries **no** hardcoded version
+   (builder injects the shared one), and (c) `strict_min_version >= 140` for
+   the AMO data-collection key. Shipped by the maintainer in `87325d8`.
+3. **Doc accuracy (121-vs-140 lesson):** **DONE** — folded into the PR template
+   (upstream PR #974): the verification checkbox requires counts/versions from
+   what was actually run, not the PR body's memory.
 
 ## Trigger
 
-The user wants Firefox e2e enforced in CI, or the next extension release
-touches the manifests.
+~~User wants Firefox e2e enforced in CI, or the next extension release touches
+the manifests~~ — the drift guard and doc-accuracy halves fired via `87325d8`
+and #974; the CI-e2e half stays dormant unless the user opts in.
 
 ## Lesson (recorded)
 

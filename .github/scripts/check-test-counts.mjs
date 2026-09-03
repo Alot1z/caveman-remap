@@ -75,7 +75,7 @@ function buildDriftConfig() {
       ['', 'python', ['-m', 'pytest', '-q', 'tests/test_compress_safety.py', 'tests/test_compress_concurrency.py']],
     ],
     // 150 (node, stats excluded) + 31 (pytest) = 181; +52 (stats suite) = 233.
-    result: pin ? '233 passed, 0 failed, 4 skipped' : '181 passed, 0 failed, 4 skipped',
+    result: pin ? '233 passed, 0 failed, 4 skipped' : '183 passed, 0 failed, 4 skipped',
     pin,
   };
 }
@@ -169,7 +169,7 @@ if (actual === null) {
 const bodyResult = (PR_BODY.match(/Result:\s*`([^`]+)`/) || [])[1] ?? null;
 
 console.log(`branch:      ${HEAD_REF}`);
-console.log(`pin:         ${cfg.pin ? 'PRESENT (locale pin) — stats suite required, 233 total' : 'absent — stats suite excluded, 181 total'}`);
+console.log(`pin:         ${cfg.pin ? 'PRESENT (locale pin) — stats suite required, 233 total' : 'absent — stats suite excluded, 183 total'}`);
 console.log(`expected:    ${cfg.result}`);
 console.log(`actual:      ${actual}`);
 console.log(`body says:   ${bodyResult ?? '(missing ## Test status Result line)'}`);

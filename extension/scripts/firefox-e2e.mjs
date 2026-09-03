@@ -25,9 +25,12 @@ const EXT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 function log(line) {
   process.stdout.write(line + "\n");
 }
+// A skip is a clean exit-0 outcome, thrown only BEFORE any resource is acquired,
+// so no finally is ever bypassed (KB 5486: process.exit must never preempt
+// pending cleanup — the only process.exit calls live at module top level).
+class SkipError extends Error {}
 function skip(reason) {
-  log(`SKIP firefox-e2e — ${reason} (exit 0)`);
-  process.exit(0);
+  throw new SkipError(reason);
 }
 function freePort() {
   return new Promise((res, rej) => {
@@ -113,7 +116,6 @@ async function main() {
     const b = spawnSync("node", ["scripts/build-extension-zip.mjs", "firefox"], { cwd: EXT_ROOT, encoding: "utf8", timeout: 60000 });
     if (b.status !== 0) throw new Error("firefox stage build failed: " + String(b.stderr || b.stdout).slice(-300));
     cpSync(join(EXT_ROOT, "dist/stage"), work + "/scratch", { recursive: true });
-
     // 2. patch the THROWAWAY copy only: localhost match (NO port — Firefox match
     //    patterns reject ports, KB #6442) + a 127.0.0.1 site entry
     const mp = work + "/scratch/manifest.json";
@@ -234,10 +236,17 @@ window.cavemanTest={transcript(){return[...tr.querySelectorAll("div")].map(d=>d.
 
   const fails = results.filter((r) => r === false).length;
   log(`\nfirefox-e2e: ${results.length - fails}/${results.length} passed${fails ? `, ${fails} FAILED` : ""}`);
-  process.exit(fails ? 1 : 0);
+  return fails ? 1 : 0;
 }
 
-main().catch((e) => {
-  log(`firefox-e2e ERROR: ${e.message}`);
-  process.exit(1);
-});
+// Top-level only: every exit happens here, after main()'s finally has run.
+main()
+  .then((code) => process.exit(code))
+  .catch((e) => {
+    if (e instanceof SkipError) {
+      log(`SKIP firefox-e2e — ${e.message} (exit 0)`);
+      process.exit(0);
+    }
+    log(`firefox-e2e ERROR: ${e.message}`);
+    process.exit(1);
+  });

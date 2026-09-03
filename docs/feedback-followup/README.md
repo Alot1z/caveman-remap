@@ -17,7 +17,7 @@ and a plan with a concrete trigger for when to act. This branch lives only in
 | #932 | crash-free compress | absorbed as smallest version (v2.5.0 d6c1cd3); provider-agnostic = over-engineering | CLOSED; fully absorbed | [PR-932](PR-932-compress-crash.md) |
 | #933 | measured compression runtime | new product surface in a scope-narrowing repo | CLOSED; direction rejection | [PR-933](PR-933-l4-runtime.md) |
 | #934 | host-agnostic Remote-MCP | MCP surface belongs in the Go binary; 700-line subsystem out of scope | CLOSED; shape rejection | [PR-934](PR-934-remote-mcp.md) |
-| #955 | test-count gate | shape no-ops (per-branch map); counting bug; dead weight; template checkbox suggested | CLOSED; cheaper alternative **executed** — upstream PR #974 | [PR-955](PR-955-test-count-gate.md) |
+| #955 | test-count gate | shape no-ops (per-branch map); counting bug; dead weight; template checkbox suggested | CLOSED; cheaper alternative executed then withdrawn (upstream PR #974 opened, closed as noise by author); counting-bug class recorded as KB #6450 | [PR-955](PR-955-test-count-gate.md) |
 | #956 | streamable-HTTP transport | security critique (ACAO:* + no Origin validation); v2-scheduled; target shape specified | CLOSED; deferred to v2 | [PR-956](PR-956-streamable-http.md) |
 
 Cross-cutting ideas from the good feedback: [inspirations.md](inspirations.md).
@@ -34,7 +34,7 @@ Cross-cutting ideas from the good feedback: [inspirations.md](inspirations.md).
 
 | Plan | Result |
 |---|---|
-| #955 template checkbox | Upstream PR **#974** (`docs: add PR template with test-status checkbox`) — one markdown file, no CI changes |
+| #955 template checkbox | Upstream PR **#974** opened, then **closed as noise** by the author (2026-09-03) — a template prompts but cannot enforce; trigger re-recorded |
 | #936 drift guard | Shipped by the maintainer in `87325d8` (`package.test.mjs` version-source assertions); nothing to add |
 | #936 CI e2e | Deliberately **not** executed — reverses the maintainer's opt-in decision |
 

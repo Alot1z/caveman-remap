@@ -1,6 +1,8 @@
 # PR #955 — ci: gate PR bodies against actual test counts
 
-Status: **CLOSED** (2026-09-03). Shape cannot work; cheaper alternative given — **and executed** (upstream PR #974, 2026-09-03).
+Status: **CLOSED** (2026-09-03). Shape cannot work; cheaper alternative given —
+executed as upstream PR #974, then **withdrawn by the author as noise** (closed
+2026-09-03). Convention not adopted; plan stays recorded with its trigger.
 
 ## Feedback (verbatim key lines)
 
@@ -35,28 +37,33 @@ JuliusBrussee (closure):
   the hardcoded 183 vs derived 181 mismatch explained.
 - `statsPinPresent`: **dead weight** post-#954-merge.
 - env PR_BODY handling: **endorsed** as the correct pattern.
-- Suggested replacement: **PR template checkbox** — **EXECUTED** as upstream PR #974
-  (`docs: add PR template with test-status checkbox`, `.github/PULL_REQUEST_TEMPLATE.md`,
-  one file, no CI changes).
+- Suggested replacement: **PR template checkbox** — **EXECUTED, then withdrawn**: opened as
+  upstream PR #974 (`docs: add PR template with test-status checkbox`,
+  `.github/PULL_REQUEST_TEMPLATE.md`, one file, no CI changes); **closed by the author the
+  same day** — the maintainer's own stance (CI already enforces the property that matters;
+  a template cannot force honesty) means the standing guard is not justified; the
+  recurring-problem precondition had only two in-campaign occurrences.
 
 ## Plan (execution log)
 
-1. **PR template checkbox** (the maintainer's cheaper fix) — **DONE**: upstream
-   PR #974 adds `.github/PULL_REQUEST_TEMPLATE.md` with a verification checkbox
-   requiring actual counts (`N passed, M failed, K skipped`) or an explicit
-   "no testable code changed" statement, so a PR without a Test status section
-   does not pass silently.
+1. **PR template checkbox** (the maintainer's cheaper fix) — **DONE, then
+   withdrawn**: upstream PR #974 added `.github/PULL_REQUEST_TEMPLATE.md` with a
+   verification checkbox requiring actual counts (`N passed, M failed, K
+   skipped`) or an explicit "no testable code changed" statement. Closed the
+   same day as noise (see disposition): a template prompts but cannot force;
+   the "cheaper fix" stays cheaper only while asked for.
 2. **Do not re-attempt the gate** unless the maintainer asks; if asked later,
    the corrected design must (a) derive counts from a single parse of the test
    output, (b) not require per-branch config, and (c) not reference merged
    PRs' choreography.
-3. Record the regex-overlap counting-bug class as a review checklist item.
+3. Record the regex-overlap counting-bug class as a review checklist item — **done**:
+   KB #6450 (root-cause, OBSERVED, TRUSTED via verify-gate, 2026-09-03).
 
 ## Trigger
 
-~~User wants the convention adopted~~ — fired 2026-09-03; #974 is the result.
-Remaining: #974 needs maintainer approval/merge (fork-head CI runs wait on the
-approval gate; the change is a markdown file).
+~~User wants the convention adopted~~ — fired and resolved 2026-09-03: #974 was
+opened, then closed as noise by the author. Re-open only if the maintainer asks
+for the checkbox; otherwise the recorded lesson (item 3) is the durable output.
 
 ## Lesson (recorded)
 

@@ -9,6 +9,9 @@ The maintainer's own cheaper alternative to the rejected gate: a PR-template
 checkbox that the Test-counts line matches the latest local run. Home: the
 fork's PR template. Trigger: adopting the convention in the fork.
 
+Status: executed as upstream #974 then **withdrawn as noise** (2026-09-03) —
+see BACKLOG.md #1 for the re-evaluation. Durable output: KB #6450.
+
 ## 2. Firefox e2e in CI, properly pinned (from #936)
 
 `test:firefox` currently falls back to a bare `npx web-ext` (unpinned download

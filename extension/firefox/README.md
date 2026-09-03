@@ -9,9 +9,10 @@ Differences from the Chrome manifest:
 - `browser_specific_settings.gecko.id` — a UUID-style id (`{2bcb73e7-…}`). AMO add-on ids
   are permanent, and a UUID-style id makes no domain claim. Must not change once
   published.
-- `strict_min_version` 121.0 — a conservative MV3 floor; the extension is tested on
-  current stable Firefox. (Firefox MV3 runs `background.scripts` event pages, not
-  service workers, so the version rationale is unrelated to service-worker support.)
+- `strict_min_version` 142.0 — the floor required by
+  `browser_specific_settings.gecko.data_collection_permissions` (mandatory AMO disclosure;
+  Firefox desktop 140+, Firefox for Android 142+). All runtime APIs used (content scripts,
+  storage, event-page background) are far older than 142.
 - Icons omit the non-standard 32px key.
 - Background uses the Firefox MV3 event-page form: `"background": { "scripts": ["src/background.js"] }`.
   Firefox does not run `background.service_worker`; the Chrome manifest keeps the
@@ -23,13 +24,20 @@ Differences from the Chrome manifest:
 
 ## Load (temporary, local test)
 
+Load a **staged build**, not the raw template — the template intentionally carries no
+`version` field (injected at pack time), and Firefox rejects a versionless manifest:
+
+```bash
+node extension/scripts/build-extension-zip.mjs firefox   # writes dist/stage/ + dist/*.zip
+```
+
 1. `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on**.
-2. Select `manifest.json` from `extension/firefox/`.
-3. Because Firefox packs the folder that *contains* the manifest, the shared files resolve
-   from `extension/`; if you load `firefox/` standalone, copy the referenced shared assets
-   in.A packaged build can alternatively be produced from the `extension/` root by pointing
-  the publish step at `firefox/manifest.json`. The ZIP is built from the shared `extension/`
-  root (WebExtensions forbid `../` escapes), swapping in this Firefox manifest at `manifest.json`.
+2. Select `extension/dist/stage/manifest.json` (version injected, AMO-lint clean), or
+   install `dist/caveman-browser-firefox-<ver>.zip`.
+
+(Loading `extension/firefox/manifest.json` directly fails by design: no `version` field.
+If you must load a folder, copy the shared referenced assets in and add a version locally —
+but the staged build is the supported path.)
 
 ## Pack for AMO
 

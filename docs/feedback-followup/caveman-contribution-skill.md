@@ -7,9 +7,8 @@ description: >-
   review patterns, baseline-first CI discipline, and the plan-only drafts
   surface. Use when contributing to caveman, drafting PRs, responding to
   maintainer feedback, or deciding whether a change should reach upstream at
-  all. Harness-neutral — one SKILL.md that works in any agent harness.
-version: 1.0.0
-domain: contribution
+  all. Harness-neutral — one SKILL.md that works in any agent harness.version: 1.1.0
+ domain: contribution
 tokens: 1100
 ---
 
@@ -152,8 +151,28 @@ git fetch origin && git fetch upstream   # upstream = JuliusBrussee/caveman
 - Before opening: re-check the CURRENT tree — the maintainer ships follow-ups
   fast (e.g. the #936 drift guard landed in `87325d8` before any fork draft).
 
-### Maintainer review patterns (JuliusBrussee, observed)
+### Maintainer review patterns (JuliusBrussee, corpus-verified — KB #6507)
 
+Read from 274 substantive closure/feedback comments, 2026-09-03:
+
+- **THE standing bar:** any new mode/language/behavior needs reproducible
+  quality/token evidence + full runtime coverage, or it is closed — Korean
+  #54/#215, Japanese #85, Spanish #118, Russian #144, Turkish #179, "precise"
+  #302. One trial is not a benchmark (#143); cached cost is not token
+  reduction; wrong-tokenizer measurements cannot support honest savings
+  claims (#73); a canary that itself spends tokens contradicts the contract
+  (#236).
+- **Implemented/superseded discipline:** "equivalent behavior is now on main
+  through <commit>, shipped in tag <tag>" — check main BEFORE building;
+  old-layout patches are closed as superseded (unified architecture, below).
+- **False integration claims are closed** (#132: "does not integrate with
+  ChatGPT; only changes wording").
+- **Invented settings/contracts are closed** (#192: `pluginConfigs.defaultLevel`
+  is not a contract; supported = `CAVEMAN_DEFAULT_MODE` or
+  `.caveman/config.json`; #269: a label without a behavior contract is
+  unsafe).
+- **Safety regressions outweigh cleanup** (#116: `--force` regression on a
+  destructive tool).
 - **Shape first:** small single-purpose units; 650-line multi-behavior diffs
   are rejected (#931). One PR = one behavior.
 - **No dead weight:** nothing referencing merged-PR choreography in CI (#955).
@@ -166,7 +185,20 @@ git fetch origin && git fetch upstream   # upstream = JuliusBrussee/caveman
   blocks, read-only permissions (#955 credit).
 - **Zero-egress tests must assert** — "skipped by filename" is not a test
   (#956 critique).
-- Reviewers: JuliusBrussee (maintainer) and AmirF194 (in-depth inline review).
+- Praise triggers: "follows existing patterns exactly"; standalone; does not
+  touch core SKILL.md.
+
+### Second reviewer (AmirF194, corpus-verified — KB #6508)
+
+- **Oracle-verified reviews:** clones the PR head into a clean container
+  (node:20-alpine / python:3.12-slim) and re-runs the changed code, reporting
+  measured before/after (#794/#798/#889/#891/#896). Match this bar in PR
+  bodies.
+- Credits main's fixes while confirming the gap was real (#590/#615).
+- Cross-PR awareness: flags overlapping PRs on the same file (#795→#849).
+- Queue hygiene: self-closes stale PRs; six open PRs at once is "more review
+  load than is reasonable" for a solo-maintained project (#636).
+- Scope lift-outs: names files that belong in a separate PR (#654).
 
 ## L4 — Deep Context (on demand — all in the KB)
 
@@ -182,6 +214,11 @@ git fetch origin && git fetch upstream   # upstream = JuliusBrussee/caveman
 | Go shrink tests environmental baseline | #6460 |
 | Windows symlink EPERM baseline | #6461 |
 | Full corpus + phased mining plan | knowledge/caveman/CORPUS-INDEX.md |
+| JuliusBrussee closure taxonomy (standing bar) | #6507 |
+| AmirF194 oracle-review style | #6508 |
+| Rejected-shape taxonomy (8 classes) | #6509 |
+| Issue topography / defect clusters | #6510 |
+| Unified provider/compiler architecture | #6511 |
 
 ### Baselines (record BEFORE attributing failures)
 
@@ -191,6 +228,17 @@ git fetch origin && git fetch upstream   # upstream = JuliusBrussee/caveman
   writes) — KB #6460.
 - Windows: symlink tests EPERM without elevation/Developer Mode — KB #6461;
   bash-hook command parsing fails in some Windows env checks (#966).
+
+### Unified provider/compiler architecture (KB #6511)
+
+All host integrations (Copilot #48, Codex #67/#241/#273, Kiro #87/#139/#219,
+Warp #91, Antigravity #117, OpenCode #284, Pi #162/#274, Gemini #390, Kimi
+#315) ship through ONE shared path — provider profiles, `agents/compile.mjs`
+frontmatter transformation, the plugin/config registry, the installer —
+never checked-in mirrors. Directly editing synced copies is obsolete (#337);
+checked-in mirrors are "no longer owned here" (#117); a shadowing copy can
+make the wrong body win (#333). A new host lands as a verified profile
+adapter through the shared path, never a standalone mirror tree.
 
 ### Extension facts
 
@@ -220,4 +268,14 @@ git fetch origin && git fetch upstream   # upstream = JuliusBrussee/caveman
   (uv-gated via `_bmad/scripts/render_skill.py`); use them only when a build
   iteration loop is actually warranted (proportionality, KB #6313).
 - Mirroring this skill to other profiles (jacob/Administrator/mccr) requires
-  user authorization — Mose's base is the primary copy (v1.0.0).
+  user authorization — Mose's base is the primary copy (v1.1.0).
+
+## Version history
+
+- **1.1.0 (2026-09-03):** corpus slices 1–3 folded in — JuliusBrussee
+  closure taxonomy + standing evidence bar (KB #6507), AmirF194
+  oracle-review style (KB #6508), rejected-shape taxonomy (KB #6509),
+  issue topography (KB #6510), unified provider/compiler architecture
+  (KB #6511). Evidence-grounded only; no invented patterns.
+- **1.0.0 (2026-09-03):** initial skill from ix-contribution's ladder with
+  verified session ground truth.

@@ -7,7 +7,8 @@ description: >-
   review patterns, baseline-first CI discipline, and the plan-only drafts
   surface. Use when contributing to caveman, drafting PRs, responding to
   maintainer feedback, or deciding whether a change should reach upstream at
-  all. Harness-neutral — one SKILL.md that works in any agent harness.version: 1.1.0
+  all. Harness-neutral — one SKILL.md that works in any agent harness.
+version: 1.2.0
  domain: contribution
 tokens: 1100
 ---
@@ -262,6 +263,9 @@ adapter through the shared path, never a standalone mirror tree.
 
 ## Cross-cutting
 
+- The 16-step lifecycle gate lives in `/caveman-contribution-lifecycle`
+  (ground-truth-before-draft, rejection-class screen vs KB #6509, red/green
+  bar, CI termination facts KB #6449) — run it before any draft becomes a PR.
 - This skill is one file, readable by any harness; token/auth handling is
   mechanical (L1) — no client auth flow, no popups.
 - `bmad-build`/`bmad-build-auto` live in the fork checkout's `.claude/skills`
@@ -272,6 +276,10 @@ adapter through the shared path, never a standalone mirror tree.
 
 ## Version history
 
+- **1.2.0 (2026-09-03):** companion `/caveman-contribution-lifecycle`
+  created (16-step gate: ground-truth-before-draft, rejection-class screen,
+  CI termination facts, red/green bar) — this skill now points at it for the
+  gate; fixed the frontmatter (version key was glued into the description).
 - **1.1.0 (2026-09-03):** corpus slices 1–3 folded in — JuliusBrussee
   closure taxonomy + standing evidence bar (KB #6507), AmirF194
   oracle-review style (KB #6508), rejected-shape taxonomy (KB #6509),

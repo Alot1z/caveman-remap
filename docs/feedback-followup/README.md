@@ -27,6 +27,11 @@ Right-sizing review of every campaign PR + remaining micro-tasks:
 Caveman contribution workflow skill (mirrors ix-contribution):
 [caveman-contribution-skill.md](caveman-contribution-skill.md) — primary copy
 at `~/.agents/skills/caveman-contribution/SKILL.md`.
+Caveman contribution lifecycle gate (mirrors ix-contribution-lifecycle):
+[caveman-contribution-lifecycle-skill.md](caveman-contribution-lifecycle-skill.md)
+— 16-step gate (ground-truth-before-draft, rejection-class screen, red/green
+bar), primary copy at
+`~/.agents/skills/caveman-contribution-lifecycle/SKILL.md`.
 First #934-lane candidate — ground-truthed:
 [PR-OPENCODE-SCHEMA.md](PR-OPENCODE-SCHEMA.md) — verdict
 OBSERVED-AS-REFUTED: the opencode-go compat seam is already handled on

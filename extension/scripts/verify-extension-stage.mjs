@@ -51,6 +51,10 @@ function manifestReferences(manifest) {
   const refs = [];
   if (manifest.action?.default_popup) refs.push(manifest.action.default_popup);
   if (manifest.background?.service_worker) refs.push(manifest.background.service_worker);
+  // Firefox MV3 runs background event pages via `background.scripts` (no service_worker
+  // support); validate those references too so the Firefox-staged manifest cannot
+  // reference a file outside the allowlist.
+  for (const script of manifest.background?.scripts ?? []) refs.push(script);
   refs.push(...Object.values(manifest.icons ?? {}));
   refs.push(...Object.values(manifest.action?.default_icon ?? {}));
   for (const script of manifest.content_scripts ?? []) {

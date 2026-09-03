@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -12,6 +12,26 @@ test("store package allowlist covers every runtime reference", () => {
   const result = verifyExtensionRoot(extensionRoot);
   assert.equal(result.manifest.manifest_version, 3);
   assert.equal(result.files.length, SHIPPABLE_FILES.length);
+});
+
+test("firefox manifest template is AMO-safe and version-injected at pack time", () => {
+  const pkg = JSON.parse(readFileSync(join(extensionRoot, "package.json"), "utf8"));
+  const chrome = JSON.parse(readFileSync(join(extensionRoot, "manifest.json"), "utf8"));
+  // single version source: package.json == Chrome manifest
+  assert.equal(pkg.version, chrome.version);
+  const ff = JSON.parse(readFileSync(join(extensionRoot, "firefox/manifest.json"), "utf8"));
+  // AMO ids are permanent and must claim no domain: UUID-style, exactly
+  assert.match(
+    ff.browser_specific_settings.gecko.id,
+    /^\{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}$/,
+  );
+  // Firefox MV3 runs background event pages via `scripts`; never `service_worker`
+  assert.deepEqual(ff.background?.scripts, ["src/background.js"]);
+  assert.equal(ff.background?.service_worker, undefined);
+  // no driftable hardcoded version in the template: the builder injects the shared one
+  assert.equal(ff.version, undefined);
+  const staged = { ...ff, version: chrome.version };
+  assert.equal(staged.version, pkg.version);
 });
 
 test("stage verifier rejects files outside explicit allowlist", () => {

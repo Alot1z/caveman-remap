@@ -6,12 +6,20 @@ behaviour is identical to Chrome; only the manifest is Firefox-tuned.
 
 Differences from the Chrome manifest:
 
-- `browser_specific_settings.gecko.id` (+ `strict_min_version` 121, first stable MV3
-  service-worker support). Firefox requires a stable add-on ID for AMO; the value lives
-  here and must not change once published.
+- `browser_specific_settings.gecko.id` — a UUID-style id (`{2bcb73e7-…}`). AMO add-on ids
+  are permanent, and a UUID-style id makes no domain claim. Must not change once
+  published.
+- `strict_min_version` 121.0 — a conservative MV3 floor; the extension is tested on
+  current stable Firefox. (Firefox MV3 runs `background.scripts` event pages, not
+  service workers, so the version rationale is unrelated to service-worker support.)
 - Icons omit the non-standard 32px key.
-- Background stays a single MV3 `service_worker` declaration (no dual
-  `service_worker` + `scripts` block — WebExtensions reject both keys together).
+- Background uses the Firefox MV3 event-page form: `"background": { "scripts": ["src/background.js"] }`.
+  Firefox does not run `background.service_worker`; the Chrome manifest keeps the
+  service-worker key, the Firefox manifest uses `scripts`.
+- **No `version` field.** The `firefox` pack target injects the version from the shared
+  source (`package.json` == Chrome manifest, validated by
+  `scripts/build-extension-zip.mjs`) at pack time, so the two manifests can never drift
+  (see Pack for AMO below).
 
 ## Load (temporary, local test)
 
@@ -33,15 +41,12 @@ node extension/scripts/build-extension-zip.mjs            # -> dist/caveman-brow
 ```
 
 The Firefox zip stages the same shared runtime files flat (`icons/`, `src/`, `popup.*`) with this
-root-relative manifest (`manifest_version:3` + `browser_specific_settings.gecko`), verified against
-the package allowlist, so it uploads as `manifest_version:3` to addons.mozilla.org. No store-asset
-or popup changes are the responsibility of this target.
+root-relative manifest (`manifest_version:3` + `browser_specific_settings.gecko`), injects the
+shared version, and verifies the stage against the package allowlist (including the
+`background.scripts` reference), so it uploads as `manifest_version:3` to addons.mozilla.org. No
+store-asset or popup changes are the responsibility of this target.
 
 ## Why this exists
 
 https://github.com/JuliusBrussee/caveman/issues/810 — Firefox parity with the Chrome
-extension so Firefox users also get caveman mode on ChatGPT, Claude and Gemini.
-
----
-
-Co-Authored-By: Alot1z <Alot1z@users.noreply.github.com>
+extension so Firefox users also get caveman mode on ChatGPT, Claude and Gemini.---

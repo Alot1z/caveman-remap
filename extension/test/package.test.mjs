@@ -58,3 +58,30 @@ test("stage verifier rejects files outside explicit allowlist", () => {
     rmSync(stage, { recursive: true, force: true });
   }
 });
+
+test("stage verifier rejects relative url() in content-script css (KB #6441 guard)", () => {
+  const stage = mkdtempSync(join(tmpdir(), "caveman-extension-stage-"));
+  try {
+    for (const file of SHIPPABLE_FILES) {
+      const target = join(stage, file);
+      mkdirSync(dirname(target), { recursive: true });
+      copyFileSync(join(extensionRoot, file), target);
+    }
+    // the same reference in an extension-page css (popup.css) is legitimate and
+    // must NOT trip the guard — it resolves against the extension origin
+    const popupCss = join(stage, "popup.css");
+    writeFileSync(popupCss, readFileSync(popupCss, "utf8") + "\n@font-face { src: url(fonts/geist-sans.woff2); }\n");
+    verifyExtensionRoot(stage, { exact: true });
+    // plant the exact D1 shape: a relative url() in the css the manifest
+    // registers as a content_scripts stylesheet (injected into pages, so the
+    // url() would resolve against the page origin and never load — KB #6441)
+    const css = join(stage, "src/indicator.css");
+    writeFileSync(css, readFileSync(css, "utf8") + "\n@font-face { src: url(../fonts/geist-mono.woff2); }\n");
+    assert.throws(
+      () => verifyExtensionRoot(stage, { exact: true }),
+      /content-script stylesheet src\/indicator\.css references "\.\.\/fonts\/geist-mono\.woff2" with a relative url\(\)/,
+    );
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
+});

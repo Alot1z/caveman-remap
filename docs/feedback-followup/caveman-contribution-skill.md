@@ -8,17 +8,19 @@ description: >-
   surface. Use when contributing to caveman, drafting PRs, responding to
   maintainer feedback, or deciding whether a change should reach upstream at
   all. Harness-neutral — one SKILL.md that works in any agent harness.
-version: 1.2.0
- domain: contribution
+version: 1.3.0
 tokens: 1100
 ---
 
 # Caveman Contribution Skill (v1)
 
 Complete workflow and knowledge for contributing to the caveman project
-(JuliusBrussee/caveman) through the Alot1z/caveman-remap fork. All facts below
-were OBSERVED on 2026-09-03 from the live API and CI (see KB entries cited
-inline; full corpus: `knowledge/caveman/CORPUS-INDEX.md`).
+(JuliusBrussee/caveman) through the Alot1z/caveman-remap fork. This file
+holds PROCEDURE + pointers only; every verified fact (CI mechanics, standing
+bar, reviewer patterns, taxonomy, architecture, provider map) lives in
+`FACTS.md` beside this skill, with its KB citations. Full corpus:
+`knowledge/caveman/CORPUS-INDEX.md`; narrative ledger:
+`session-digests/2026-09-03-caveman-upstream-mission.md`.
 
 ## Level map
 
@@ -39,7 +41,7 @@ inline; full corpus: `knowledge/caveman/CORPUS-INDEX.md`).
 
 | Thing | Reality |
 |---|---|
-| Upstream `JuliusBrussee/caveman` | The target. **No branch protection** — merged PRs need no CI green (KB #6449). Fork PRs land by maintainer merge. |
+| Upstream `JuliusBrussee/caveman` | The target. **No branch protection** — merged PRs need no CI green (facts: FACTS.md §1). Fork PRs land by maintainer merge. |
 | Fork `Alot1z/caveman-remap` | The writable sandbox. Local checkout: `E:/E-github-repos/my-claude-code-repos/caveman-remap` (has `.claude/skills`, `_bmad/`). |
 | Drafts surface | `docs/feedback-followup/` on branch `docs/feedback-followup-drafts` → fork-local DRAFT PR #2 (plan-only docs: per-PR plans, BACKLOG.md, PR-SPLIT-ANALYSIS.md). |
 
@@ -60,7 +62,7 @@ inline; full corpus: `knowledge/caveman/CORPUS-INDEX.md`).
 6. **Evidence never upgrades silently** (FSP): OBSERVED/VERIFIED claims carry
    an oracle + date; baseline-vs-regression must be distinguished.
 
-### When NOT to open a PR (observed rejections)
+### When NOT to open a PR (observed rejections — taxonomy: FACTS.md §4)
 
 - New product surfaces (#933 l4 runtime — "scope-narrowing repo").
 - Parallel subsystems that duplicate the Go binary (#934 — MCP surface work
@@ -117,19 +119,18 @@ git fetch origin && git fetch upstream   # upstream = JuliusBrussee/caveman
   `git diff upstream/main --stat` shows exactly the intended files.
 - PR heads are addressed `Alot1z:<branch>` when opening upstream PRs.
 
-### CI mechanics — the fork-PR approval gate (KB #6449, OBSERVED)
+### CI mechanics — the fork-PR approval gate (facts: FACTS.md §1, KB #6449)
 
-- Fork-head `pull_request` runs queue behind the base repo's approval gate:
-  `mergeable_state=unstable`, `mergeable=true`, checks pending/`action_required`.
-  No fork-side action (rerun, empty-commit push) clears it.
-- **At the merge second GitHub TERMINATES the still-queued runs** (18:32:13 /
-  18:32:17 / 18:39:17 on 2026-09-03) — they never execute a job; their
-  `failure` conclusion is a termination artifact, NOT a code failure.
-- Real validation = the squash-commit runs on main (all-green for #954/#957).
-- Merged PRs need no CI green (no branch protection).
-- The maintainer acts fast once an ask is surfaced (~30 min observed).
-- Evidence discipline: post CI evidence only on state change; name the run IDs
-  and trees.
+The gate's verified mechanics (queue → termination at the merge second →
+validation on squash-commit runs on main) are in FACTS.md §1. Operating
+rules derived from them:
+
+- Expect fork-head runs to sit queued (`mergeable_state=unstable`); no
+  fork-side rerun or empty-commit push clears it.
+- Never read a `failure` conclusion at the merge second as a code failure;
+  read validation from the squash-commit runs on main.
+- Evidence discipline: post CI evidence only on state change; name the run
+  IDs and trees.
 
 ## L3 — Authoring
 
@@ -152,54 +153,13 @@ git fetch origin && git fetch upstream   # upstream = JuliusBrussee/caveman
 - Before opening: re-check the CURRENT tree — the maintainer ships follow-ups
   fast (e.g. the #936 drift guard landed in `87325d8` before any fork draft).
 
-### Maintainer review patterns (JuliusBrussee, corpus-verified — KB #6507)
+### Maintainer review patterns (facts: FACTS.md §2–§3, KB #6507/#6508)
 
-Read from 274 substantive closure/feedback comments, 2026-09-03:
-
-- **THE standing bar:** any new mode/language/behavior needs reproducible
-  quality/token evidence + full runtime coverage, or it is closed — Korean
-  #54/#215, Japanese #85, Spanish #118, Russian #144, Turkish #179, "precise"
-  #302. One trial is not a benchmark (#143); cached cost is not token
-  reduction; wrong-tokenizer measurements cannot support honest savings
-  claims (#73); a canary that itself spends tokens contradicts the contract
-  (#236).
-- **Implemented/superseded discipline:** "equivalent behavior is now on main
-  through <commit>, shipped in tag <tag>" — check main BEFORE building;
-  old-layout patches are closed as superseded (unified architecture, below).
-- **False integration claims are closed** (#132: "does not integrate with
-  ChatGPT; only changes wording").
-- **Invented settings/contracts are closed** (#192: `pluginConfigs.defaultLevel`
-  is not a contract; supported = `CAVEMAN_DEFAULT_MODE` or
-  `.caveman/config.json`; #269: a label without a behavior contract is
-  unsafe).
-- **Safety regressions outweigh cleanup** (#116: `--force` regression on a
-  destructive tool).
-- **Shape first:** small single-purpose units; 650-line multi-behavior diffs
-  are rejected (#931). One PR = one behavior.
-- **No dead weight:** nothing referencing merged-PR choreography in CI (#955).
-- **Security is checked end-to-end:** #956's ACAO:* exploit was verified
-  live from a foreign Origin (any open web page can drive local MCP tools and
-  read `~/.caveman/ccr.db` — KB #6451). Local HTTP/MCP servers must validate
-  Origin + require auth.
-- **env-based inputs endorsed:** `PR_BODY` env handling with
-  `pull_request` (never `pull_request_target`), no template expansion in run
-  blocks, read-only permissions (#955 credit).
-- **Zero-egress tests must assert** — "skipped by filename" is not a test
-  (#956 critique).
-- Praise triggers: "follows existing patterns exactly"; standalone; does not
-  touch core SKILL.md.
-
-### Second reviewer (AmirF194, corpus-verified — KB #6508)
-
-- **Oracle-verified reviews:** clones the PR head into a clean container
-  (node:20-alpine / python:3.12-slim) and re-runs the changed code, reporting
-  measured before/after (#794/#798/#889/#891/#896). Match this bar in PR
-  bodies.
-- Credits main's fixes while confirming the gap was real (#590/#615).
-- Cross-PR awareness: flags overlapping PRs on the same file (#795→#849).
-- Queue hygiene: self-closes stale PRs; six open PRs at once is "more review
-  load than is reasonable" for a solo-maintained project (#636).
-- Scope lift-outs: names files that belong in a separate PR (#654).
+Read from 274 substantive closure/feedback comments, 2026-09-03 — the full
+verified pattern set (standing evidence bar, closure taxonomy,
+AmirF194's oracle-review style) is in FACTS.md §2–§3. Screen every PR body
+against it: match the standing bar with measured evidence + full runtime
+coverage, and AmirF194's container-oracle bar with measured before/after.
 
 ## L4 — Deep Context (on demand — all in the KB)
 
@@ -230,16 +190,12 @@ Read from 274 substantive closure/feedback comments, 2026-09-03:
 - Windows: symlink tests EPERM without elevation/Developer Mode — KB #6461;
   bash-hook command parsing fails in some Windows env checks (#966).
 
-### Unified provider/compiler architecture (KB #6511)
+### Unified provider/compiler architecture (facts: FACTS.md §5, KB #6511)
 
-All host integrations (Copilot #48, Codex #67/#241/#273, Kiro #87/#139/#219,
-Warp #91, Antigravity #117, OpenCode #284, Pi #162/#274, Gemini #390, Kimi
-#315) ship through ONE shared path — provider profiles, `agents/compile.mjs`
-frontmatter transformation, the plugin/config registry, the installer —
-never checked-in mirrors. Directly editing synced copies is obsolete (#337);
-checked-in mirrors are "no longer owned here" (#117); a shadowing copy can
-make the wrong body win (#333). A new host lands as a verified profile
-adapter through the shared path, never a standalone mirror tree.
+All hosts ship through ONE shared path; synced mirrors are obsolete —
+directly editing a synced copy is structurally wrong, and a new host lands
+as a verified profile adapter through the shared path (details in
+FACTS.md §5).
 
 ### Extension facts
 
@@ -264,8 +220,8 @@ adapter through the shared path, never a standalone mirror tree.
 ## Cross-cutting
 
 - The 16-step lifecycle gate lives in `/caveman-contribution-lifecycle`
-  (ground-truth-before-draft, rejection-class screen vs KB #6509, red/green
-  bar, CI termination facts KB #6449) — run it before any draft becomes a PR.
+  (model: FACTS.md §7; facts it gates on: FACTS.md §1/§2/§4) — run it before
+  any draft becomes a PR.
 - This skill is one file, readable by any harness; token/auth handling is
   mechanical (L1) — no client auth flow, no popups.
 - `bmad-build`/`bmad-build-auto` live in the fork checkout's `.claude/skills`
@@ -276,6 +232,11 @@ adapter through the shared path, never a standalone mirror tree.
 
 ## Version history
 
+- **1.3.0 (2026-09-04):** verified facts consolidated into `FACTS.md`
+  beside this skill (CI mechanics §1, standing bar/taxonomy §2–§3, rejected
+  shapes §4, unified architecture §5, per-host provider map §6, 16-step gate
+  model §7); this file keeps procedure + pointers only. Also fixed the stray
+  `domain:` frontmatter line.
 - **1.2.0 (2026-09-03):** companion `/caveman-contribution-lifecycle`
   created (16-step gate: ground-truth-before-draft, rejection-class screen,
   CI termination facts, red/green bar) — this skill now points at it for the
